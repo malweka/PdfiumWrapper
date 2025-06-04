@@ -1,0 +1,32 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+	<PropertyGroup>
+		<TargetFramework>net8.0</TargetFramework>
+		<ImplicitUsings>enable</ImplicitUsings>
+		<AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+		<Nullable>enable</Nullable>
+	</PropertyGroup>
+	<ItemGroup Condition="'$(RuntimeIdentifier)' == 'win-x64' OR '$(RuntimeIdentifier)' == '' AND $([MSBuild]::IsOSPlatform('Windows'))">
+		<Content Include="../libs/win-x64/pdfium.dll">
+			<CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+			<Link>pdfium.dll</Link>
+		</Content>
+	</ItemGroup>
+
+	<ItemGroup Condition="'$(RuntimeIdentifier)' == 'linux-x64' OR '$(RuntimeIdentifier)' == '' AND $([MSBuild]::IsOSPlatform('Linux'))">
+		<Content Include="../libs/linux-x64/libpdfium.so">
+			<CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+			<Link>libpdfium.so</Link>
+		</Content>
+	</ItemGroup>
+
+	<ItemGroup Condition="'$(RuntimeIdentifier)' == 'osx-x64' OR '$(RuntimeIdentifier)' == '' AND $([MSBuild]::IsOSPlatform('OSX'))">
+		<Content Include="../libs/osx-x64/libpdfium.dylib">
+			<CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+			<Link>libpdfium.dylib</Link>
+		</Content>
+	</ItemGroup>
+	<ItemGroup>
+		<PackageReference Include="SkiaSharp" Version="3.119.0" />
+	</ItemGroup>
+</Project>
