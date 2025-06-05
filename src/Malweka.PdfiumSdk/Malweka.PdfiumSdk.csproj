@@ -27,6 +27,9 @@
 		</Content>
 	</ItemGroup>
 	<ItemGroup>
-		<PackageReference Include="SkiaSharp" Version="3.119.0" />
+		<!--<PackageReference Include="SkiaSharp" Version="3.119.0" />-->
+		<PackageReference Include="Magick.NET-Q16-AnyCPU" Version="14.6.0" />
+		<PackageReference Include="ExifLibNet" Version="2.1.4" />
+		<!--<PackageReference Include="ExifLib" Version="1.7.0" />-->
 	</ItemGroup>
 </Project>

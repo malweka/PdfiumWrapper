@@ -1,6 +1,7 @@
 ﻿using System.Runtime.InteropServices;
-using SkiaSharp;
-using static System.Net.Mime.MediaTypeNames;
+using ExifLibrary;
+using ImageMagick;
+using ExifTag = ImageMagick.ExifTag;
 
 namespace Malweka.PdfiumSdk;
 
@@ -55,34 +56,21 @@ public class PdfDocument : IDisposable
         return new PdfPage(_document, pageIndex);
     }
 
-    public void ConvertToTiff(string outputPath, int dpi = 300)
+    public void ConvertToTiff(string outputPath, int dpi = 300, CompressionMethod compression = CompressionMethod.LZW)
     {
         if (PageCount == 0)
             throw new InvalidOperationException("Document has no pages");
 
-        var pages = new List<SKImage>();
+        using var images = new MagickImageCollection();
 
-        try
+        for (int i = 0; i < PageCount; i++)
         {
-            // Render all pages to SKImages
-            for (int i = 0; i < PageCount; i++)
-            {
-                using var page = GetPage(i);
-                var skImage = RenderPageToSkImage(page, dpi);
-                pages.Add(skImage);
-            }
+            using var page = GetPage(i);
+            var magickImage = RenderPageToMagickImage(page, dpi, compression);
+            images.Add(magickImage);
+        }
 
-            // Create multi-page TIFF
-            SaveAsMultiPageTiff(pages, outputPath);
-        }
-        finally
-        {
-            // Dispose all SKImages
-            foreach (var image in pages)
-            {
-                image?.Dispose();
-            }
-        }
+        images.Write(outputPath);
     }
 
     public void ConvertToPngs(string outputDirectory, string fileNamePrefix = "page", int dpi = 300)
@@ -90,98 +78,189 @@ public class PdfDocument : IDisposable
         if (PageCount == 0)
             throw new InvalidOperationException("Document has no pages");
 
-        Directory.CreateDirectory(outputDirectory);
+        if (!Directory.Exists(outputDirectory))
+            Directory.CreateDirectory(outputDirectory);
 
         for (int i = 0; i < PageCount; i++)
         {
             using var page = GetPage(i);
-            using var skImage = RenderPageToSkImage(page, dpi);
+            using var magickImage = RenderPageToMagickImage(page, dpi);
 
             var fileName = $"{fileNamePrefix}_{i + 1:D3}.png";
             var filePath = Path.Combine(outputDirectory, fileName);
 
-            using var data = skImage.Encode(SKEncodedImageFormat.Png, 100);
-            File.WriteAllBytes(filePath, data.ToArray());
+            magickImage.Format = MagickFormat.Png;
+            magickImage.Write(filePath);
+            //AddExifToFile(filePath, magickImage.Width > magickImage.Height); // Add EXIF based on orientation
+        }
+        
+    }
+
+    public void ConvertToJpeg(string outputDirectory, string fileNamePrefix = "page", int dpi = 300)
+    {
+        if (PageCount == 0)
+            throw new InvalidOperationException("Document has no pages");
+
+        if (!Directory.Exists(outputDirectory))
+            Directory.CreateDirectory(outputDirectory);
+
+        for (int i = 0; i < PageCount; i++)
+        {
+            using var page = GetPage(i);
+            using var magickImage = RenderPageToMagickImage(page, dpi);
+
+            var fileName = $"{fileNamePrefix}_{i + 1:D3}.jpg";
+            var filePath = Path.Combine(outputDirectory, fileName);
+
+            magickImage.Format = MagickFormat.Jpg;
+            magickImage.Write(filePath);
+            AddExifToFile(filePath, magickImage.Width > magickImage.Height); // Add EXIF based on orientation
+        }
+
+    }
+
+    private void AddExifToFile(string filePath, bool isLandscape)
+    {
+        try
+        {
+            var extension = Path.GetExtension(filePath).ToLowerInvariant();
+
+            // ExifLib primarily works with JPEG
+            var image = ImageFile.FromFile(filePath);
+
+            // Set orientation
+            ushort orientationValue = (ushort)1; // Normal orientation
+            image.Properties.Set(ExifLibrary.ExifTag.Orientation, orientationValue);
+
+            // Add software tag
+            image.Properties.Set(ExifLibrary.ExifTag.Software, "PDFium Wrapper");
+
+            // Add timestamp
+            image.Properties.Set(ExifLibrary.ExifTag.DateTime, DateTime.Now);
+
+            // Save the changes
+            image.Save(filePath);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Failed to add EXIF to {filePath}: {ex.Message}");
         }
     }
 
-    private SKImage RenderPageToSkImage(PdfPage page, int dpi)
+    private MagickImage RenderPageToMagickImage(PdfPage page, int dpi, CompressionMethod? compression = null)
     {
-        var scale = dpi / 72.0f;
-        var width = (int)(page.Width * scale);
-        var height = (int)(page.Height * scale);
+        // Get original page dimensions in points
+        var originalWidthPoints = page.Width;
+        var originalHeightPoints = page.Height;
 
-        // Create SkiaSharp surface
-        var imageInfo = new SKImageInfo(width, height, SKColorType.Rgba8888, SKAlphaType.Premul);
-        using var surface = SKSurface.Create(imageInfo);
-        using var canvas = surface.Canvas;
+        // Convert to inches (points / 72)
+        var originalWidthInches = originalWidthPoints / 72.0;
+        var originalHeightInches = originalHeightPoints / 72.0;
 
-        // Clear canvas with white background
-        canvas.Clear(SKColors.White);
+        // US Letter dimensions in inches
+        const double US_LETTER_WIDTH_INCHES = 8.5;
+        const double US_LETTER_HEIGHT_INCHES = 11.0;
 
-        // Render PDF page to bytes using PDFium
-        var pdfBytes = page.RenderToBytes(width, height, PDFium.FPDF_ANNOT);
+        // Determine if page is landscape
+        bool isLandscape = originalWidthInches > originalHeightInches;
 
-        // Create SKBitmap from PDFium data (PDFium returns BGRA format)
-        var skImageInfo = new SKImageInfo(width, height, SKColorType.Bgra8888, SKAlphaType.Premul);
-        using var skBitmap = new SKBitmap(skImageInfo);
-        var pixels = skBitmap.GetPixels();
-
-        // Copy PDFium data to SKBitmap
-        Marshal.Copy(pdfBytes, 0, pixels, pdfBytes.Length);
-
-        // Draw bitmap to canvas
-        canvas.DrawBitmap(skBitmap, 0, 0);
-
-        // Return snapshot as SKImage
-        return surface.Snapshot();
-    }
-
-    private void SaveAsMultiPageTiff(List<SKImage> pages, string outputPath)
-    {//https://github.com/BitMiracle/libtiff.net/blob/master/license.txt
-        if (pages.Count == 0)
-            throw new ArgumentException("No pages to save");
-
-        if (pages.Count == 1)
+        // Calculate target dimensions for US Letter size in inches
+        double targetWidthInches, targetHeightInches;
+        if (isLandscape)
         {
-            // Single page TIFF
-            using var data = pages[0].Encode(SKEncodedImageFormat., 100);
-            File.WriteAllBytes(outputPath, data.ToArray());
+            // Landscape: swap US Letter dimensions
+            targetWidthInches = US_LETTER_HEIGHT_INCHES;  // 11 inches
+            targetHeightInches = US_LETTER_WIDTH_INCHES;  // 8.5 inches
         }
         else
         {
-            // Multi-page TIFF - SkiaSharp doesn't directly support multi-page TIFF
-            // So we'll create individual TIFFs and then combine them using a simple approach
-            // For a more robust solution, you might want to use a library like ImageSharp
+            // Portrait: use normal US Letter dimensions
+            targetWidthInches = US_LETTER_WIDTH_INCHES;   // 8.5 inches
+            targetHeightInches = US_LETTER_HEIGHT_INCHES; // 11 inches
+        }
 
-            var tempFiles = new List<string>();
-            try
+        // Calculate scale factors to fit within US Letter while maintaining aspect ratio
+        double scaleX = targetWidthInches / originalWidthInches;
+        double scaleY = targetHeightInches / originalHeightInches;
+        double scale = Math.Min(scaleX, scaleY); // Use the smaller scale to ensure it fits
+
+        // Don't upscale - if the document already fits, keep original size
+        scale = Math.Min(scale, 1.0);
+
+        // Calculate final dimensions in inches
+        double finalWidthInches = originalWidthInches * scale;
+        double finalHeightInches = originalHeightInches * scale;
+
+        // Convert to pixels based on DPI
+        uint finalWidthPixels = (uint)Math.Round(finalWidthInches * dpi);
+        uint finalHeightPixels = (uint)Math.Round(finalHeightInches * dpi);
+
+        // Render PDF page to bytes using PDFium
+        var pdfBytes = page.RenderToBytes((int)finalWidthPixels, (int)finalHeightPixels, PDFium.FPDF_ANNOT);
+
+        // Create MagickReadSettings for BGRA format
+        var settings = new MagickReadSettings()
+        {
+            Format = MagickFormat.Bgra,
+            Width = finalWidthPixels,
+            Height = finalHeightPixels,
+            Depth = 8
+        };
+
+        // Create MagickImage from PDFium data
+        var magickImage = new MagickImage(pdfBytes, settings);
+
+        // Set density and format
+        magickImage.Density = new Density(dpi, dpi, DensityUnit.PixelsPerInch);
+
+        // Set a white background (in case of transparency)
+        magickImage.BackgroundColor = MagickColors.White;
+        magickImage.Alpha(AlphaOption.Remove);
+
+        // Set EXIF orientation metadata
+        var exifProfile = magickImage.GetExifProfile();
+        if (exifProfile == null)
+        {
+            exifProfile = new ExifProfile();
+            magickImage.SetProfile(exifProfile);
+        }
+
+        exifProfile.SetValue(ExifTag.DateTime, DateTime.Now.ToString("yyyy:MM:dd HH:mm:ss"));
+        exifProfile.SetValue(ExifTag.Copyright, "Malweka.Pdfium");
+
+        // Set orientation based on landscape/portrait
+        if (isLandscape)
+        {
+            // Landscape orientation - EXIF orientation value 1 (normal, since we render correctly)
+            exifProfile.SetValue(ExifTag.Orientation, (ushort)6);
+        }
+        else
+        {
+            // Portrait orientation - EXIF orientation value 1 (normal/upright)
+            exifProfile.SetValue(ExifTag.Orientation, (ushort)1);
+        }
+
+        // Apply compression if specified (for TIFF)
+        if (compression.HasValue)
+        {
+            magickImage.Format = MagickFormat.Tiff;
+            magickImage.Settings.Compression = compression.Value;
+        }
+
+        magickImage.SetProfile(exifProfile);
+        return magickImage;
+    }
+
+    public void Dispose()
+    {
+        if (!_disposed)
+        {
+            if (_document != IntPtr.Zero)
             {
-                // Create temporary TIFF files for each page
-                for (int i = 0; i < pages.Count; i++)
-                {
-                    var tempFile = Path.GetTempFileName() + ".tiff";
-                    using var data = pages[i].Encode(SKEncodedImageFormat.Tiff, 100);
-                    File.WriteAllBytes(tempFile, data.ToArray());
-                    tempFiles.Add(tempFile);
-                }
-
-                // For now, we'll save the first page as the main TIFF
-                // Note: This is a limitation - for true multi-page TIFF support,
-                // consider using ImageSharp or another library
-                File.Copy(tempFiles[0], outputPath, true);
-
-                // If you need true multi-page TIFF, uncomment this warning:
-                // Console.WriteLine("Warning: Multi-page TIFF creation with SkiaSharp is limited. Consider using ImageSharp for full multi-page support.");
+                PDFium.FPDF_CloseDocument(_document);
+                _document = IntPtr.Zero;
             }
-            finally
-            {
-                // Clean up temporary files
-                foreach (var tempFile in tempFiles)
-                {
-                    try { File.Delete(tempFile); } catch { }
-                }
-            }
+            _disposed = true;
         }
     }
 }
