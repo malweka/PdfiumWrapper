@@ -1,13 +1,80 @@
-﻿using System.Runtime.InteropServices;
+﻿using System.Reflection;
+using System.Runtime.InteropServices;
 
 namespace Malweka.PdfiumSdk;
 
 /// <summary>
-/// C# wrapper for PDFium library using LibraryImport
+/// C# wrapper for PDFium library using LibraryImport with cross-platform support
 /// </summary>
 public static partial class PDFium
 {
     private const string LibraryName = "pdfium";
+
+    static PDFium()
+    {
+        // Set up custom library resolver for cross-platform loading
+        NativeLibrary.SetDllImportResolver(typeof(PDFium).Assembly, DllImportResolver);
+    }
+
+    private static IntPtr DllImportResolver(string libraryName, Assembly assembly, DllImportSearchPath? searchPath)
+    {
+        if (libraryName == "pdfium")
+        {
+            // Try to load the platform-specific library
+            string actualLibraryPath = GetNativeLibraryPath();
+            
+            if (File.Exists(actualLibraryPath))
+            {
+                return NativeLibrary.Load(actualLibraryPath);
+            }
+            
+            // Fallback: try standard library loading with correct name
+            string platformLibraryName = GetPlatformLibraryName();
+            if (NativeLibrary.TryLoad(platformLibraryName, assembly, searchPath, out IntPtr handle))
+            {
+                return handle;
+            }
+        }
+        
+        // Default behavior
+        return IntPtr.Zero;
+    }
+
+    private static string GetPlatformLibraryName()
+    {
+        if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+            return "pdfium";
+        else if (RuntimeInformation.IsOSPlatform(OSPlatform.Linux))
+            return "libpdfium";
+        else if (RuntimeInformation.IsOSPlatform(OSPlatform.OSX))
+            return "libpdfium";
+        else
+            return "pdfium";
+    }
+
+    private static string GetNativeLibraryPath()
+    {
+        string baseDir = AppContext.BaseDirectory;
+        string architecture = RuntimeInformation.ProcessArchitecture.ToString().ToLowerInvariant();
+        
+        if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+        {
+            string rid = $"win-{architecture}";
+            return Path.Combine(baseDir, "libs", rid, "pdfium.dll");
+        }
+        else if (RuntimeInformation.IsOSPlatform(OSPlatform.Linux))
+        {
+            string rid = $"linux-{architecture}";
+            return Path.Combine(baseDir, "libs", rid, "libpdfium.so");
+        }
+        else if (RuntimeInformation.IsOSPlatform(OSPlatform.OSX))
+        {
+            string rid = $"osx-{architecture}";
+            return Path.Combine(baseDir, "libs", rid, "libpdfium.dylib");
+        }
+        
+        throw new PlatformNotSupportedException("Unsupported platform");
+    }
 
     #region Library Management
 
@@ -25,10 +92,10 @@ public static partial class PDFium
     #region Document Management
 
     [LibraryImport(LibraryName, StringMarshalling = StringMarshalling.Utf8)]
-    public static partial IntPtr FPDF_LoadDocument(string file_path, string password);
+    public static partial IntPtr FPDF_LoadDocument(string file_path, string? password);
 
     [LibraryImport(LibraryName, StringMarshalling = StringMarshalling.Utf8)]
-    public static partial IntPtr FPDF_LoadMemDocument(IntPtr data_buf, int size, string password);
+    public static partial IntPtr FPDF_LoadMemDocument(IntPtr data_buf, int size, string? password);
 
     [LibraryImport(LibraryName)]
     public static partial void FPDF_CloseDocument(IntPtr document);

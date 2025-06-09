@@ -1,5 +1,5 @@
-﻿using System.Runtime.InteropServices;
-using ExifLibrary;
+﻿using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
 using ImageMagick;
 using ExifTag = ImageMagick.ExifTag;
 
@@ -35,7 +35,8 @@ public class PdfDocument : IDisposable
             _document = PDFium.FPDF_LoadMemDocument(handle.AddrOfPinnedObject(), data.Length, password);
             if (_document == IntPtr.Zero)
             {
-                throw new InvalidOperationException($"Failed to load PDF document from memory. Error: {PDFium.FPDF_GetLastError()}");
+                throw new InvalidOperationException(
+                    $"Failed to load PDF document from memory. Error: {PDFium.FPDF_GetLastError()}");
             }
         }
         finally
@@ -56,7 +57,14 @@ public class PdfDocument : IDisposable
         return new PdfPage(_document, pageIndex);
     }
 
-    public void ConvertToTiff(string outputPath, int dpi = 300, CompressionMethod compression = CompressionMethod.LZW)
+    public void ConvertToTiff(string outputPath, int dpi,
+        CompressionMethod compression = CompressionMethod.LZW)
+    {
+        ConvertToTiff(outputPath, dpi, dpi, compression);
+    }
+
+    public void ConvertToTiff(string outputPath, int dpiWidth, int dpiHeight,
+        CompressionMethod compression = CompressionMethod.LZW)
     {
         if (PageCount == 0)
             throw new InvalidOperationException("Document has no pages");
@@ -66,7 +74,7 @@ public class PdfDocument : IDisposable
         for (int i = 0; i < PageCount; i++)
         {
             using var page = GetPage(i);
-            var magickImage = RenderPageToMagickImage(page, dpi, compression);
+            var magickImage = RenderPageToMagickImage(page, dpiWidth, dpiHeight, compression);
             images.Add(magickImage);
         }
 
@@ -75,6 +83,11 @@ public class PdfDocument : IDisposable
 
     public void ConvertToPngs(string outputDirectory, string fileNamePrefix = "page", int dpi = 300)
     {
+        ConvertToPngs(outputDirectory, fileNamePrefix, dpi, dpi);
+    }
+
+    public void ConvertToPngs(string outputDirectory, string fileNamePrefix, int dpiWidth, int dpiHeight)
+    {
         if (PageCount == 0)
             throw new InvalidOperationException("Document has no pages");
 
@@ -84,19 +97,18 @@ public class PdfDocument : IDisposable
         for (int i = 0; i < PageCount; i++)
         {
             using var page = GetPage(i);
-            using var magickImage = RenderPageToMagickImage(page, dpi);
+            using var magickImage = RenderPageToMagickImage(page, dpiWidth: dpiWidth, dpiHeight: dpiHeight);
 
             var fileName = $"{fileNamePrefix}_{i + 1:D3}.png";
             var filePath = Path.Combine(outputDirectory, fileName);
 
             magickImage.Format = MagickFormat.Png;
             magickImage.Write(filePath);
-            //AddExifToFile(filePath, magickImage.Width > magickImage.Height); // Add EXIF based on orientation
         }
-        
     }
 
-    public void ConvertToJpeg(string outputDirectory, string fileNamePrefix = "page", int dpi = 300)
+    public void ConvertToJpegs(string outputDirectory, string fileNamePrefix = "page", int dpiWidth = 300,
+        int dpiHeight = 300)
     {
         if (PageCount == 0)
             throw new InvalidOperationException("Document has no pages");
@@ -107,93 +119,181 @@ public class PdfDocument : IDisposable
         for (int i = 0; i < PageCount; i++)
         {
             using var page = GetPage(i);
-            using var magickImage = RenderPageToMagickImage(page, dpi);
+            using var magickImage = RenderPageToMagickImage(page, dpiWidth: dpiWidth, dpiHeight: dpiHeight);
 
             var fileName = $"{fileNamePrefix}_{i + 1:D3}.jpg";
             var filePath = Path.Combine(outputDirectory, fileName);
 
             magickImage.Format = MagickFormat.Jpg;
             magickImage.Write(filePath);
-            AddExifToFile(filePath, magickImage.Width > magickImage.Height); // Add EXIF based on orientation
+            // AddExifToFile(filePath, magickImage.Width > magickImage.Height); // Add EXIF based on orientation
         }
-
     }
+    
+    // Add this field to your PdfDocument class
+private readonly object _pdfiumLock = new object();
 
-    private void AddExifToFile(string filePath, bool isLandscape)
+// Replace your async methods with these thread-safe versions:
+
+public async Task ConvertToTiffAsync(string outputPath, int dpiWidth, int dpiHeight,
+    CompressionMethod compression = CompressionMethod.LZW)
+{
+    if (PageCount == 0)
+        throw new InvalidOperationException("Document has no pages");
+
+    // Pre-render all pages with synchronization to avoid PDFium threading issues
+    var renderTasks = new Task<MagickImage>[PageCount];
+
+    for (int i = 0; i < PageCount; i++)
     {
-        try
+        int pageIndex = i; // Capture loop variable
+        renderTasks[i] = Task.Run(() =>
         {
-            var extension = Path.GetExtension(filePath).ToLowerInvariant();
-
-            // ExifLib primarily works with JPEG
-            var image = ImageFile.FromFile(filePath);
-
-            // Set orientation
-            ushort orientationValue = (ushort)1; // Normal orientation
-            image.Properties.Set(ExifLibrary.ExifTag.Orientation, orientationValue);
-
-            // Add software tag
-            image.Properties.Set(ExifLibrary.ExifTag.Software, "PDFium Wrapper");
-
-            // Add timestamp
-            image.Properties.Set(ExifLibrary.ExifTag.DateTime, DateTime.Now);
-
-            // Save the changes
-            image.Save(filePath);
-        }
-        catch (Exception ex)
-        {
-            Console.WriteLine($"Failed to add EXIF to {filePath}: {ex.Message}");
-        }
+            // Synchronize PDFium operations to prevent concurrent access
+            lock (_pdfiumLock)
+            {
+                using var page = GetPage(pageIndex);
+                return RenderPageToMagickImage(page, dpiWidth, dpiHeight, compression);
+            }
+        });
     }
 
+    // Wait for all pages to render
+    var renderedImages = await Task.WhenAll(renderTasks);
+
+    try
+    {
+        // Create the TIFF collection and write to file
+        using var images = new MagickImageCollection();
+
+        foreach (var image in renderedImages)
+        {
+            images.Add(image);
+        }
+
+        images.Write(outputPath);
+    }
+    finally
+    {
+        // Dispose all rendered images
+        foreach (var image in renderedImages)
+        {
+            image?.Dispose();
+        }
+    }
+}
+
+public async Task ConvertToPngsAsync(string outputDirectory, string fileNamePrefix, int dpiWidth = 300, int dpiHeight = 300)
+{
+    if (PageCount == 0)
+        throw new InvalidOperationException("Document has no pages");
+
+    if (!Directory.Exists(outputDirectory))
+        Directory.CreateDirectory(outputDirectory);
+
+    // Create tasks for each page rendering and saving
+    var renderTasks = new Task[PageCount];
+
+    for (int i = 0; i < PageCount; i++)
+    {
+        int pageIndex = i; // Capture loop variable
+        renderTasks[i] = Task.Run(() =>
+        {
+            MagickImage magickImage;
+            
+            // Synchronize PDFium operations
+            lock (_pdfiumLock)
+            {
+                using var page = GetPage(pageIndex);
+                magickImage = RenderPageToMagickImage(page, dpiWidth, dpiHeight);
+            }
+            
+            // File I/O can happen outside the lock
+            try
+            {
+                var fileName = $"{fileNamePrefix}_{pageIndex + 1:D3}.png";
+                var filePath = Path.Combine(outputDirectory, fileName);
+
+                magickImage.Format = MagickFormat.Png;
+                magickImage.Write(filePath);
+            }
+            finally
+            {
+                magickImage?.Dispose();
+            }
+        });
+    }
+
+    // Wait for all pages to complete
+    await Task.WhenAll(renderTasks);
+}
+
+public async Task ConvertToJpegsAsync(string outputDirectory, string fileNamePrefix, int dpiWidth, int dpiHeight)
+{
+    if (PageCount == 0)
+        throw new InvalidOperationException("Document has no pages");
+
+    if (!Directory.Exists(outputDirectory))
+        Directory.CreateDirectory(outputDirectory);
+
+    // Create tasks for each page rendering and saving
+    var renderTasks = new Task[PageCount];
+
+    for (int i = 0; i < PageCount; i++)
+    {
+        int pageIndex = i; // Capture loop variable
+        renderTasks[i] = Task.Run(() =>
+        {
+            MagickImage magickImage;
+            
+            // Synchronize PDFium operations
+            lock (_pdfiumLock)
+            {
+                using var page = GetPage(pageIndex);
+                magickImage = RenderPageToMagickImage(page, dpiWidth, dpiHeight);
+            }
+            
+            // File I/O can happen outside the lock
+            try
+            {
+                var fileName = $"{fileNamePrefix}_{pageIndex + 1:D3}.jpg";
+                var filePath = Path.Combine(outputDirectory, fileName);
+
+                magickImage.Format = MagickFormat.Jpg;
+                magickImage.Write(filePath);
+            }
+            finally
+            {
+                magickImage?.Dispose();
+            }
+        });
+    }
+
+    // Wait for all pages to complete
+    await Task.WhenAll(renderTasks);
+}
+
+    // Overload for uniform DPI (backwards compatibility)
     private MagickImage RenderPageToMagickImage(PdfPage page, int dpi, CompressionMethod? compression = null)
+    {
+        return RenderPageToMagickImage(page, dpi, dpi, compression);
+    }
+
+    // Main method with separate DPI for width and height
+    private MagickImage RenderPageToMagickImage(PdfPage page, int dpiWidth, int dpiHeight,
+        CompressionMethod? compression = null)
     {
         // Get original page dimensions in points
         var originalWidthPoints = page.Width;
         var originalHeightPoints = page.Height;
 
-        // Convert to inches (points / 72)
+        // Convert points to inches (points / 72)
         var originalWidthInches = originalWidthPoints / 72.0;
         var originalHeightInches = originalHeightPoints / 72.0;
 
-        // US Letter dimensions in inches
-        const double US_LETTER_WIDTH_INCHES = 8.5;
-        const double US_LETTER_HEIGHT_INCHES = 11.0;
-
-        // Determine if page is landscape
-        bool isLandscape = originalWidthInches > originalHeightInches;
-
-        // Calculate target dimensions for US Letter size in inches
-        double targetWidthInches, targetHeightInches;
-        if (isLandscape)
-        {
-            // Landscape: swap US Letter dimensions
-            targetWidthInches = US_LETTER_HEIGHT_INCHES;  // 11 inches
-            targetHeightInches = US_LETTER_WIDTH_INCHES;  // 8.5 inches
-        }
-        else
-        {
-            // Portrait: use normal US Letter dimensions
-            targetWidthInches = US_LETTER_WIDTH_INCHES;   // 8.5 inches
-            targetHeightInches = US_LETTER_HEIGHT_INCHES; // 11 inches
-        }
-
-        // Calculate scale factors to fit within US Letter while maintaining aspect ratio
-        double scaleX = targetWidthInches / originalWidthInches;
-        double scaleY = targetHeightInches / originalHeightInches;
-        double scale = Math.Min(scaleX, scaleY); // Use the smaller scale to ensure it fits
-
-        // Don't upscale - if the document already fits, keep original size
-        scale = Math.Min(scale, 1.0);
-
-        // Calculate final dimensions in inches
-        double finalWidthInches = originalWidthInches * scale;
-        double finalHeightInches = originalHeightInches * scale;
-
-        // Convert to pixels based on DPI
-        uint finalWidthPixels = (uint)Math.Round(finalWidthInches * dpi);
-        uint finalHeightPixels = (uint)Math.Round(finalHeightInches * dpi);
+        // Calculate final dimensions in pixels based on DPI
+        uint finalWidthPixels = (uint)Math.Round(originalWidthInches * dpiWidth);
+        uint finalHeightPixels = (uint)Math.Round(originalHeightInches * dpiHeight);
 
         // Render PDF page to bytes using PDFium
         var pdfBytes = page.RenderToBytes((int)finalWidthPixels, (int)finalHeightPixels, PDFium.FPDF_ANNOT);
@@ -210,14 +310,14 @@ public class PdfDocument : IDisposable
         // Create MagickImage from PDFium data
         var magickImage = new MagickImage(pdfBytes, settings);
 
-        // Set density and format
-        magickImage.Density = new Density(dpi, dpi, DensityUnit.PixelsPerInch);
+        // Set density using the provided DPI values
+        magickImage.Density = new Density(dpiWidth, dpiHeight, DensityUnit.PixelsPerInch);
 
         // Set a white background (in case of transparency)
         magickImage.BackgroundColor = MagickColors.White;
         magickImage.Alpha(AlphaOption.Remove);
 
-        // Set EXIF orientation metadata
+        // Set EXIF metadata
         var exifProfile = magickImage.GetExifProfile();
         if (exifProfile == null)
         {
@@ -226,17 +326,19 @@ public class PdfDocument : IDisposable
         }
 
         exifProfile.SetValue(ExifTag.DateTime, DateTime.Now.ToString("yyyy:MM:dd HH:mm:ss"));
-        exifProfile.SetValue(ExifTag.Copyright, "Malweka.Pdfium");
+        exifProfile.SetValue(ExifTag.Software, "Malweka.Pdfium");
 
-        // Set orientation based on landscape/portrait
+        // Determine orientation based on dimensions
+        bool isLandscape = originalWidthInches > originalHeightInches;
+
         if (isLandscape)
         {
-            // Landscape orientation - EXIF orientation value 1 (normal, since we render correctly)
+            // Landscape orientation
             exifProfile.SetValue(ExifTag.Orientation, (ushort)6);
         }
         else
         {
-            // Portrait orientation - EXIF orientation value 1 (normal/upright)
+            // Portrait orientation
             exifProfile.SetValue(ExifTag.Orientation, (ushort)1);
         }
 
@@ -260,6 +362,7 @@ public class PdfDocument : IDisposable
                 PDFium.FPDF_CloseDocument(_document);
                 _document = IntPtr.Zero;
             }
+
             _disposed = true;
         }
     }
