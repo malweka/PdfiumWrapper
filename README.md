@@ -4,15 +4,15 @@ A modern, high-level .NET 8 wrapper for PDFium that makes PDF manipulation easy 
 
 ## Features
 
-- ?? **PDF Rendering** - Convert PDF pages to images (PNG, JPEG, WebP, etc.) with customizable DPI
-- ?? **PDF Merging** - Combine multiple PDFs or specific pages
-- ?? **Form Filling** - Read and write PDF form fields (text fields, checkboxes, dropdowns)
-- ?? **Metadata Management** - Read and modify PDF metadata (title, author, keywords, etc.)
-- ?? **Bookmarks** - Access and manipulate PDF bookmarks/outlines
-- ?? **Attachments** - Extract and manage embedded file attachments
-- ?? **Page Management** - Extract text, get page dimensions, and manage thumbnails
-- ?? **Async Support** - Async/await patterns for better performance
-- ?? **Password-Protected PDFs** - Open and work with encrypted PDFs
+- **PDF Rendering** - Convert PDF pages to images (PNG, JPEG, WebP, etc.) with customizable DPI
+- **PDF Merging** - Combine multiple PDFs or specific pages
+- **Form Filling** - Read and write PDF form fields (text fields, checkboxes, dropdowns)
+- **Metadata Management** - Read and modify PDF metadata (title, author, keywords, etc.)
+- **Bookmarks** - Access and manipulate PDF bookmarks/outlines
+- **Attachments** - Extract and manage embedded file attachments
+- **Page Management** - Extract text, get page dimensions, and manage thumbnails
+- **Async Support** - Async/await patterns for better performance
+- **Password-Protected PDFs** - Open and work with encrypted PDFs
 
 ## Installation
 
