@@ -9,11 +9,10 @@ public class PdfPage : IDisposable
 {
     private IntPtr _page;
     private bool _disposed;
-    private int _pageIndex;
 
     internal PdfPage(IntPtr document, int pageIndex)
     {
-        _pageIndex = pageIndex;
+        PageIndex = pageIndex;
         _page = PDFium.FPDF_LoadPage(document, pageIndex);
         if (_page == IntPtr.Zero)
         {
@@ -21,7 +20,10 @@ public class PdfPage : IDisposable
         }
     }
 
+    public int PageIndex { get; }
+
     public double Width => PDFium.FPDF_GetPageWidth(_page);
+
     public double Height => PDFium.FPDF_GetPageHeight(_page);
 
     public byte[] RenderToBytes(int width, int height, int flags = 0)
