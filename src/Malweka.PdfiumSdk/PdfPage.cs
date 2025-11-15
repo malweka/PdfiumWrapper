@@ -9,9 +9,11 @@ public class PdfPage : IDisposable
 {
     private IntPtr _page;
     private bool _disposed;
+    private int _pageIndex;
 
     internal PdfPage(IntPtr document, int pageIndex)
     {
+        _pageIndex = pageIndex;
         _page = PDFium.FPDF_LoadPage(document, pageIndex);
         if (_page == IntPtr.Zero)
         {
@@ -82,6 +84,74 @@ public class PdfPage : IDisposable
         finally
         {
             PDFium.FPDFText_ClosePage(textPage);
+        }
+    }
+
+    /// <summary>
+    /// Check if this page has an embedded thumbnail
+    /// </summary>
+    public bool HasEmbeddedThumbnail
+    {
+        get
+        {
+            var thumbnail = PDFium.FPDFPage_GetThumbnailAsBitmap(_page);
+            if (thumbnail != IntPtr.Zero)
+            {
+                PDFium.FPDFBitmap_Destroy(thumbnail);
+                return true;
+            }
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Get the embedded thumbnail as raw BGRA bytes (if it exists)
+    /// Returns null if no embedded thumbnail exists
+    /// </summary>
+    public byte[] GetEmbeddedThumbnailBytes()
+    {
+        var thumbnail = PDFium.FPDFPage_GetThumbnailAsBitmap(_page);
+        if (thumbnail == IntPtr.Zero)
+            return null;
+
+        try
+        {
+            var width = PDFium.FPDFBitmap_GetWidth(thumbnail);
+            var height = PDFium.FPDFBitmap_GetHeight(thumbnail);
+            var stride = PDFium.FPDFBitmap_GetStride(thumbnail);
+            var buffer = PDFium.FPDFBitmap_GetBuffer(thumbnail);
+
+            var size = stride * height;
+            var result = new byte[size];
+            Marshal.Copy(buffer, result, 0, size);
+
+            return result;
+        }
+        finally
+        {
+            PDFium.FPDFBitmap_Destroy(thumbnail);
+        }
+    }
+
+    /// <summary>
+    /// Get the embedded thumbnail dimensions (if it exists)
+    /// Returns null if no embedded thumbnail exists
+    /// </summary>
+    public (int width, int height)? GetEmbeddedThumbnailSize()
+    {
+        var thumbnail = PDFium.FPDFPage_GetThumbnailAsBitmap(_page);
+        if (thumbnail == IntPtr.Zero)
+            return null;
+
+        try
+        {
+            var width = PDFium.FPDFBitmap_GetWidth(thumbnail);
+            var height = PDFium.FPDFBitmap_GetHeight(thumbnail);
+            return (width, height);
+        }
+        finally
+        {
+            PDFium.FPDFBitmap_Destroy(thumbnail);
         }
     }
 

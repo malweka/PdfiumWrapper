@@ -1,7 +1,5 @@
-﻿using System.Runtime.CompilerServices;
+﻿using SkiaSharp;
 using System.Runtime.InteropServices;
-using ImageMagick;
-using ExifTag = ImageMagick.ExifTag;
 
 namespace Malweka.PdfiumSdk;
 
@@ -12,6 +10,10 @@ public class PdfDocument : IDisposable
 {
     private IntPtr _document;
     private bool _disposed;
+    private readonly object _pdfiumLock = new object();
+    private PdfMetadata? _metadata;
+    private PdfBookmarks? _bookmarks;
+    private PdfAttachments? _attachments;
 
     static PdfDocument()
     {
@@ -25,6 +27,11 @@ public class PdfDocument : IDisposable
         {
             throw new InvalidOperationException($"Failed to load PDF document. Error: {PDFium.FPDF_GetLastError()}");
         }
+    }
+
+    public PdfDocument(Stream pdfStream, string password = null)
+        : this(pdfStream.ReadStreamToBytes(), password)
+    {
     }
 
     public PdfDocument(byte[] data, string password = null)
@@ -45,6 +52,42 @@ public class PdfDocument : IDisposable
         }
     }
 
+    public PdfMetadata Metadata
+    {
+        get
+        {
+            if (_metadata == null)
+            {
+                _metadata = new PdfMetadata(_document);
+            }
+            return _metadata;
+        }
+    }
+
+    public PdfBookmarks Bookmarks
+    {
+        get
+        {
+            if (_bookmarks == null)
+            {
+                _bookmarks = new PdfBookmarks(_document);
+            }
+            return _bookmarks;
+        }
+    }
+
+    public PdfAttachments Attachments
+    {
+        get
+        {
+            if (_attachments == null)
+            {
+                _attachments = new PdfAttachments(_document);
+            }
+            return _attachments;
+        }
+    }
+
     public int PageCount => PDFium.FPDF_GetPageCount(_document);
 
     public uint Permissions => PDFium.FPDF_GetDocPermissions(_document);
@@ -57,36 +100,171 @@ public class PdfDocument : IDisposable
         return new PdfPage(_document, pageIndex);
     }
 
-    public void ConvertToTiff(string outputPath, int dpi,
-        CompressionMethod compression = CompressionMethod.LZW)
+    public PdfPage[] GetAllPages()
     {
-        ConvertToTiff(outputPath, dpi, dpi, compression);
+        var pages = new PdfPage[PageCount];
+        for (int i = 0; i < PageCount; i++)
+        {
+            pages[i] = GetPage(i);
+        }
+        return pages;
     }
 
-    public void ConvertToTiff(string outputPath, int dpiWidth, int dpiHeight,
-        CompressionMethod compression = CompressionMethod.LZW)
+    public SKBitmap[] ConvertToBitmaps(int dpi = 300)
+    {
+        return ConvertToBitmaps(dpi, dpi);
+    }
+
+    public SKBitmap[] ConvertToBitmaps(int dpiWidth, int dpiHeight)
     {
         if (PageCount == 0)
             throw new InvalidOperationException("Document has no pages");
 
-        using var images = new MagickImageCollection();
+        var bitmaps = new SKBitmap[PageCount];
+        for (int i = 0; i < PageCount; i++)
+        {
+            using var page = GetPage(i);
+            bitmaps[i] = RenderPageToSkBitmap(page, dpiWidth, dpiHeight);
+        }
+        return bitmaps;
+    }
+
+    public async Task<SKBitmap[]> ConvertToBitmapsAsync(int dpi = 300)
+    {
+        return await ConvertToBitmapsAsync(dpi, dpi);
+    }
+
+    public async Task<SKBitmap[]> ConvertToBitmapsAsync(int dpiWidth, int dpiHeight)
+    {
+        if (PageCount == 0)
+            throw new InvalidOperationException("Document has no pages");
+
+        var renderTasks = new Task<SKBitmap>[PageCount];
+
+        for (int i = 0; i < PageCount; i++)
+        {
+            int pageIndex = i;
+            renderTasks[i] = Task.Run(() =>
+            {
+                lock (_pdfiumLock)
+                {
+                    using var page = GetPage(pageIndex);
+                    return RenderPageToSkBitmap(page, dpiWidth, dpiHeight);
+                }
+            });
+        }
+
+        return await Task.WhenAll(renderTasks);
+    }
+
+    public List<byte[]> ConvertToImageBytes(SKEncodedImageFormat format, int quality = 100, int dpi = 300)
+    {
+        return ConvertToImageBytes(format, quality, dpi, dpi);
+    }
+
+    public List<byte[]> ConvertToImageBytes(SKEncodedImageFormat format, int quality, int dpiWidth, int dpiHeight)
+    {
+        if (PageCount == 0)
+            throw new InvalidOperationException("Document has no pages");
+
+        var imageList = new List<byte[]>();
+        for (int i = 0; i < PageCount; i++)
+        {
+            using var page = GetPage(i);
+            using var bitmap = RenderPageToSkBitmap(page, dpiWidth, dpiHeight);
+            using var image = SKImage.FromBitmap(bitmap);
+            using var data = image.Encode(format, quality);
+            imageList.Add(data.ToArray());
+        }
+        return imageList;
+    }
+
+    public (double width, double height) GetPageSize(int pageIndex)
+    {
+        if (pageIndex < 0 || pageIndex >= PageCount)
+            throw new ArgumentOutOfRangeException(nameof(pageIndex));
+
+        var result = PDFium.FPDF_GetPageSizeByIndex(_document, pageIndex, out double width, out double height);
+        if (result == 0)
+            throw new InvalidOperationException($"Failed to get size for page {pageIndex}");
+
+        return (width, height);
+    }
+
+    public (double width, double height)[] GetAllPageSizes()
+    {
+        var sizes = new (double, double)[PageCount];
+        for (int i = 0; i < PageCount; i++)
+        {
+            sizes[i] = GetPageSize(i);
+        }
+        return sizes;
+    }
+
+    public async Task<List<byte[]>> ConvertToImageBytesAsync(SKEncodedImageFormat format, int quality = 100, int dpi = 300)
+    {
+        return await ConvertToImageBytesAsync(format, quality, dpi, dpi);
+    }
+
+    public async Task<List<byte[]>> ConvertToImageBytesAsync(SKEncodedImageFormat format, int quality, int dpiWidth, int dpiHeight)
+    {
+        if (PageCount == 0)
+            throw new InvalidOperationException("Document has no pages");
+
+        var renderTasks = new Task<byte[]>[PageCount];
+
+        for (int i = 0; i < PageCount; i++)
+        {
+            int pageIndex = i;
+            renderTasks[i] = Task.Run(() =>
+            {
+                lock (_pdfiumLock)
+                {
+                    using var page = GetPage(pageIndex);
+                    using var bitmap = RenderPageToSkBitmap(page, dpiWidth, dpiHeight);
+                    using var image = SKImage.FromBitmap(bitmap);
+                    using var data = image.Encode(format, quality);
+                    return data.ToArray();
+                }
+            });
+        }
+
+        var results = await Task.WhenAll(renderTasks);
+        return new List<byte[]>(results);
+    }
+
+    public void SaveAsImages(Stream[] outputStreams, SKEncodedImageFormat format, int quality, int dpiWidth, int dpiHeight)
+    {
+        if (outputStreams.Length != PageCount)
+            throw new ArgumentException($"Number of output streams ({outputStreams.Length}) must match page count ({PageCount})");
 
         for (int i = 0; i < PageCount; i++)
         {
             using var page = GetPage(i);
-            var magickImage = RenderPageToMagickImage(page, dpiWidth, dpiHeight, compression);
-            images.Add(magickImage);
+            using var bitmap = RenderPageToSkBitmap(page, dpiWidth, dpiHeight);
+            using var image = SKImage.FromBitmap(bitmap);
+            using var data = image.Encode(format, quality);
+            data.SaveTo(outputStreams[i]);
         }
-
-        images.Write(outputPath);
     }
 
-    public void ConvertToPngs(string outputDirectory, string fileNamePrefix = "page", int dpi = 300)
+    // Convenience methods for saving to directory (calls stream-based methods internally)
+    public void SaveAsPngs(string outputDirectory, string fileNamePrefix = "page", int dpi = 300)
     {
-        ConvertToPngs(outputDirectory, fileNamePrefix, dpi, dpi);
+        SaveAsImages(outputDirectory, fileNamePrefix, SKEncodedImageFormat.Png, 100, dpi, dpi);
     }
 
-    public void ConvertToPngs(string outputDirectory, string fileNamePrefix, int dpiWidth, int dpiHeight)
+    public void SaveAsJpegs(string outputDirectory, string fileNamePrefix = "page", int quality = 90, int dpi = 300)
+    {
+        SaveAsImages(outputDirectory, fileNamePrefix, SKEncodedImageFormat.Jpeg, quality, dpi, dpi);
+    }
+
+    public void SaveAsImages(string outputDirectory, string fileNamePrefix, SKEncodedImageFormat format, int quality = 100, int dpi = 300)
+    {
+        SaveAsImages(outputDirectory, fileNamePrefix, format, quality, dpi, dpi);
+    }
+
+    public void SaveAsImages(string outputDirectory, string fileNamePrefix, SKEncodedImageFormat format, int quality, int dpiWidth, int dpiHeight)
     {
         if (PageCount == 0)
             throw new InvalidOperationException("Document has no pages");
@@ -94,21 +272,23 @@ public class PdfDocument : IDisposable
         if (!Directory.Exists(outputDirectory))
             Directory.CreateDirectory(outputDirectory);
 
+        string extension = GetExtensionForFormat(format);
+
         for (int i = 0; i < PageCount; i++)
         {
-            using var page = GetPage(i);
-            using var magickImage = RenderPageToMagickImage(page, dpiWidth: dpiWidth, dpiHeight: dpiHeight);
-
-            var fileName = $"{fileNamePrefix}_{i + 1:D3}.png";
+            var fileName = $"{fileNamePrefix}_{i + 1:D3}.{extension}";
             var filePath = Path.Combine(outputDirectory, fileName);
 
-            magickImage.Format = MagickFormat.Png;
-            magickImage.Write(filePath);
+            using var stream = File.OpenWrite(filePath);
+            using var page = GetPage(i);
+            using var bitmap = RenderPageToSkBitmap(page, dpiWidth, dpiHeight);
+            using var image = SKImage.FromBitmap(bitmap);
+            using var data = image.Encode(format, quality);
+            data.SaveTo(stream);
         }
     }
 
-    public void ConvertToJpegs(string outputDirectory, string fileNamePrefix = "page", int dpiWidth = 300,
-        int dpiHeight = 300)
+    public async Task SaveAsImagesAsync(string outputDirectory, string fileNamePrefix, SKEncodedImageFormat format, int quality, int dpiWidth, int dpiHeight)
     {
         if (PageCount == 0)
             throw new InvalidOperationException("Document has no pages");
@@ -116,172 +296,43 @@ public class PdfDocument : IDisposable
         if (!Directory.Exists(outputDirectory))
             Directory.CreateDirectory(outputDirectory);
 
+        string extension = GetExtensionForFormat(format);
+        var renderTasks = new Task[PageCount];
+
         for (int i = 0; i < PageCount; i++)
         {
-            using var page = GetPage(i);
-            using var magickImage = RenderPageToMagickImage(page, dpiWidth: dpiWidth, dpiHeight: dpiHeight);
-
-            var fileName = $"{fileNamePrefix}_{i + 1:D3}.jpg";
-            var filePath = Path.Combine(outputDirectory, fileName);
-
-            magickImage.Format = MagickFormat.Jpg;
-            magickImage.Write(filePath);
-            // AddExifToFile(filePath, magickImage.Width > magickImage.Height); // Add EXIF based on orientation
-        }
-    }
-    
-    // Add this field to your PdfDocument class
-private readonly object _pdfiumLock = new object();
-
-// Replace your async methods with these thread-safe versions:
-
-public async Task ConvertToTiffAsync(string outputPath, int dpiWidth, int dpiHeight,
-    CompressionMethod compression = CompressionMethod.LZW)
-{
-    if (PageCount == 0)
-        throw new InvalidOperationException("Document has no pages");
-
-    // Pre-render all pages with synchronization to avoid PDFium threading issues
-    var renderTasks = new Task<MagickImage>[PageCount];
-
-    for (int i = 0; i < PageCount; i++)
-    {
-        int pageIndex = i; // Capture loop variable
-        renderTasks[i] = Task.Run(() =>
-        {
-            // Synchronize PDFium operations to prevent concurrent access
-            lock (_pdfiumLock)
+            int pageIndex = i;
+            renderTasks[i] = Task.Run(() =>
             {
-                using var page = GetPage(pageIndex);
-                return RenderPageToMagickImage(page, dpiWidth, dpiHeight, compression);
-            }
-        });
-    }
+                SKBitmap bitmap;
 
-    // Wait for all pages to render
-    var renderedImages = await Task.WhenAll(renderTasks);
+                lock (_pdfiumLock)
+                {
+                    using var page = GetPage(pageIndex);
+                    bitmap = RenderPageToSkBitmap(page, dpiWidth, dpiHeight);
+                }
 
-    try
-    {
-        // Create the TIFF collection and write to file
-        using var images = new MagickImageCollection();
+                try
+                {
+                    var fileName = $"{fileNamePrefix}_{pageIndex + 1:D3}.{extension}";
+                    var filePath = Path.Combine(outputDirectory, fileName);
 
-        foreach (var image in renderedImages)
-        {
-            images.Add(image);
+                    using var stream = File.OpenWrite(filePath);
+                    using var image = SKImage.FromBitmap(bitmap);
+                    using var data = image.Encode(format, quality);
+                    data.SaveTo(stream);
+                }
+                finally
+                {
+                    bitmap?.Dispose();
+                }
+            });
         }
 
-        images.Write(outputPath);
-    }
-    finally
-    {
-        // Dispose all rendered images
-        foreach (var image in renderedImages)
-        {
-            image?.Dispose();
-        }
-    }
-}
-
-public async Task ConvertToPngsAsync(string outputDirectory, string fileNamePrefix, int dpiWidth = 300, int dpiHeight = 300)
-{
-    if (PageCount == 0)
-        throw new InvalidOperationException("Document has no pages");
-
-    if (!Directory.Exists(outputDirectory))
-        Directory.CreateDirectory(outputDirectory);
-
-    // Create tasks for each page rendering and saving
-    var renderTasks = new Task[PageCount];
-
-    for (int i = 0; i < PageCount; i++)
-    {
-        int pageIndex = i; // Capture loop variable
-        renderTasks[i] = Task.Run(() =>
-        {
-            MagickImage magickImage;
-            
-            // Synchronize PDFium operations
-            lock (_pdfiumLock)
-            {
-                using var page = GetPage(pageIndex);
-                magickImage = RenderPageToMagickImage(page, dpiWidth, dpiHeight);
-            }
-            
-            // File I/O can happen outside the lock
-            try
-            {
-                var fileName = $"{fileNamePrefix}_{pageIndex + 1:D3}.png";
-                var filePath = Path.Combine(outputDirectory, fileName);
-
-                magickImage.Format = MagickFormat.Png;
-                magickImage.Write(filePath);
-            }
-            finally
-            {
-                magickImage?.Dispose();
-            }
-        });
+        await Task.WhenAll(renderTasks);
     }
 
-    // Wait for all pages to complete
-    await Task.WhenAll(renderTasks);
-}
-
-public async Task ConvertToJpegsAsync(string outputDirectory, string fileNamePrefix, int dpiWidth, int dpiHeight)
-{
-    if (PageCount == 0)
-        throw new InvalidOperationException("Document has no pages");
-
-    if (!Directory.Exists(outputDirectory))
-        Directory.CreateDirectory(outputDirectory);
-
-    // Create tasks for each page rendering and saving
-    var renderTasks = new Task[PageCount];
-
-    for (int i = 0; i < PageCount; i++)
-    {
-        int pageIndex = i; // Capture loop variable
-        renderTasks[i] = Task.Run(() =>
-        {
-            MagickImage magickImage;
-            
-            // Synchronize PDFium operations
-            lock (_pdfiumLock)
-            {
-                using var page = GetPage(pageIndex);
-                magickImage = RenderPageToMagickImage(page, dpiWidth, dpiHeight);
-            }
-            
-            // File I/O can happen outside the lock
-            try
-            {
-                var fileName = $"{fileNamePrefix}_{pageIndex + 1:D3}.jpg";
-                var filePath = Path.Combine(outputDirectory, fileName);
-
-                magickImage.Format = MagickFormat.Jpg;
-                magickImage.Write(filePath);
-            }
-            finally
-            {
-                magickImage?.Dispose();
-            }
-        });
-    }
-
-    // Wait for all pages to complete
-    await Task.WhenAll(renderTasks);
-}
-
-    // Overload for uniform DPI (backwards compatibility)
-    private MagickImage RenderPageToMagickImage(PdfPage page, int dpi, CompressionMethod? compression = null)
-    {
-        return RenderPageToMagickImage(page, dpi, dpi, compression);
-    }
-
-    // Main method with separate DPI for width and height
-    private MagickImage RenderPageToMagickImage(PdfPage page, int dpiWidth, int dpiHeight,
-        CompressionMethod? compression = null)
+    private SKBitmap RenderPageToSkBitmap(PdfPage page, int dpiWidth, int dpiHeight)
     {
         // Get original page dimensions in points
         var originalWidthPoints = page.Width;
@@ -292,65 +343,45 @@ public async Task ConvertToJpegsAsync(string outputDirectory, string fileNamePre
         var originalHeightInches = originalHeightPoints / 72.0;
 
         // Calculate final dimensions in pixels based on DPI
-        uint finalWidthPixels = (uint)Math.Round(originalWidthInches * dpiWidth);
-        uint finalHeightPixels = (uint)Math.Round(originalHeightInches * dpiHeight);
+        int finalWidthPixels = (int)Math.Round(originalWidthInches * dpiWidth);
+        int finalHeightPixels = (int)Math.Round(originalHeightInches * dpiHeight);
 
-        // Render PDF page to bytes using PDFium
-        var pdfBytes = page.RenderToBytes((int)finalWidthPixels, (int)finalHeightPixels, PDFium.FPDF_ANNOT);
+        // Render PDF page to bytes using PDFium (BGRA format)
+        var pdfBytes = page.RenderToBytes(finalWidthPixels, finalHeightPixels, PDFium.FPDF_ANNOT);
 
-        // Create MagickReadSettings for BGRA format
-        var settings = new MagickReadSettings()
+        // Create SKBitmap and copy the BGRA data
+        var bitmap = new SKBitmap(finalWidthPixels, finalHeightPixels, SKColorType.Bgra8888, SKAlphaType.Premul);
+
+        // Copy the PDFium buffer directly into the SKBitmap
+        var pixels = bitmap.GetPixels();
+        Marshal.Copy(pdfBytes, 0, pixels, pdfBytes.Length);
+
+        return bitmap;
+    }
+
+
+    private static string GetExtensionForFormat(SKEncodedImageFormat format)
+    {
+        return format switch
         {
-            Format = MagickFormat.Bgra,
-            Width = finalWidthPixels,
-            Height = finalHeightPixels,
-            Depth = 8
+            SKEncodedImageFormat.Png => "png",
+            SKEncodedImageFormat.Jpeg => "jpg",
+            SKEncodedImageFormat.Webp => "webp",
+            SKEncodedImageFormat.Gif => "gif",
+            SKEncodedImageFormat.Bmp => "bmp",
+            SKEncodedImageFormat.Ico => "ico",
+            _ => "img"
         };
+    }
 
-        // Create MagickImage from PDFium data
-        var magickImage = new MagickImage(pdfBytes, settings);
+    public PdfForm? GetForm()
+    {
+        var pdfForm = new PdfForm(_document, PageCount);
+        if(pdfForm.HasFormFields)
+            return pdfForm;
 
-        // Set density using the provided DPI values
-        magickImage.Density = new Density(dpiWidth, dpiHeight, DensityUnit.PixelsPerInch);
-
-        // Set a white background (in case of transparency)
-        magickImage.BackgroundColor = MagickColors.White;
-        magickImage.Alpha(AlphaOption.Remove);
-
-        // Set EXIF metadata
-        var exifProfile = magickImage.GetExifProfile();
-        if (exifProfile == null)
-        {
-            exifProfile = new ExifProfile();
-            magickImage.SetProfile(exifProfile);
-        }
-
-        exifProfile.SetValue(ExifTag.DateTime, DateTime.Now.ToString("yyyy:MM:dd HH:mm:ss"));
-        exifProfile.SetValue(ExifTag.Software, "Malweka.Pdfium");
-
-        // Determine orientation based on dimensions
-        bool isLandscape = originalWidthInches > originalHeightInches;
-
-        if (isLandscape)
-        {
-            // Landscape orientation
-            exifProfile.SetValue(ExifTag.Orientation, (ushort)6);
-        }
-        else
-        {
-            // Portrait orientation
-            exifProfile.SetValue(ExifTag.Orientation, (ushort)1);
-        }
-
-        // Apply compression if specified (for TIFF)
-        if (compression.HasValue)
-        {
-            magickImage.Format = MagickFormat.Tiff;
-            magickImage.Settings.Compression = compression.Value;
-        }
-
-        magickImage.SetProfile(exifProfile);
-        return magickImage;
+        pdfForm.Dispose();
+        return null;
     }
 
     public void Dispose()
