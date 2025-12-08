@@ -2,12 +2,16 @@
 
 namespace Malweka.PdfiumSdk;
 
-public class PdfForm
+public class PdfForm : IDisposable
 {
     private IntPtr _document;
     private int _pageCount;
     private IntPtr _formHandle;
     private bool _formInitialized;
+    private PDFium.FPDF_FORMFILLINFO _formInfo;
+    private GCHandle _formInfoHandle;
+    private bool _disposed;
+    private readonly object _lock = new object();
 
     internal bool HasFormFields => _formInitialized;
 
@@ -21,27 +25,57 @@ public class PdfForm
     private void InitializeFormEnvironment()
     {
         // Create a minimal form fill info structure
-        var formInfo = new PDFium.FPDF_FORMFILLINFO
+        // This must remain pinned in memory for the lifetime of the form environment
+        _formInfo = new PDFium.FPDF_FORMFILLINFO
         {
             version = 2  // Use version 2 for better compatibility
         };
 
-        _formHandle = PDFium.FPDFDOC_InitFormFillEnvironment(_document, ref formInfo);
-        _formInitialized = _formHandle != IntPtr.Zero;
+        // Pin the structure in memory so PDFium can safely access it
+        _formInfoHandle = GCHandle.Alloc(_formInfo, GCHandleType.Pinned);
+
+        try
+        {
+            _formHandle = PDFium.FPDFDOC_InitFormFillEnvironment(_document, ref _formInfo);
+            _formInitialized = _formHandle != IntPtr.Zero;
+        }
+        catch
+        {
+            // If initialization fails, clean up the pinned handle
+            if (_formInfoHandle.IsAllocated)
+            {
+                _formInfoHandle.Free();
+            }
+            throw;
+        }
     }
 
     public FormField[] GetAllFormFields()
     {
-        var fields = new List<FormField>();
-        for (int pageIndex = 0; pageIndex < _pageCount; pageIndex++)
+        lock (_lock)
         {
-            var pageFields = GetFormFieldsOnPage(pageIndex);
-            fields.AddRange(pageFields);
+            ObjectDisposedException.ThrowIf(_disposed, typeof(PdfForm));
+            
+            var fields = new List<FormField>();
+            for (int pageIndex = 0; pageIndex < _pageCount; pageIndex++)
+            {
+                var pageFields = GetFormFieldsOnPageInternal(pageIndex);
+                fields.AddRange(pageFields);
+            }
+            return fields.ToArray();
         }
-        return fields.ToArray();
     }
 
     public FormField[] GetFormFieldsOnPage(int pageIndex)
+    {
+        lock (_lock)
+        {
+            ObjectDisposedException.ThrowIf(_disposed, typeof(PdfForm));
+            return GetFormFieldsOnPageInternal(pageIndex);
+        }
+    }
+
+    private FormField[] GetFormFieldsOnPageInternal(int pageIndex)
     {
         var fields = new List<FormField>();
         var page = PDFium.FPDF_LoadPage(_document, pageIndex);
@@ -209,27 +243,42 @@ public class PdfForm
 
     public string GetFormFieldValue(string fieldName)
     {
-        var field = FindFormField(fieldName);
-        if (field == null)
-            throw new ArgumentException($"Form field '{fieldName}' not found");
+        lock (_lock)
+        {
+            ObjectDisposedException.ThrowIf(_disposed, typeof(PdfForm));
+            
+            var field = FindFormField(fieldName);
+            if (field == null)
+                throw new ArgumentException($"Form field '{fieldName}' not found");
 
-        return field.Value;
+            return field.Value;
+        }
     }
 
     public void SetFormFieldValue(string fieldName, string value)
     {
-        var fieldInfo = FindFormFieldWithAnnotation(fieldName);
-        if (fieldInfo == null)
-            throw new ArgumentException($"Form field '{fieldName}' not found");
+        lock (_lock)
+        {
+            ObjectDisposedException.ThrowIf(_disposed, typeof(PdfForm));
+            
+            var fieldInfo = FindFormFieldWithAnnotation(fieldName);
+            if (fieldInfo == null)
+                throw new ArgumentException($"Form field '{fieldName}' not found");
 
-        try
-        {
-            SetAnnotFieldValue(fieldInfo.Value.annot, fieldInfo.Value.field.Type, value);
-        }
-        finally
-        {
-            PDFium.FPDFPage_CloseAnnot(fieldInfo.Value.annot);
-            PDFium.FPDF_ClosePage(fieldInfo.Value.page);
+            try
+            {
+                SetAnnotFieldValue(fieldInfo.Value.annot, fieldInfo.Value.field.Type, value);
+            }
+            finally
+            {
+                PDFium.FPDFPage_CloseAnnot(fieldInfo.Value.annot);
+                
+                if (_formInitialized)
+                {
+                    PDFium.FORM_OnBeforeClosePage(fieldInfo.Value.page, _formHandle);
+                }
+                PDFium.FPDF_ClosePage(fieldInfo.Value.page);
+            }
         }
     }
 
@@ -309,24 +358,34 @@ public class PdfForm
 
     public void SetListBoxSelections(string fieldName, string[] selectedValues)
     {
-        // For multi-select list boxes
-        var fieldInfo = FindFormFieldWithAnnotation(fieldName);
-        if (fieldInfo == null)
-            throw new ArgumentException($"Form field '{fieldName}' not found");
-
-        try
+        lock (_lock)
         {
-            if (fieldInfo.Value.field.Type != FormFieldType.ListBox)
-                throw new InvalidOperationException($"Field '{fieldName}' is not a list box");
+            ObjectDisposedException.ThrowIf(_disposed, typeof(PdfForm));
+            
+            // For multi-select list boxes
+            var fieldInfo = FindFormFieldWithAnnotation(fieldName);
+            if (fieldInfo == null)
+                throw new ArgumentException($"Form field '{fieldName}' not found");
 
-            // Join multiple selections (PDFium typically uses arrays, but we'll use comma-separated for simplicity)
-            string value = string.Join(",", selectedValues);
-            PDFium.FPDFAnnot_SetStringValue(fieldInfo.Value.annot, "V", value);
-        }
-        finally
-        {
-            PDFium.FPDFPage_CloseAnnot(fieldInfo.Value.annot);
-            PDFium.FPDF_ClosePage(fieldInfo.Value.page);
+            try
+            {
+                if (fieldInfo.Value.field.Type != FormFieldType.ListBox)
+                    throw new InvalidOperationException($"Field '{fieldName}' is not a list box");
+
+                // Join multiple selections (PDFium typically uses arrays, but we'll use comma-separated for simplicity)
+                string value = string.Join(",", selectedValues);
+                PDFium.FPDFAnnot_SetStringValue(fieldInfo.Value.annot, "V", value);
+            }
+            finally
+            {
+                PDFium.FPDFPage_CloseAnnot(fieldInfo.Value.annot);
+                
+                if (_formInitialized)
+                {
+                    PDFium.FORM_OnBeforeClosePage(fieldInfo.Value.page, _formHandle);
+                }
+                PDFium.FPDF_ClosePage(fieldInfo.Value.page);
+            }
         }
     }
 
@@ -334,7 +393,7 @@ public class PdfForm
     {
         for (int pageIndex = 0; pageIndex < _pageCount; pageIndex++)
         {
-            var pageFields = GetFormFieldsOnPage(pageIndex);
+            var pageFields = GetFormFieldsOnPageInternal(pageIndex);
             var field = pageFields.FirstOrDefault(f => f.Name.Equals(fieldName, StringComparison.OrdinalIgnoreCase));
             if (field != null)
                 return field;
@@ -401,11 +460,25 @@ public class PdfForm
 
     public void Dispose()
     {
-        if (_formInitialized && _formHandle != IntPtr.Zero)
+        lock (_lock)
         {
-            PDFium.FPDFDOC_ExitFormFillEnvironment(_formHandle);
-            _formHandle = IntPtr.Zero;
-            _formInitialized = false;
+            if (_disposed)
+                return;
+
+            if (_formInitialized && _formHandle != IntPtr.Zero)
+            {
+                PDFium.FPDFDOC_ExitFormFillEnvironment(_formHandle);
+                _formHandle = IntPtr.Zero;
+                _formInitialized = false;
+            }
+
+            // Free the pinned GCHandle
+            if (_formInfoHandle.IsAllocated)
+            {
+                _formInfoHandle.Free();
+            }
+
+            _disposed = true;
         }
     }
 }
