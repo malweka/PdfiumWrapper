@@ -358,6 +358,90 @@ public class PdfDocument : IDisposable
         return null;
     }
 
+    /// <summary>
+    /// Saves the PDF document to a file path
+    /// </summary>
+    /// <param name="filePath">The path where the PDF should be saved</param>
+    /// <param name="flags">Save flags (default is 0 for standard save, use PDFium.FPDF_INCREMENTAL for incremental save)</param>
+    public void Save(string filePath, uint flags = 0)
+    {
+        if (_disposed)
+            throw new ObjectDisposedException(nameof(PdfDocument));
+
+        using var fileStream = new FileStream(filePath, FileMode.Create, FileAccess.Write);
+        SaveToStream(fileStream, flags);
+    }
+
+    /// <summary>
+    /// Saves the PDF document to a stream
+    /// </summary>
+    /// <param name="stream">The stream to write the PDF to</param>
+    /// <param name="flags">Save flags (default is 0 for standard save, use PDFium.FPDF_INCREMENTAL for incremental save)</param>
+    public void SaveToStream(Stream stream, uint flags = 0)
+    {
+        if (_disposed)
+            throw new ObjectDisposedException(nameof(PdfDocument));
+
+        // Create a GCHandle to keep the stream alive during the save operation
+        var streamHandle = GCHandle.Alloc(stream);
+
+        try
+        {
+            // Create the write callback delegate
+            WriteBlockDelegate writeDelegate = (_, dataPtr, size) =>
+            {
+                try
+                {
+                    var targetStream = (Stream)streamHandle.Target!;
+                    var buffer = new byte[size];
+                    Marshal.Copy(dataPtr, buffer, 0, (int)size);
+                    targetStream.Write(buffer, 0, (int)size);
+                    return 1; // Success
+                }
+                catch
+                {
+                    return 0; // Failure
+                }
+            };
+
+            // Keep the delegate alive
+            var delegateHandle = GCHandle.Alloc(writeDelegate);
+
+            try
+            {
+                // Create FPDF_FILEWRITE structure
+                var fileWrite = new PDFium.FPDF_FILEWRITE
+                {
+                    version = 1,
+                    WriteBlock = Marshal.GetFunctionPointerForDelegate(writeDelegate)
+                };
+
+                // Call PDFium save function - pass fileWrite by ref
+                bool success = PDFium.FPDF_SaveAsCopy(_document, ref fileWrite, flags);
+
+                if (!success)
+                {
+                    var error = PDFium.FPDF_GetLastError();
+                    throw new InvalidOperationException($"Failed to save PDF document. PDFium error code: {error}");
+                }
+            }
+            finally
+            {
+                if (delegateHandle.IsAllocated)
+                    delegateHandle.Free();
+            }
+        }
+        finally
+        {
+            if (streamHandle.IsAllocated)
+                streamHandle.Free();
+        }
+    }
+
+    // Delegate for the WriteBlock callback
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate int WriteBlockDelegate(IntPtr pThis, IntPtr data, uint size);
+
     public void Dispose()
     {
         if (!_disposed)
