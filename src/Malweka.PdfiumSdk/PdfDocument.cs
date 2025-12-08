@@ -4,13 +4,17 @@ using System.Runtime.InteropServices;
 namespace Malweka.PdfiumSdk;
 
 /// <summary>
-/// High-level wrapper class for easier PDF operations
+/// High-level wrapper class for easier PDF operations.
 /// </summary>
+/// <remarks>
+/// This class is NOT thread-safe. Do not access the same PdfDocument instance from multiple threads concurrently.
+/// Each PdfDocument instance should be used from a single thread at a time, or external synchronization must be provided.
+/// Async methods process pages sequentially and use Task.Yield() for responsiveness, not parallelism.
+/// </remarks>
 public class PdfDocument : IDisposable
 {
     private IntPtr _document;
     private bool _disposed;
-    private readonly object _pdfiumLock = new object();
     private PdfMetadata? _metadata;
     private PdfBookmarks? _bookmarks;
     private PdfAttachments? _attachments;
@@ -139,22 +143,16 @@ public class PdfDocument : IDisposable
         if (PageCount == 0)
             throw new InvalidOperationException("Document has no pages");
 
-        var renderTasks = new Task<SKBitmap>[PageCount];
-
+        var bitmaps = new SKBitmap[PageCount];
+        
         for (int i = 0; i < PageCount; i++)
         {
-            int pageIndex = i;
-            renderTasks[i] = Task.Run(() =>
-            {
-                lock (_pdfiumLock)
-                {
-                    using var page = GetPage(pageIndex);
-                    return RenderPageToSkBitmap(page, dpiWidth, dpiHeight);
-                }
-            });
+            await Task.Yield();
+            using var page = GetPage(i);
+            bitmaps[i] = RenderPageToSkBitmap(page, dpiWidth, dpiHeight);
         }
-
-        return await Task.WhenAll(renderTasks);
+        
+        return bitmaps;
     }
 
     public List<byte[]> ConvertToImageBytes(SKEncodedImageFormat format, int quality = 100, int dpi = 300)
@@ -211,26 +209,19 @@ public class PdfDocument : IDisposable
         if (PageCount == 0)
             throw new InvalidOperationException("Document has no pages");
 
-        var renderTasks = new Task<byte[]>[PageCount];
-
+        var imageList = new List<byte[]>();
+        
         for (int i = 0; i < PageCount; i++)
         {
-            int pageIndex = i;
-            renderTasks[i] = Task.Run(() =>
-            {
-                lock (_pdfiumLock)
-                {
-                    using var page = GetPage(pageIndex);
-                    using var bitmap = RenderPageToSkBitmap(page, dpiWidth, dpiHeight);
-                    using var image = SKImage.FromBitmap(bitmap);
-                    using var data = image.Encode(format, quality);
-                    return data.ToArray();
-                }
-            });
+            await Task.Yield();
+            using var page = GetPage(i);
+            using var bitmap = RenderPageToSkBitmap(page, dpiWidth, dpiHeight);
+            using var image = SKImage.FromBitmap(bitmap);
+            using var data = image.Encode(format, quality);
+            imageList.Add(data.ToArray());
         }
-
-        var results = await Task.WhenAll(renderTasks);
-        return new List<byte[]>(results);
+        
+        return imageList;
     }
 
     public void SaveAsImages(Stream[] outputStreams, SKEncodedImageFormat format, int quality, int dpiWidth, int dpiHeight)
@@ -297,39 +288,22 @@ public class PdfDocument : IDisposable
             Directory.CreateDirectory(outputDirectory);
 
         string extension = GetExtensionForFormat(format);
-        var renderTasks = new Task[PageCount];
 
         for (int i = 0; i < PageCount; i++)
         {
-            int pageIndex = i;
-            renderTasks[i] = Task.Run(() =>
-            {
-                SKBitmap bitmap;
+            await Task.Yield();
+            
+            using var page = GetPage(i);
+            using var bitmap = RenderPageToSkBitmap(page, dpiWidth, dpiHeight);
+            using var image = SKImage.FromBitmap(bitmap);
+            using var data = image.Encode(format, quality);
+            
+            var fileName = $"{fileNamePrefix}_{i + 1:D3}.{extension}";
+            var filePath = Path.Combine(outputDirectory, fileName);
 
-                lock (_pdfiumLock)
-                {
-                    using var page = GetPage(pageIndex);
-                    bitmap = RenderPageToSkBitmap(page, dpiWidth, dpiHeight);
-                }
-
-                try
-                {
-                    var fileName = $"{fileNamePrefix}_{pageIndex + 1:D3}.{extension}";
-                    var filePath = Path.Combine(outputDirectory, fileName);
-
-                    using var stream = File.OpenWrite(filePath);
-                    using var image = SKImage.FromBitmap(bitmap);
-                    using var data = image.Encode(format, quality);
-                    data.SaveTo(stream);
-                }
-                finally
-                {
-                    bitmap?.Dispose();
-                }
-            });
+            using var stream = File.Create(filePath);
+            await data.AsStream().CopyToAsync(stream);
         }
-
-        await Task.WhenAll(renderTasks);
     }
 
     private SKBitmap RenderPageToSkBitmap(PdfPage page, int dpiWidth, int dpiHeight)

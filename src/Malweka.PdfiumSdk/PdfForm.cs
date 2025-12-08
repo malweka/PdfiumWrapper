@@ -2,6 +2,13 @@
 
 namespace Malweka.PdfiumSdk;
 
+/// <summary>
+/// Provides access to PDF form fields and allows reading and modifying form data.
+/// </summary>
+/// <remarks>
+/// This class is NOT thread-safe. Do not access the same PdfForm instance from multiple threads concurrently.
+/// Each PdfForm instance should be used from a single thread at a time, or external synchronization must be provided.
+/// </remarks>
 public class PdfForm : IDisposable
 {
     private IntPtr _document;
@@ -11,7 +18,7 @@ public class PdfForm : IDisposable
     private PDFium.FPDF_FORMFILLINFO _formInfo;
     private GCHandle _formInfoHandle;
     private bool _disposed;
-    private readonly object _lock = new object();
+    private readonly object _disposeLock = new object();
 
     internal bool HasFormFields => _formInitialized;
 
@@ -52,27 +59,21 @@ public class PdfForm : IDisposable
 
     public FormField[] GetAllFormFields()
     {
-        lock (_lock)
+        ObjectDisposedException.ThrowIf(_disposed, typeof(PdfForm));
+        
+        var fields = new List<FormField>();
+        for (int pageIndex = 0; pageIndex < _pageCount; pageIndex++)
         {
-            ObjectDisposedException.ThrowIf(_disposed, typeof(PdfForm));
-            
-            var fields = new List<FormField>();
-            for (int pageIndex = 0; pageIndex < _pageCount; pageIndex++)
-            {
-                var pageFields = GetFormFieldsOnPageInternal(pageIndex);
-                fields.AddRange(pageFields);
-            }
-            return fields.ToArray();
+            var pageFields = GetFormFieldsOnPageInternal(pageIndex);
+            fields.AddRange(pageFields);
         }
+        return fields.ToArray();
     }
 
     public FormField[] GetFormFieldsOnPage(int pageIndex)
     {
-        lock (_lock)
-        {
-            ObjectDisposedException.ThrowIf(_disposed, typeof(PdfForm));
-            return GetFormFieldsOnPageInternal(pageIndex);
-        }
+        ObjectDisposedException.ThrowIf(_disposed, typeof(PdfForm));
+        return GetFormFieldsOnPageInternal(pageIndex);
     }
 
     private FormField[] GetFormFieldsOnPageInternal(int pageIndex)
@@ -243,42 +244,36 @@ public class PdfForm : IDisposable
 
     public string GetFormFieldValue(string fieldName)
     {
-        lock (_lock)
-        {
-            ObjectDisposedException.ThrowIf(_disposed, typeof(PdfForm));
-            
-            var field = FindFormField(fieldName);
-            if (field == null)
-                throw new ArgumentException($"Form field '{fieldName}' not found");
+        ObjectDisposedException.ThrowIf(_disposed, typeof(PdfForm));
+        
+        var field = FindFormField(fieldName);
+        if (field == null)
+            throw new ArgumentException($"Form field '{fieldName}' not found");
 
-            return field.Value;
-        }
+        return field.Value;
     }
 
     public void SetFormFieldValue(string fieldName, string value)
     {
-        lock (_lock)
-        {
-            ObjectDisposedException.ThrowIf(_disposed, typeof(PdfForm));
-            
-            var fieldInfo = FindFormFieldWithAnnotation(fieldName);
-            if (fieldInfo == null)
-                throw new ArgumentException($"Form field '{fieldName}' not found");
+        ObjectDisposedException.ThrowIf(_disposed, typeof(PdfForm));
+        
+        var fieldInfo = FindFormFieldWithAnnotation(fieldName);
+        if (fieldInfo == null)
+            throw new ArgumentException($"Form field '{fieldName}' not found");
 
-            try
+        try
+        {
+            SetAnnotFieldValue(fieldInfo.Value.annot, fieldInfo.Value.field.Type, value);
+        }
+        finally
+        {
+            PDFium.FPDFPage_CloseAnnot(fieldInfo.Value.annot);
+            
+            if (_formInitialized)
             {
-                SetAnnotFieldValue(fieldInfo.Value.annot, fieldInfo.Value.field.Type, value);
+                PDFium.FORM_OnBeforeClosePage(fieldInfo.Value.page, _formHandle);
             }
-            finally
-            {
-                PDFium.FPDFPage_CloseAnnot(fieldInfo.Value.annot);
-                
-                if (_formInitialized)
-                {
-                    PDFium.FORM_OnBeforeClosePage(fieldInfo.Value.page, _formHandle);
-                }
-                PDFium.FPDF_ClosePage(fieldInfo.Value.page);
-            }
+            PDFium.FPDF_ClosePage(fieldInfo.Value.page);
         }
     }
 
@@ -358,34 +353,31 @@ public class PdfForm : IDisposable
 
     public void SetListBoxSelections(string fieldName, string[] selectedValues)
     {
-        lock (_lock)
+        ObjectDisposedException.ThrowIf(_disposed, typeof(PdfForm));
+        
+        // For multi-select list boxes
+        var fieldInfo = FindFormFieldWithAnnotation(fieldName);
+        if (fieldInfo == null)
+            throw new ArgumentException($"Form field '{fieldName}' not found");
+
+        try
         {
-            ObjectDisposedException.ThrowIf(_disposed, typeof(PdfForm));
+            if (fieldInfo.Value.field.Type != FormFieldType.ListBox)
+                throw new InvalidOperationException($"Field '{fieldName}' is not a list box");
+
+            // Join multiple selections (PDFium typically uses arrays, but we'll use comma-separated for simplicity)
+            string value = string.Join(",", selectedValues);
+            PDFium.FPDFAnnot_SetStringValue(fieldInfo.Value.annot, "V", value);
+        }
+        finally
+        {
+            PDFium.FPDFPage_CloseAnnot(fieldInfo.Value.annot);
             
-            // For multi-select list boxes
-            var fieldInfo = FindFormFieldWithAnnotation(fieldName);
-            if (fieldInfo == null)
-                throw new ArgumentException($"Form field '{fieldName}' not found");
-
-            try
+            if (_formInitialized)
             {
-                if (fieldInfo.Value.field.Type != FormFieldType.ListBox)
-                    throw new InvalidOperationException($"Field '{fieldName}' is not a list box");
-
-                // Join multiple selections (PDFium typically uses arrays, but we'll use comma-separated for simplicity)
-                string value = string.Join(",", selectedValues);
-                PDFium.FPDFAnnot_SetStringValue(fieldInfo.Value.annot, "V", value);
+                PDFium.FORM_OnBeforeClosePage(fieldInfo.Value.page, _formHandle);
             }
-            finally
-            {
-                PDFium.FPDFPage_CloseAnnot(fieldInfo.Value.annot);
-                
-                if (_formInitialized)
-                {
-                    PDFium.FORM_OnBeforeClosePage(fieldInfo.Value.page, _formHandle);
-                }
-                PDFium.FPDF_ClosePage(fieldInfo.Value.page);
-            }
+            PDFium.FPDF_ClosePage(fieldInfo.Value.page);
         }
     }
 
@@ -460,7 +452,7 @@ public class PdfForm : IDisposable
 
     public void Dispose()
     {
-        lock (_lock)
+        lock (_disposeLock)
         {
             if (_disposed)
                 return;
