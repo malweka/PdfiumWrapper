@@ -2,6 +2,7 @@ using Xunit.Abstractions;
 
 namespace Malweka.PdfiumSdk.Tests;
 
+[Collection("PDF Tests")]
 public class PdfFormTests
 {
     private readonly ITestOutputHelper _testOutputHelper;
@@ -81,9 +82,7 @@ public class PdfFormTests
     public void Set_and_read()
     {
         // Arrange
-
         string outputPath = GetUniqueTestFilePath("read_and_save");
-        //File.Copy(FormW2Path, outputPath, overwrite: true);
 
         using var doc = new PdfDocument(FormW2Path);
         using var form = doc.GetForm();
@@ -96,8 +95,8 @@ public class PdfFormTests
 
         doc.Save(outputPath);
 
-        var verifyDoc = new PdfDocument(outputPath);
-        var verifyForm = verifyDoc.GetForm();
+        using var verifyDoc = new PdfDocument(outputPath);
+        using var verifyForm = verifyDoc.GetForm();
 
         // Act
         var firstNameValue = verifyForm.GetFormFieldValue(firstName);

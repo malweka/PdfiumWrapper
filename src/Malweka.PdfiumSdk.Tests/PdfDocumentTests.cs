@@ -2,6 +2,7 @@ using SkiaSharp;
 
 namespace Malweka.PdfiumSdk.Tests;
 
+[Collection("PDF Tests")]
 public class PdfDocumentTests : IDisposable
 {
     private const string ContractPdfPath = "Docs/contract.pdf";
