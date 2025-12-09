@@ -1,4 +1,5 @@
-﻿using System.Runtime.InteropServices;
+﻿using System.Drawing;
+using System.Runtime.InteropServices;
 
 namespace Malweka.PdfiumSdk;
 
@@ -8,10 +9,12 @@ namespace Malweka.PdfiumSdk;
 public class PdfPage : IDisposable
 {
     private IntPtr _page;
+    private IntPtr _document;
     private bool _disposed;
 
     internal PdfPage(IntPtr document, int pageIndex)
     {
+        _document = document;
         PageIndex = pageIndex;
         _page = PDFium.FPDF_LoadPage(document, pageIndex);
         if (_page == IntPtr.Zero)
@@ -25,6 +28,9 @@ public class PdfPage : IDisposable
     public double Width => PDFium.FPDF_GetPageWidth(_page);
 
     public double Height => PDFium.FPDF_GetPageHeight(_page);
+
+    internal IntPtr Handle => _page;
+    internal IntPtr DocumentHandle => _document;
 
     public byte[] RenderToBytes(int width, int height, int flags = 0)
     {
@@ -156,6 +162,128 @@ public class PdfPage : IDisposable
             PDFium.FPDFBitmap_Destroy(thumbnail);
         }
     }
+
+    #region Page Editing
+
+    /// <summary>
+    /// Add a text object to the page
+    /// </summary>
+    public PdfTextObject AddText(string text, float x, float y, string font = "Helvetica", float fontSize = 12)
+    {
+        var textObj = PdfTextObject.Create(_document, font, fontSize);
+        textObj.Text = text;
+        
+        // Position the text object
+        textObj.SetMatrix(1, 0, 0, 1, x, y);
+        
+        // Insert into page
+        PDFium.FPDFPage_InsertObject(_page, textObj.Handle);
+        textObj.IsAttachedToPage = true;
+        
+        return textObj;
+    }
+
+    /// <summary>
+    /// Add an image object to the page
+    /// </summary>
+    public PdfImageObject AddImage(byte[] imageBytes, float x, float y, float width, float height)
+    {
+        var imageObj = PdfImageObject.Create(_document);
+        imageObj.SetImage(imageBytes, _page);
+        imageObj.SetPositionAndSize(x, y, width, height);
+        
+        // Insert into page
+        PDFium.FPDFPage_InsertObject(_page, imageObj.Handle);
+        imageObj.IsAttachedToPage = true;
+        
+        return imageObj;
+    }
+
+    /// <summary>
+    /// Add a path object to the page
+    /// </summary>
+    public PdfPathObject AddPath()
+    {
+        var pathObj = PdfPathObject.Create(_document);
+        
+        // Insert into page
+        PDFium.FPDFPage_InsertObject(_page, pathObj.Handle);
+        pathObj.IsAttachedToPage = true;
+        
+        return pathObj;
+    }
+
+    /// <summary>
+    /// Add a rectangle to the page
+    /// </summary>
+    public PdfPathObject AddRectangle(float x, float y, float width, float height, Color? fillColor = null, Color? strokeColor = null)
+    {
+        var rectObj = PdfPathObject.CreateRectangle(_document, x, y, width, height);
+        
+        if (fillColor.HasValue)
+        {
+            rectObj.FillColor = fillColor.Value;
+            rectObj.SetDrawMode(PdfPathFillMode.Winding, strokeColor.HasValue);
+        }
+        else if (strokeColor.HasValue)
+        {
+            rectObj.SetDrawMode(PdfPathFillMode.None, true);
+        }
+        
+        if (strokeColor.HasValue)
+        {
+            rectObj.StrokeColor = strokeColor.Value;
+        }
+        
+        // Insert into page
+        PDFium.FPDFPage_InsertObject(_page, rectObj.Handle);
+        rectObj.IsAttachedToPage = true;
+        
+        return rectObj;
+    }
+
+    /// <summary>
+    /// Remove a page object from the page
+    /// </summary>
+    public bool RemoveObject(PdfPageObject pageObject)
+    {
+        if (pageObject == null)
+            throw new ArgumentNullException(nameof(pageObject));
+
+        var result = PDFium.FPDFPage_RemoveObject(_page, pageObject.Handle);
+        if (result)
+        {
+            pageObject.IsAttachedToPage = false;
+        }
+        return result;
+    }
+
+    /// <summary>
+    /// Generate the page content stream (required after adding/modifying objects)
+    /// </summary>
+    public void GenerateContent()
+    {
+        if (!PDFium.FPDFPage_GenerateContent(_page))
+            throw new InvalidOperationException("Failed to generate page content");
+    }
+
+    /// <summary>
+    /// Get the number of objects on the page
+    /// </summary>
+    public int ObjectCount => PDFium.FPDFPage_CountObjects(_page);
+
+    /// <summary>
+    /// Get a page object by index
+    /// </summary>
+    public IntPtr GetObject(int index)
+    {
+        if (index < 0 || index >= ObjectCount)
+            throw new ArgumentOutOfRangeException(nameof(index));
+
+        return PDFium.FPDFPage_GetObject(_page, index);
+    }
+
+    #endregion
 
     public void Dispose()
     {

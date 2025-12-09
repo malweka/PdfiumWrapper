@@ -1,9 +1,11 @@
 # Malweka.PdfiumSdk
 
-A modern, high-level .NET 8 wrapper for PDFium that makes PDF manipulation easy and intuitive. This library provides a clean C# API for working with PDF documents, including rendering, merging, form filling, metadata management, and more.
+A modern, high-level .NET 8 wrapper for PDFium that makes PDF manipulation easy and intuitive. This library provides a clean C# API for working with PDF documents, including creation, rendering, merging, form filling, metadata management, and more.
 
 ## Features
 
+- **PDF Creation** — Create new PDF documents from scratch with text, images, and shapes
+- **Page Editing** — Add text objects, images, paths, and rectangles to pages
 - **PDF Rendering** — Convert PDF pages to images (PNG, JPEG, WebP, etc.) with customizable DPI
 - **PDF Merging** — Combine multiple PDFs or extract specific pages
 - **Form Filling** — Read and write PDF form fields (text fields, checkboxes, dropdowns, radio buttons)
@@ -49,6 +51,33 @@ using var document = new PdfDocument(stream);
 using var document = new PdfDocument("secure.pdf", password: "secret");
 ```
 
+### Create a New PDF Document
+
+```csharp
+using Malweka.PdfiumSdk;
+using System.Drawing;
+
+// Create a new empty document
+using var document = new PdfDocument();
+
+// Add a page (US Letter size)
+using var page = document.AddPage(width: 612, height: 792);
+
+// Add text
+var text = page.AddText("Hello World", x: 100, y: 700);
+text.Font = "Helvetica";
+text.FontSize = 24;
+text.Color = Color.Black;
+
+// Add a rectangle
+var rect = page.AddRectangle(x: 100, y: 500, width: 200, height: 100,
+    fillColor: Color.LightBlue, strokeColor: Color.Black);
+
+// Generate content and save
+page.GenerateContent();
+document.Save("created.pdf");
+```
+
 ### Convert PDF to Images
 
 ```csharp
@@ -91,6 +120,7 @@ merger.Save("merged.pdf");
 | Document | Description |
 |----------|-------------|
 | [API Reference](docs/API-REFERENCE.md) | Complete API documentation for all classes |
+| [PDF Editing Guide](docs/PDF-EDITING.md) | Creating PDFs, adding text, images, and shapes |
 | [Best Practices](docs/BEST-PRACTICES.md) | Thread safety, ASP.NET Core guidance, performance tips |
 | [Examples](docs/EXAMPLES.md) | Detailed code examples for common scenarios |
 | [Troubleshooting](docs/TROUBLESHOOTING.md) | Common issues and solutions |

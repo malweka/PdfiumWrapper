@@ -6,6 +6,11 @@ This document provides complete API documentation for all public classes in Malw
 
 - [PdfDocument](#pdfdocument)
 - [PdfPage](#pdfpage)
+- [Page Object Classes](#page-object-classes)
+  - [PdfPageObject](#pdfpageobject)
+  - [PdfTextObject](#pdftextobject)
+  - [PdfImageObject](#pdfimageobject)
+  - [PdfPathObject](#pdfpathobject)
 - [PdfForm](#pdfform)
 - [FormField](#formfield)
 - [FormFieldType](#formfieldtype)
@@ -39,6 +44,18 @@ public class PdfDocument : IDisposable
 This class is **NOT** thread-safe. Do not access the same `PdfDocument` instance from multiple threads concurrently. Each instance should be used from a single thread at a time, or external synchronization must be provided.
 
 ### Constructors
+
+#### PdfDocument()
+
+Creates a new empty PDF document for adding pages and content.
+
+```csharp
+using var document = new PdfDocument();
+using var page = document.AddPage();
+// Add content...
+page.GenerateContent();
+document.Save("new_document.pdf");
+```
 
 #### PdfDocument(string filePath, string password = null)
 
@@ -93,6 +110,35 @@ using var document = new PdfDocument(stream);
 | `Attachments` | `PdfAttachments` | Access to embedded file attachments |
 
 ### Methods
+
+#### AddPage(double width = 612, double height = 792, int? index = null)
+
+Adds a new page to the document. Used when creating new PDFs.
+
+```csharp
+// Add page with default US Letter size (612 x 792 points)
+using var page = document.AddPage();
+
+// Add page with custom dimensions (A4)
+using var page = document.AddPage(width: 595, height: 842);
+
+// Insert page at specific position
+using var page = document.AddPage(width: 612, height: 792, index: 0);
+```
+
+**Parameters:**
+- `width` — Page width in points (default: 612 = US Letter)
+- `height` — Page height in points (default: 792 = US Letter)
+- `index` — Optional insertion index (null = append at end)
+
+**Returns:** `PdfPage` instance (must be disposed)
+
+**Common Page Sizes:**
+| Size | Width | Height |
+|------|-------|--------|
+| US Letter | 612 | 792 |
+| A4 | 595 | 842 |
+| Legal | 612 | 1008 |
 
 #### GetPage(int pageIndex)
 
@@ -293,7 +339,7 @@ byte[] pdfBytes = memoryStream.ToArray();
 
 ## PdfPage
 
-Represents a single page in a PDF document. Provides rendering and text extraction capabilities.
+Represents a single page in a PDF document. Provides rendering, text extraction, and page editing capabilities.
 
 ### Declaration
 
@@ -310,7 +356,99 @@ public class PdfPage : IDisposable
 | `Height` | `double` | Page height in points |
 | `HasEmbeddedThumbnail` | `bool` | Whether the page has an embedded thumbnail |
 
-### Methods
+### Page Editing Methods
+
+#### AddText(string text, float x, float y, string font = "Helvetica", float fontSize = 12)
+
+Adds a text object to the page.
+
+```csharp
+var text = page.AddText("Hello World", x: 100, y: 700);
+text.Font = "Helvetica-Bold";
+text.FontSize = 24;
+text.Color = Color.Black;
+```
+
+**Parameters:**
+- `text` — The text content
+- `x` — X position in points (from left)
+- `y` — Y position in points (from bottom)
+- `font` — Font name (default: "Helvetica")
+- `fontSize` — Font size in points (default: 12)
+
+**Returns:** `PdfTextObject` instance
+
+#### AddImage(byte[] imageBytes, float x, float y, float width, float height)
+
+Adds an image object to the page.
+
+```csharp
+var imageBytes = File.ReadAllBytes("logo.png");
+var image = page.AddImage(imageBytes, x: 100, y: 500, width: 200, height: 100);
+```
+
+**Parameters:**
+- `imageBytes` — Image data (PNG, JPEG, etc.)
+- `x` — X position of bottom-left corner
+- `y` — Y position of bottom-left corner
+- `width` — Display width in points
+- `height` — Display height in points
+
+**Returns:** `PdfImageObject` instance
+
+#### AddRectangle(float x, float y, float width, float height, Color? fillColor, Color? strokeColor)
+
+Adds a rectangle to the page.
+
+```csharp
+var rect = page.AddRectangle(
+    x: 100, y: 400, 
+    width: 200, height: 100,
+    fillColor: Color.LightBlue,
+    strokeColor: Color.Black
+);
+rect.StrokeWidth = 2;
+```
+
+**Parameters:**
+- `x` — X position of bottom-left corner
+- `y` — Y position of bottom-left corner
+- `width` — Rectangle width in points
+- `height` — Rectangle height in points
+- `fillColor` — Fill color (null for no fill)
+- `strokeColor` — Stroke color (null for no stroke)
+
+**Returns:** `PdfPathObject` instance
+
+#### AddPath()
+
+Creates a new empty path object for custom shapes.
+
+```csharp
+var path = page.AddPath();
+path.MoveTo(100, 300);
+path.LineTo(200, 300);
+path.LineTo(150, 200);
+path.Close();
+path.FillColor = Color.Red;
+path.StrokeColor = Color.Black;
+path.SetDrawMode(PdfPathFillMode.Winding, stroke: true);
+```
+
+**Returns:** `PdfPathObject` instance
+
+#### GenerateContent()
+
+Generates the page content stream. **Must be called after adding or modifying page objects, before saving.**
+
+```csharp
+page.AddText("Hello", 100, 700);
+page.AddRectangle(100, 500, 200, 100, Color.Blue, null);
+page.GenerateContent();  // Required!
+document.Save("output.pdf");
+```
+
+### Text Extraction Methods
 
 #### ExtractText()
 
@@ -323,6 +461,8 @@ Console.WriteLine(text);
 ```
 
 **Returns:** Text content of the page
+
+### Rendering Methods
 
 #### RenderToBytes(int width, int height, int flags = 0)
 
@@ -367,6 +507,154 @@ if (size.HasValue)
 ```
 
 **Returns:** Tuple of (width, height) or `null`
+
+---
+
+## Page Object Classes
+
+Base classes for objects that can be added to PDF pages.
+
+### PdfPageObject
+
+Abstract base class for all page objects.
+
+```csharp
+public abstract class PdfPageObject : IDisposable
+```
+
+#### Methods
+
+| Method | Description |
+|--------|-------------|
+| `GetBounds()` | Returns the bounding rectangle of the object |
+| `GetMatrix()` | Returns the transformation matrix |
+| `SetMatrix(matrix)` | Sets the transformation matrix |
+| `Transform(a, b, c, d, e, f)` | Applies a transformation |
+| `HasTransparency` | Returns whether the object has transparency |
+
+---
+
+### PdfTextObject
+
+Represents text content on a PDF page.
+
+```csharp
+public class PdfTextObject : PdfPageObject
+```
+
+#### Properties
+
+| Property | Type | Description |
+|----------|------|-------------|
+| `Font` | `string` | Font name (e.g., "Helvetica", "Times-Roman") |
+| `FontSize` | `float` | Font size in points |
+| `Color` | `Color` | Text color |
+
+#### Example
+
+```csharp
+var text = page.AddText("Hello World", x: 100, y: 700);
+text.Font = "Helvetica-Bold";
+text.FontSize = 24;
+text.Color = Color.DarkBlue;
+```
+
+#### Standard Fonts
+
+| Font Family | Variants |
+|-------------|----------|
+| Helvetica | Helvetica, Helvetica-Bold, Helvetica-Oblique, Helvetica-BoldOblique |
+| Times | Times-Roman, Times-Bold, Times-Italic, Times-BoldItalic |
+| Courier | Courier, Courier-Bold, Courier-Oblique, Courier-BoldOblique |
+
+---
+
+### PdfImageObject
+
+Represents an image on a PDF page.
+
+```csharp
+public class PdfImageObject : PdfPageObject
+```
+
+#### Creation
+
+Images are created via `page.AddImage()`:
+
+```csharp
+var imageBytes = File.ReadAllBytes("photo.png");
+var image = page.AddImage(imageBytes, x: 100, y: 500, width: 200, height: 150);
+```
+
+#### Supported Formats
+
+Images are decoded using SkiaSharp:
+- PNG
+- JPEG
+- WebP
+- GIF
+- BMP
+
+---
+
+### PdfPathObject
+
+Represents vector paths and shapes on a PDF page.
+
+```csharp
+public class PdfPathObject : PdfPageObject
+```
+
+#### Properties
+
+| Property | Type | Description |
+|----------|------|-------------|
+| `FillColor` | `Color` | Fill color for the path |
+| `StrokeColor` | `Color` | Stroke (outline) color |
+| `StrokeWidth` | `float` | Stroke width in points |
+
+#### Path Drawing Methods
+
+| Method | Description |
+|--------|-------------|
+| `MoveTo(x, y)` | Move to point (starts new subpath) |
+| `LineTo(x, y)` | Draw line to point |
+| `BezierTo(x1, y1, x2, y2, x3, y3)` | Draw cubic Bézier curve |
+| `Close()` | Close current subpath |
+| `SetDrawMode(fillMode, stroke)` | Set fill and stroke behavior |
+
+#### PdfPathFillMode
+
+| Value | Description |
+|-------|-------------|
+| `None` | No fill |
+| `Alternate` | Alternate (even-odd) fill rule |
+| `Winding` | Winding (non-zero) fill rule |
+
+#### Example: Triangle
+
+```csharp
+var triangle = page.AddPath();
+triangle.MoveTo(150, 300);   // Top
+triangle.LineTo(100, 200);   // Bottom-left
+triangle.LineTo(200, 200);   // Bottom-right
+triangle.Close();
+
+triangle.FillColor = Color.Red;
+triangle.StrokeColor = Color.DarkRed;
+triangle.StrokeWidth = 2;
+triangle.SetDrawMode(PdfPathFillMode.Winding, stroke: true);
+```
+
+#### Example: Fluent API
+
+```csharp
+var path = page.AddPath();
+path.MoveTo(100, 300)
+    .LineTo(200, 300)
+    .LineTo(150, 200)
+    .Close();
+```
 
 ---
 

@@ -1,4 +1,4 @@
-﻿using SkiaSharp;
+﻿﻿using SkiaSharp;
 using System.Runtime.InteropServices;
 
 namespace Malweka.PdfiumSdk;
@@ -22,6 +22,18 @@ public class PdfDocument : IDisposable
     static PdfDocument()
     {
         PDFium.FPDF_InitLibrary();
+    }
+
+    /// <summary>
+    /// Create a new empty PDF document
+    /// </summary>
+    public PdfDocument()
+    {
+        Document = PDFium.FPDF_CreateNewDocument();
+        if (Document == IntPtr.Zero)
+        {
+            throw new InvalidOperationException($"Failed to create new PDF document. Error: {PDFium.FPDF_GetLastError()}");
+        }
     }
 
     public PdfDocument(string filePath, string password = null)
@@ -104,6 +116,56 @@ public class PdfDocument : IDisposable
             throw new ArgumentOutOfRangeException(nameof(pageIndex));
 
         return new PdfPage(Document, pageIndex);
+    }
+
+    /// <summary>
+    /// Add a new page to the document
+    /// </summary>
+    /// <param name="width">Page width in points (default: 612 = US Letter width)</param>
+    /// <param name="height">Page height in points (default: 792 = US Letter height)</param>
+    /// <param name="index">Index where to insert the page (default: -1 = append at end)</param>
+    /// <returns>The newly created page</returns>
+    public PdfPage AddPage(int width = 612, int height = 792, int index = -1)
+    {
+        if (index == -1)
+            index = PageCount; // Append at end
+
+        var pageHandle = PDFium.FPDFPage_New(Document, index, width, height);
+        if (pageHandle == IntPtr.Zero)
+            throw new InvalidOperationException($"Failed to create new page. Error: {PDFium.FPDF_GetLastError()}");
+
+        // Close the page handle and re-open it using the standard method
+        PDFium.FPDF_ClosePage(pageHandle);
+        return new PdfPage(Document, index);
+    }
+
+    /// <summary>
+    /// Delete a page from the document by index
+    /// </summary>
+    /// <param name="pageIndex">The 0-based index of the page to delete</param>
+    /// <exception cref="ArgumentOutOfRangeException">Thrown when pageIndex is out of range</exception>
+    public void DeletePage(int pageIndex)
+    {
+        if (_disposed)
+            throw new ObjectDisposedException(nameof(PdfDocument));
+
+        if (pageIndex < 0 || pageIndex >= PageCount)
+            throw new ArgumentOutOfRangeException(nameof(pageIndex), $"Page index must be between 0 and {PageCount - 1}");
+
+        PDFium.FPDFPage_Delete(Document, pageIndex);
+    }
+
+    /// <summary>
+    /// Delete a page from the document
+    /// </summary>
+    /// <param name="page">The page to delete</param>
+    /// <exception cref="ArgumentNullException">Thrown when page is null</exception>
+    public void DeletePage(PdfPage page)
+    {
+        if (page == null)
+            throw new ArgumentNullException(nameof(page));
+
+        DeletePage(page.PageIndex);
     }
 
     public PdfPage[] GetAllPages()

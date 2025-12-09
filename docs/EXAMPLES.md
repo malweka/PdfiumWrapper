@@ -4,6 +4,7 @@ This document provides detailed code examples for common scenarios using Malweka
 
 ## Table of Contents
 
+- [PDF Creation](#pdf-creation)
 - [PDF Rendering](#pdf-rendering)
 - [PDF Merging](#pdf-merging)
 - [Form Filling](#form-filling)
@@ -12,6 +13,287 @@ This document provides detailed code examples for common scenarios using Malweka
 - [Bookmarks](#bookmarks)
 - [Attachments](#attachments)
 - [Advanced Scenarios](#advanced-scenarios)
+
+---
+
+## PDF Creation
+
+### Create a Simple PDF
+
+```csharp
+using Malweka.PdfiumSdk;
+using System.Drawing;
+
+using var document = new PdfDocument();
+using var page = document.AddPage(width: 612, height: 792); // US Letter
+
+// Add title
+var title = page.AddText("Hello World", x: 100, y: 700);
+title.Font = "Helvetica";
+title.FontSize = 24;
+title.Color = Color.Black;
+
+// Add body text
+var body = page.AddText("This is a sample PDF.", x: 100, y: 650);
+body.Font = "Helvetica";
+body.FontSize = 12;
+body.Color = Color.Gray;
+
+page.GenerateContent();
+document.Save("hello_world.pdf");
+```
+
+### Create PDF with Different Page Sizes
+
+```csharp
+using var document = new PdfDocument();
+
+// US Letter (default)
+using var letterPage = document.AddPage();
+
+// A4 Portrait
+using var a4Page = document.AddPage(width: 595, height: 842);
+
+// A4 Landscape  
+using var a4Landscape = document.AddPage(width: 842, height: 595);
+
+// Custom size
+using var customPage = document.AddPage(width: 400, height: 600);
+
+// Add content to each page...
+letterPage.AddText("US Letter", 100, 700);
+letterPage.GenerateContent();
+
+a4Page.AddText("A4 Portrait", 100, 800);
+a4Page.GenerateContent();
+
+a4Landscape.AddText("A4 Landscape", 100, 550);
+a4Landscape.GenerateContent();
+
+customPage.AddText("Custom Size", 100, 550);
+customPage.GenerateContent();
+
+document.Save("multiple_sizes.pdf");
+```
+
+### Create PDF with Images
+
+```csharp
+using var document = new PdfDocument();
+using var page = document.AddPage();
+
+// Add title
+var title = page.AddText("Document with Image", x: 100, y: 700);
+title.Font = "Helvetica-Bold";
+title.FontSize = 18;
+title.Color = Color.Black;
+
+// Add image from file
+var imageBytes = File.ReadAllBytes("logo.png");
+var image = page.AddImage(imageBytes, x: 100, y: 500, width: 200, height: 100);
+
+// Add caption below image
+var caption = page.AddText("Figure 1: Company Logo", x: 100, y: 480);
+caption.Font = "Helvetica-Oblique";
+caption.FontSize = 10;
+caption.Color = Color.Gray;
+
+page.GenerateContent();
+document.Save("with_image.pdf");
+```
+
+### Create PDF with Shapes
+
+```csharp
+using var document = new PdfDocument();
+using var page = document.AddPage();
+
+// Title
+var title = page.AddText("Shapes Demo", x: 250, y: 750);
+title.Font = "Helvetica-Bold";
+title.FontSize = 20;
+title.Color = Color.Black;
+
+// Filled rectangle
+var rect = page.AddRectangle(
+    x: 100, y: 600, 
+    width: 150, height: 80,
+    fillColor: Color.LightBlue, 
+    strokeColor: Color.Blue
+);
+rect.StrokeWidth = 2;
+
+// Rectangle outline only (border)
+var border = page.AddRectangle(
+    x: 300, y: 600,
+    width: 150, height: 80,
+    fillColor: null,
+    strokeColor: Color.Red
+);
+border.StrokeWidth = 3;
+
+// Triangle using path
+var triangle = page.AddPath();
+triangle.MoveTo(175, 500);   // Top point
+triangle.LineTo(100, 400);   // Bottom-left
+triangle.LineTo(250, 400);   // Bottom-right
+triangle.Close();
+triangle.FillColor = Color.LightGreen;
+triangle.StrokeColor = Color.DarkGreen;
+triangle.StrokeWidth = 2;
+triangle.SetDrawMode(PdfPathFillMode.Winding, stroke: true);
+
+page.GenerateContent();
+document.Save("shapes.pdf");
+```
+
+### Create Multi-Page PDF
+
+```csharp
+using var document = new PdfDocument();
+
+for (int i = 0; i < 5; i++)
+{
+    using var page = document.AddPage();
+    
+    // Page header
+    var header = page.AddText($"Page {i + 1} of 5", x: 250, y: 750);
+    header.Font = "Helvetica-Bold";
+    header.FontSize = 18;
+    header.Color = Color.DarkBlue;
+    
+    // Page border
+    var border = page.AddRectangle(
+        x: 50, y: 50, 
+        width: 512, height: 692,
+        fillColor: null, 
+        strokeColor: Color.LightGray
+    );
+    
+    // Page content
+    var content = page.AddText(
+        $"This is the content of page {i + 1}.", 
+        x: 100, y: 600
+    );
+    content.Font = "Times-Roman";
+    content.FontSize = 12;
+    content.Color = Color.Black;
+    
+    // Footer
+    var footer = page.AddText(
+        "Generated with Malweka.PdfiumSdk", 
+        x: 200, y: 30
+    );
+    footer.Font = "Helvetica";
+    footer.FontSize = 8;
+    footer.Color = Color.Gray;
+    
+    page.GenerateContent();
+}
+
+document.Save("multipage.pdf");
+```
+
+### Create PDF Invoice Template
+
+```csharp
+using var document = new PdfDocument();
+using var page = document.AddPage();
+
+float pageWidth = 612;
+float pageHeight = 792;
+float margin = 50;
+
+// Company header
+var companyName = page.AddText("ACME Corporation", margin, pageHeight - 50);
+companyName.Font = "Helvetica-Bold";
+companyName.FontSize = 24;
+companyName.Color = Color.DarkBlue;
+
+var tagline = page.AddText("Quality Products Since 1990", margin, pageHeight - 75);
+tagline.Font = "Helvetica";
+tagline.FontSize = 10;
+tagline.Color = Color.Gray;
+
+// Invoice title
+var invoiceTitle = page.AddText("INVOICE", pageWidth - 150, pageHeight - 50);
+invoiceTitle.Font = "Helvetica-Bold";
+invoiceTitle.FontSize = 28;
+invoiceTitle.Color = Color.Black;
+
+// Invoice details
+var invoiceNum = page.AddText("Invoice #: INV-2024-001", pageWidth - 200, pageHeight - 100);
+invoiceNum.Font = "Helvetica";
+invoiceNum.FontSize = 10;
+invoiceNum.Color = Color.Black;
+
+var invoiceDate = page.AddText("Date: January 15, 2024", pageWidth - 200, pageHeight - 115);
+invoiceDate.Font = "Helvetica";
+invoiceDate.FontSize = 10;
+invoiceDate.Color = Color.Black;
+
+// Horizontal line
+var line = page.AddRectangle(margin, pageHeight - 140, pageWidth - 2 * margin, 1, Color.Gray, null);
+
+// Bill To section
+var billTo = page.AddText("Bill To:", margin, pageHeight - 170);
+billTo.Font = "Helvetica-Bold";
+billTo.FontSize = 12;
+billTo.Color = Color.Black;
+
+var customerName = page.AddText("John Smith", margin, pageHeight - 190);
+var customerAddr = page.AddText("123 Main Street", margin, pageHeight - 205);
+var customerCity = page.AddText("Anytown, ST 12345", margin, pageHeight - 220);
+
+// Table header background
+var tableHeader = page.AddRectangle(margin, pageHeight - 280, pageWidth - 2 * margin, 25, Color.LightGray, null);
+
+// Table headers
+var descHeader = page.AddText("Description", margin + 10, pageHeight - 270);
+descHeader.Font = "Helvetica-Bold";
+descHeader.FontSize = 10;
+
+var qtyHeader = page.AddText("Qty", 350, pageHeight - 270);
+qtyHeader.Font = "Helvetica-Bold";
+qtyHeader.FontSize = 10;
+
+var priceHeader = page.AddText("Price", 420, pageHeight - 270);
+priceHeader.Font = "Helvetica-Bold";
+priceHeader.FontSize = 10;
+
+var totalHeader = page.AddText("Total", 500, pageHeight - 270);
+totalHeader.Font = "Helvetica-Bold";
+totalHeader.FontSize = 10;
+
+// Table row
+var item1 = page.AddText("Widget Pro", margin + 10, pageHeight - 300);
+var qty1 = page.AddText("5", 350, pageHeight - 300);
+var price1 = page.AddText("$99.99", 420, pageHeight - 300);
+var total1 = page.AddText("$499.95", 500, pageHeight - 300);
+
+// Subtotal
+var subtotalLabel = page.AddText("Subtotal:", 420, pageHeight - 350);
+var subtotalValue = page.AddText("$499.95", 500, pageHeight - 350);
+
+var taxLabel = page.AddText("Tax (8%):", 420, pageHeight - 370);
+var taxValue = page.AddText("$40.00", 500, pageHeight - 370);
+
+var grandTotalLabel = page.AddText("Total:", 420, pageHeight - 400);
+grandTotalLabel.Font = "Helvetica-Bold";
+grandTotalLabel.FontSize = 14;
+var grandTotalValue = page.AddText("$539.95", 500, pageHeight - 400);
+grandTotalValue.Font = "Helvetica-Bold";
+grandTotalValue.FontSize = 14;
+
+// Footer
+var thankYou = page.AddText("Thank you for your business!", margin, 80);
+thankYou.Font = "Helvetica-Oblique";
+thankYou.FontSize = 12;
+thankYou.Color = Color.Gray;
+
+page.GenerateContent();
+document.Save("invoice.pdf");
+```
 
 ---
 

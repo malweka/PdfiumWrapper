@@ -1,4 +1,4 @@
-﻿using System.Runtime.InteropServices;
+﻿﻿using System.Runtime.InteropServices;
 
 namespace Malweka.PdfiumSdk;
 
@@ -46,9 +46,10 @@ public static partial class PDFium
     [return: MarshalAs(UnmanagedType.Bool)]
     public static partial bool FPDF_CopyViewerPreferences(IntPtr dest_doc, IntPtr src_doc);
 
+
     #endregion
 
-    #region Document Creation and Saving
+    #region Document Creation
 
     /// <summary>
     /// Create a new empty PDF document
@@ -57,13 +58,6 @@ public static partial class PDFium
     [LibraryImport(LibraryName)]
     public static partial IntPtr FPDF_CreateNewDocument();
 
-    /// <summary>
-    /// Delete a page from the document
-    /// </summary>
-    /// <param name="document">Document handle</param>
-    /// <param name="page_index">0-based page index to delete</param>
-    [LibraryImport(LibraryName)]
-    public static partial void FPDFPage_Delete(IntPtr document, int page_index);
 
     #endregion
 
