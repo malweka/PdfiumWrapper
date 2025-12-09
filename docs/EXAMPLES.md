@@ -1,0 +1,939 @@
+# Examples
+
+This document provides detailed code examples for common scenarios using Malweka.PdfiumSdk.
+
+## Table of Contents
+
+- [PDF Rendering](#pdf-rendering)
+- [PDF Merging](#pdf-merging)
+- [Form Filling](#form-filling)
+- [Text Extraction](#text-extraction)
+- [Metadata Operations](#metadata-operations)
+- [Bookmarks](#bookmarks)
+- [Attachments](#attachments)
+- [Advanced Scenarios](#advanced-scenarios)
+
+---
+
+## PDF Rendering
+
+### Convert All Pages to PNG Images
+
+```csharp
+using Malweka.PdfiumSdk;
+
+using var document = new PdfDocument("document.pdf");
+
+// Simple: Save all pages as PNG at 300 DPI
+document.SaveAsPngs("output_folder", fileNamePrefix: "page", dpi: 300);
+// Creates: output_folder/page_001.png, output_folder/page_002.png, etc.
+```
+
+### Convert to JPEG with Quality Control
+
+```csharp
+using var document = new PdfDocument("document.pdf");
+
+// JPEG with 85% quality at 200 DPI (good balance of size and quality)
+document.SaveAsJpegs("output_folder", fileNamePrefix: "scan", quality: 85, dpi: 200);
+```
+
+### Convert to WebP Format
+
+```csharp
+using Malweka.PdfiumSdk;
+using SkiaSharp;
+
+using var document = new PdfDocument("document.pdf");
+
+document.SaveAsImages(
+    outputDirectory: "output_folder",
+    fileNamePrefix: "page",
+    format: SKEncodedImageFormat.Webp,
+    quality: 80,
+    dpiWidth: 150,
+    dpiHeight: 150
+);
+```
+
+### Get Images as Byte Arrays
+
+```csharp
+using var document = new PdfDocument("document.pdf");
+
+// Get all pages as PNG byte arrays
+List<byte[]> pngImages = document.ConvertToImageBytes(
+    SKEncodedImageFormat.Png, 
+    quality: 100, 
+    dpi: 150
+);
+
+// Use the images
+for (int i = 0; i < pngImages.Count; i++)
+{
+    await File.WriteAllBytesAsync($"page_{i + 1}.png", pngImages[i]);
+}
+```
+
+### Get SkiaSharp Bitmaps for Custom Processing
+
+```csharp
+using Malweka.PdfiumSdk;
+using SkiaSharp;
+
+using var document = new PdfDocument("document.pdf");
+SKBitmap[] bitmaps = document.ConvertToBitmaps(dpi: 300);
+
+try
+{
+    foreach (var bitmap in bitmaps)
+    {
+        // Apply custom image processing
+        using var surface = SKSurface.Create(new SKImageInfo(bitmap.Width, bitmap.Height));
+        var canvas = surface.Canvas;
+        
+        // Draw original
+        canvas.DrawBitmap(bitmap, 0, 0);
+        
+        // Add watermark
+        using var paint = new SKPaint
+        {
+            Color = SKColors.Red.WithAlpha(128),
+            TextSize = 48,
+            IsAntialias = true
+        };
+        canvas.DrawText("CONFIDENTIAL", 50, 100, paint);
+        
+        // Save result
+        using var image = surface.Snapshot();
+        using var data = image.Encode(SKEncodedImageFormat.Png, 100);
+        // ... save or use data
+    }
+}
+finally
+{
+    foreach (var bitmap in bitmaps)
+        bitmap.Dispose();
+}
+```
+
+### Async Rendering for UI Applications
+
+```csharp
+using var document = new PdfDocument("large_document.pdf");
+
+// Async version keeps UI responsive
+SKBitmap[] bitmaps = await document.ConvertToBitmapsAsync(dpi: 150);
+
+// Or save directly to files asynchronously
+await document.SaveAsImagesAsync(
+    "output_folder",
+    "page",
+    SKEncodedImageFormat.Png,
+    quality: 100,
+    dpiWidth: 300,
+    dpiHeight: 300
+);
+```
+
+### Render Single Page
+
+```csharp
+using var document = new PdfDocument("document.pdf");
+using var page = document.GetPage(0); // First page
+
+// Get raw BGRA bytes
+byte[] pixels = page.RenderToBytes(width: 1920, height: 1080);
+
+// Or calculate dimensions based on DPI
+double dpi = 150;
+int width = (int)(page.Width / 72.0 * dpi);
+int height = (int)(page.Height / 72.0 * dpi);
+byte[] highResPixels = page.RenderToBytes(width, height);
+```
+
+### Different DPI for Width and Height
+
+```csharp
+using var document = new PdfDocument("document.pdf");
+
+// Non-uniform DPI (rare use case)
+var bitmaps = document.ConvertToBitmaps(dpiWidth: 300, dpiHeight: 150);
+```
+
+---
+
+## PDF Merging
+
+### Merge Multiple PDF Files
+
+```csharp
+using Malweka.PdfiumSdk;
+
+using var merger = new PdfMerger();
+
+merger.AppendDocument("chapter1.pdf");
+merger.AppendDocument("chapter2.pdf");
+merger.AppendDocument("chapter3.pdf");
+
+Console.WriteLine($"Total pages: {merger.PageCount}");
+merger.Save("complete_book.pdf");
+```
+
+### Merge with Password-Protected PDFs
+
+```csharp
+using var merger = new PdfMerger();
+
+merger.AppendDocument("public.pdf");
+merger.AppendDocument("secure.pdf", password: "secret123");
+
+merger.Save("combined.pdf");
+```
+
+### Extract Specific Pages
+
+```csharp
+using var merger = new PdfMerger();
+using var source = new PdfDocument("large_document.pdf");
+
+// Extract pages 1, 3, 5-10 (1-based page numbers)
+merger.AppendPages(source, "1,3,5-10");
+merger.Save("selected_pages.pdf");
+```
+
+### Extract Pages by Index
+
+```csharp
+using var merger = new PdfMerger();
+using var source = new PdfDocument("document.pdf");
+
+// Extract first, fifth, and last pages (0-based indices)
+int lastPageIndex = source.PageCount - 1;
+merger.AppendPages(source, new[] { 0, 4, lastPageIndex });
+merger.Save("extracted.pdf");
+```
+
+### Insert Pages at Specific Position
+
+```csharp
+using var merger = new PdfMerger("main_document.pdf");
+using var coverPage = new PdfDocument("cover.pdf");
+using var appendix = new PdfDocument("appendix.pdf");
+
+// Insert cover at the beginning
+merger.InsertDocument(coverPage, insertAtIndex: 0);
+
+// Appendix goes at the end (already default behavior for Append)
+merger.AppendDocument(appendix);
+
+merger.Save("complete_document.pdf");
+```
+
+### Delete Pages
+
+```csharp
+using var merger = new PdfMerger("document.pdf");
+
+// Delete single page (0-based index)
+merger.DeletePage(0); // Remove first page
+
+// Delete multiple pages
+merger.DeletePages(new[] { 1, 3, 5 }); // Indices handled in correct order
+
+merger.Save("trimmed.pdf");
+```
+
+### Split PDF into Individual Pages
+
+```csharp
+using var source = new PdfDocument("multi_page.pdf");
+
+for (int i = 0; i < source.PageCount; i++)
+{
+    using var merger = new PdfMerger();
+    merger.AppendPages(source, new[] { i });
+    merger.Save($"page_{i + 1:D3}.pdf");
+}
+```
+
+### Merge and Get as Byte Array
+
+```csharp
+using var merger = new PdfMerger();
+merger.AppendDocument("doc1.pdf");
+merger.AppendDocument("doc2.pdf");
+
+byte[] mergedPdf = merger.ToBytes();
+
+// Use directly or save
+await File.WriteAllBytesAsync("merged.pdf", mergedPdf);
+```
+
+### Copy Viewer Preferences
+
+```csharp
+using var merger = new PdfMerger();
+using var sourceWithPrefs = new PdfDocument("source_with_zoom.pdf");
+
+merger.AppendDocument("document.pdf");
+merger.CopyViewerPreferences(sourceWithPrefs); // Copy zoom, layout settings
+
+merger.Save("with_preferences.pdf");
+```
+
+---
+
+## Form Filling
+
+### List All Form Fields
+
+```csharp
+using var document = new PdfDocument("form.pdf");
+var form = document.GetForm();
+
+if (form == null)
+{
+    Console.WriteLine("This PDF has no form fields");
+    return;
+}
+
+FormField[] fields = form.GetAllFormFields();
+
+foreach (var field in fields)
+{
+    Console.WriteLine($"Field: {field.Name}");
+    Console.WriteLine($"  Type: {field.Type}");
+    Console.WriteLine($"  Value: {field.Value}");
+    Console.WriteLine($"  Page: {field.PageIndex + 1}");
+    Console.WriteLine($"  Required: {field.IsRequired}");
+    Console.WriteLine($"  ReadOnly: {field.IsReadOnly}");
+    
+    if (field.Options?.Count > 0)
+    {
+        Console.WriteLine($"  Options: {string.Join(", ", field.Options)}");
+    }
+    Console.WriteLine();
+}
+
+form.Dispose();
+```
+
+### Fill Text Fields
+
+```csharp
+using var document = new PdfDocument("application_form.pdf");
+var form = document.GetForm();
+
+if (form != null)
+{
+    form.SetFormFieldValue("FirstName", "John");
+    form.SetFormFieldValue("LastName", "Doe");
+    form.SetFormFieldValue("Email", "john.doe@example.com");
+    form.SetFormFieldValue("Phone", "555-123-4567");
+    form.SetFormFieldValue("Address", "123 Main Street\nAnytown, USA 12345");
+    
+    form.Dispose();
+    document.Save("filled_application.pdf");
+}
+```
+
+### Work with Checkboxes
+
+```csharp
+using var document = new PdfDocument("consent_form.pdf");
+var form = document.GetForm();
+
+if (form != null)
+{
+    // Check boxes
+    form.SetFormFieldChecked("AgreeToTerms", true);
+    form.SetFormFieldChecked("ReceiveNewsletter", false);
+    form.SetFormFieldChecked("ShareData", false);
+    
+    // Read checkbox state
+    bool hasAgreed = form.GetFormFieldChecked("AgreeToTerms");
+    Console.WriteLine($"User agreed to terms: {hasAgreed}");
+    
+    form.Dispose();
+    document.Save("signed_consent.pdf");
+}
+```
+
+### Work with Dropdown/ComboBox
+
+```csharp
+using var document = new PdfDocument("registration.pdf");
+var form = document.GetForm();
+
+if (form != null)
+{
+    // Set dropdown selection
+    form.SetFormFieldValue("Country", "United States");
+    form.SetFormFieldValue("State", "California");
+    
+    // For combo boxes, you can also type custom values
+    form.SetFormFieldValue("Occupation", "Software Engineer");
+    
+    form.Dispose();
+    document.Save("completed_registration.pdf");
+}
+```
+
+### Work with List Boxes
+
+```csharp
+using var document = new PdfDocument("preferences.pdf");
+var form = document.GetForm();
+
+if (form != null)
+{
+    // Single selection
+    form.SetListBoxSelection("PrimaryLanguage", "English");
+    
+    // Multiple selections (for multi-select list boxes)
+    form.SetListBoxSelections("Skills", new[] 
+    { 
+        "C#", 
+        "JavaScript", 
+        "SQL",
+        "Azure"
+    });
+    
+    form.Dispose();
+    document.Save("preferences_filled.pdf");
+}
+```
+
+### Fill Form from Dictionary
+
+```csharp
+using var document = new PdfDocument("form.pdf");
+var form = document.GetForm();
+
+if (form != null)
+{
+    var formData = new Dictionary<string, string>
+    {
+        ["FullName"] = "Jane Smith",
+        ["Email"] = "jane@example.com",
+        ["Department"] = "Engineering",
+        ["StartDate"] = "2024-01-15"
+    };
+    
+    foreach (var (fieldName, value) in formData)
+    {
+        try
+        {
+            form.SetFormFieldValue(fieldName, value);
+        }
+        catch (ArgumentException)
+        {
+            Console.WriteLine($"Warning: Field '{fieldName}' not found");
+        }
+    }
+    
+    form.Dispose();
+    document.Save("filled_form.pdf");
+}
+```
+
+### Fill Form from JSON
+
+```csharp
+using System.Text.Json;
+
+public record FormData(
+    string FullName,
+    string Email,
+    string Phone,
+    bool AgreeToTerms,
+    string Country
+);
+
+// Load JSON
+string json = await File.ReadAllTextAsync("form_data.json");
+var data = JsonSerializer.Deserialize<FormData>(json);
+
+using var document = new PdfDocument("form.pdf");
+var form = document.GetForm();
+
+if (form != null && data != null)
+{
+    form.SetFormFieldValue("FullName", data.FullName);
+    form.SetFormFieldValue("Email", data.Email);
+    form.SetFormFieldValue("Phone", data.Phone);
+    form.SetFormFieldChecked("AgreeToTerms", data.AgreeToTerms);
+    form.SetFormFieldValue("Country", data.Country);
+    
+    form.Dispose();
+    document.Save("completed.pdf");
+}
+```
+
+---
+
+## Text Extraction
+
+### Extract Text from All Pages
+
+```csharp
+using var document = new PdfDocument("document.pdf");
+
+var allText = new StringBuilder();
+
+for (int i = 0; i < document.PageCount; i++)
+{
+    using var page = document.GetPage(i);
+    string pageText = page.ExtractText();
+    
+    allText.AppendLine($"=== Page {i + 1} ===");
+    allText.AppendLine(pageText);
+    allText.AppendLine();
+}
+
+Console.WriteLine(allText.ToString());
+```
+
+### Extract Text from Specific Page
+
+```csharp
+using var document = new PdfDocument("document.pdf");
+
+// Extract from page 5 (0-indexed)
+using var page = document.GetPage(4);
+string text = page.ExtractText();
+
+Console.WriteLine(text);
+```
+
+### Search for Text in PDF
+
+```csharp
+using var document = new PdfDocument("document.pdf");
+
+string searchTerm = "important";
+var results = new List<(int PageNumber, string Context)>();
+
+for (int i = 0; i < document.PageCount; i++)
+{
+    using var page = document.GetPage(i);
+    string text = page.ExtractText();
+    
+    if (text.Contains(searchTerm, StringComparison.OrdinalIgnoreCase))
+    {
+        // Get context around the match
+        int index = text.IndexOf(searchTerm, StringComparison.OrdinalIgnoreCase);
+        int start = Math.Max(0, index - 50);
+        int length = Math.Min(text.Length - start, 100 + searchTerm.Length);
+        string context = text.Substring(start, length);
+        
+        results.Add((i + 1, context.Trim()));
+    }
+}
+
+foreach (var (pageNum, context) in results)
+{
+    Console.WriteLine($"Page {pageNum}: ...{context}...");
+}
+```
+
+### Export Text to File
+
+```csharp
+using var document = new PdfDocument("document.pdf");
+using var writer = new StreamWriter("extracted_text.txt");
+
+for (int i = 0; i < document.PageCount; i++)
+{
+    using var page = document.GetPage(i);
+    await writer.WriteLineAsync($"--- Page {i + 1} ---");
+    await writer.WriteLineAsync(page.ExtractText());
+    await writer.WriteLineAsync();
+}
+```
+
+---
+
+## Metadata Operations
+
+### Read All Metadata
+
+```csharp
+using var document = new PdfDocument("document.pdf");
+var metadata = document.Metadata;
+
+Console.WriteLine($"Title: {metadata.Title}");
+Console.WriteLine($"Author: {metadata.Author}");
+Console.WriteLine($"Subject: {metadata.Subject}");
+Console.WriteLine($"Keywords: {metadata.Keywords}");
+Console.WriteLine($"Creator: {metadata.Creator}");
+Console.WriteLine($"Producer: {metadata.Producer}");
+Console.WriteLine($"PDF Version: {metadata.FileVersionString}");
+
+if (metadata.CreationDateTime.HasValue)
+    Console.WriteLine($"Created: {metadata.CreationDateTime.Value:yyyy-MM-dd HH:mm:ss}");
+    
+if (metadata.ModificationDateTime.HasValue)
+    Console.WriteLine($"Modified: {metadata.ModificationDateTime.Value:yyyy-MM-dd HH:mm:ss}");
+```
+
+### Get Metadata as Dictionary
+
+```csharp
+using var document = new PdfDocument("document.pdf");
+Dictionary<string, string> allMetadata = document.Metadata.GetAllMetadata();
+
+foreach (var (key, value) in allMetadata)
+{
+    if (!string.IsNullOrEmpty(value))
+        Console.WriteLine($"{key}: {value}");
+}
+```
+
+### Set Metadata
+
+```csharp
+using var document = new PdfDocument("document.pdf");
+var metadata = document.Metadata;
+
+metadata.Title = "Annual Report 2024";
+metadata.Author = "Finance Department";
+metadata.Subject = "Q4 Financial Results";
+metadata.Keywords = "finance, quarterly, 2024, annual report";
+metadata.Creator = "My Application";
+
+document.Save("document_with_metadata.pdf");
+```
+
+### Set All Metadata at Once
+
+```csharp
+using var document = new PdfDocument("document.pdf");
+
+document.Metadata.SetAllMetadata(
+    title: "Project Documentation",
+    author: "Development Team",
+    subject: "Technical Specification",
+    keywords: "api, documentation, v2.0",
+    creator: "DocGenerator v1.0",
+    producer: "Malweka.PdfiumSdk"
+);
+
+document.Save("documented.pdf");
+```
+
+### Update Modification Date
+
+```csharp
+using var document = new PdfDocument("document.pdf");
+
+document.Metadata.SetModificationDateTime(DateTime.UtcNow);
+document.Save("document.pdf");
+```
+
+### Clear All Metadata (Privacy)
+
+```csharp
+using var document = new PdfDocument("document.pdf");
+
+document.Metadata.ClearAllMetadata();
+document.Save("clean_document.pdf");
+```
+
+---
+
+## Bookmarks
+
+### Read Bookmark Hierarchy
+
+```csharp
+using var document = new PdfDocument("document.pdf");
+List<PdfBookmark> bookmarks = document.Bookmarks.GetAllBookmarks();
+
+void PrintBookmarks(List<PdfBookmark> bookmarks, int level = 0)
+{
+    string indent = new string(' ', level * 2);
+    
+    foreach (var bookmark in bookmarks)
+    {
+        Console.WriteLine($"{indent}{bookmark.Title} -> Page {bookmark.PageIndex + 1}");
+        
+        if (bookmark.Children.Count > 0)
+        {
+            PrintBookmarks(bookmark.Children, level + 1);
+        }
+    }
+}
+
+PrintBookmarks(bookmarks);
+```
+
+### Generate Table of Contents
+
+```csharp
+using var document = new PdfDocument("book.pdf");
+var bookmarks = document.Bookmarks.GetAllBookmarks();
+
+var toc = new StringBuilder();
+toc.AppendLine("# Table of Contents");
+toc.AppendLine();
+
+void AddToToc(List<PdfBookmark> bookmarks, int level)
+{
+    foreach (var bookmark in bookmarks)
+    {
+        string prefix = new string('#', level + 1);
+        toc.AppendLine($"{prefix} {bookmark.Title} (Page {bookmark.PageIndex + 1})");
+        
+        if (bookmark.Children.Count > 0)
+        {
+            AddToToc(bookmark.Children, level + 1);
+        }
+    }
+}
+
+AddToToc(bookmarks, 1);
+await File.WriteAllTextAsync("toc.md", toc.ToString());
+```
+
+---
+
+## Attachments
+
+### List Attachments
+
+```csharp
+using var document = new PdfDocument("document_with_attachments.pdf");
+var attachments = document.Attachments;
+
+Console.WriteLine($"Found {attachments.Count} attachment(s)");
+
+foreach (var attachment in attachments.GetAllAttachments())
+{
+    Console.WriteLine($"  {attachment.Name} ({attachment.Size:N0} bytes)");
+}
+```
+
+### Extract Single Attachment
+
+```csharp
+using var document = new PdfDocument("document.pdf");
+
+if (document.Attachments.Count > 0)
+{
+    var attachment = document.Attachments.GetAttachment(0);
+    
+    if (attachment != null)
+    {
+        await File.WriteAllBytesAsync(attachment.Name, attachment.Data);
+        Console.WriteLine($"Extracted: {attachment.Name}");
+    }
+}
+```
+
+### Extract All Attachments
+
+```csharp
+using var document = new PdfDocument("document.pdf");
+
+if (document.Attachments.Count > 0)
+{
+    string outputDir = "extracted_attachments";
+    document.Attachments.ExtractAll(outputDir);
+    
+    Console.WriteLine($"Extracted {document.Attachments.Count} files to {outputDir}");
+}
+```
+
+---
+
+## Advanced Scenarios
+
+### Batch PDF Processing
+
+```csharp
+public static async Task BatchConvertPdfsToImages(string inputFolder, string outputFolder, int dpi = 150)
+{
+    var pdfFiles = Directory.GetFiles(inputFolder, "*.pdf");
+    
+    foreach (var pdfFile in pdfFiles)
+    {
+        string fileName = Path.GetFileNameWithoutExtension(pdfFile);
+        string pdfOutputFolder = Path.Combine(outputFolder, fileName);
+        
+        Console.WriteLine($"Processing: {fileName}");
+        
+        try
+        {
+            using var document = new PdfDocument(pdfFile);
+            await document.SaveAsImagesAsync(
+                pdfOutputFolder,
+                "page",
+                SKEncodedImageFormat.Png,
+                100,
+                dpi,
+                dpi
+            );
+            
+            Console.WriteLine($"  Converted {document.PageCount} pages");
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  Error: {ex.Message}");
+        }
+    }
+}
+```
+
+### PDF Processing Pipeline
+
+```csharp
+public class PdfProcessor
+{
+    public async Task<ProcessingResult> ProcessAsync(Stream pdfStream)
+    {
+        using var document = new PdfDocument(pdfStream);
+        
+        var result = new ProcessingResult
+        {
+            PageCount = document.PageCount,
+            Metadata = document.Metadata.GetAllMetadata()
+        };
+        
+        // Extract text from all pages
+        var textBuilder = new StringBuilder();
+        for (int i = 0; i < document.PageCount; i++)
+        {
+            using var page = document.GetPage(i);
+            textBuilder.AppendLine(page.ExtractText());
+        }
+        result.FullText = textBuilder.ToString();
+        
+        // Generate thumbnail of first page
+        var thumbnails = document.ConvertToImageBytes(
+            SKEncodedImageFormat.Jpeg,
+            quality: 75,
+            dpi: 72
+        );
+        result.ThumbnailBytes = thumbnails.FirstOrDefault();
+        
+        // Check for forms
+        var form = document.GetForm();
+        if (form != null)
+        {
+            result.FormFields = form.GetAllFormFields()
+                .Select(f => new FormFieldInfo(f.Name, f.Type.ToString(), f.Value))
+                .ToList();
+            form.Dispose();
+        }
+        
+        // Get bookmarks
+        result.Bookmarks = document.Bookmarks.GetAllBookmarks()
+            .Select(b => b.Title)
+            .ToList();
+        
+        return result;
+    }
+}
+
+public record ProcessingResult
+{
+    public int PageCount { get; set; }
+    public Dictionary<string, string> Metadata { get; set; }
+    public string FullText { get; set; }
+    public byte[] ThumbnailBytes { get; set; }
+    public List<FormFieldInfo> FormFields { get; set; }
+    public List<string> Bookmarks { get; set; }
+}
+
+public record FormFieldInfo(string Name, string Type, string Value);
+```
+
+### ASP.NET Core File Upload and Processing
+
+```csharp
+[ApiController]
+[Route("api/pdf")]
+public class PdfApiController : ControllerBase
+{
+    [HttpPost("analyze")]
+    public async Task<IActionResult> AnalyzePdf(IFormFile file)
+    {
+        if (file == null || file.Length == 0)
+            return BadRequest("No file provided");
+        
+        using var stream = new MemoryStream();
+        await file.CopyToAsync(stream);
+        stream.Position = 0;
+        
+        try
+        {
+            using var document = new PdfDocument(stream);
+            
+            return Ok(new
+            {
+                FileName = file.FileName,
+                PageCount = document.PageCount,
+                Metadata = document.Metadata.GetAllMetadata(),
+                HasForm = document.GetForm() != null,
+                AttachmentCount = document.Attachments.Count,
+                BookmarkCount = document.Bookmarks.GetAllBookmarks().Count
+            });
+        }
+        catch (InvalidOperationException ex)
+        {
+            return BadRequest($"Invalid PDF: {ex.Message}");
+        }
+    }
+    
+    [HttpPost("thumbnail")]
+    public async Task<IActionResult> GetThumbnail(IFormFile file, [FromQuery] int dpi = 72)
+    {
+        if (file == null)
+            return BadRequest("No file provided");
+        
+        using var stream = new MemoryStream();
+        await file.CopyToAsync(stream);
+        stream.Position = 0;
+        
+        using var document = new PdfDocument(stream);
+        var images = document.ConvertToImageBytes(SKEncodedImageFormat.Jpeg, 80, dpi);
+        
+        return File(images[0], "image/jpeg");
+    }
+}
+```
+
+### Generate PDF Report from Multiple Sources
+
+```csharp
+public async Task<byte[]> GenerateReportAsync(
+    string coverPagePath,
+    string[] contentPaths,
+    string appendixPath)
+{
+    using var merger = new PdfMerger();
+    
+    // Add cover page
+    merger.AppendDocument(coverPagePath);
+    
+    // Add all content pages
+    foreach (var contentPath in contentPaths)
+    {
+        merger.AppendDocument(contentPath);
+    }
+    
+    // Add appendix
+    if (File.Exists(appendixPath))
+    {
+        merger.AppendDocument(appendixPath);
+    }
+    
+    // Set metadata
+    using var coverDoc = new PdfDocument(coverPagePath);
+    merger.CopyViewerPreferences(coverDoc);
+    
+    return merger.ToBytes();
+}
+```

@@ -13,7 +13,7 @@ namespace Malweka.PdfiumSdk;
 /// </remarks>
 public class PdfDocument : IDisposable
 {
-    private IntPtr _document;
+    private IntPtr document;
     private bool _disposed;
     private PdfMetadata? _metadata;
     private PdfBookmarks? _bookmarks;
@@ -26,8 +26,8 @@ public class PdfDocument : IDisposable
 
     public PdfDocument(string filePath, string password = null)
     {
-        _document = PDFium.FPDF_LoadDocument(filePath, password);
-        if (_document == IntPtr.Zero)
+        Document = PDFium.FPDF_LoadDocument(filePath, password);
+        if (Document == IntPtr.Zero)
         {
             throw new InvalidOperationException($"Failed to load PDF document. Error: {PDFium.FPDF_GetLastError()}");
         }
@@ -43,8 +43,8 @@ public class PdfDocument : IDisposable
         var handle = GCHandle.Alloc(data, GCHandleType.Pinned);
         try
         {
-            _document = PDFium.FPDF_LoadMemDocument(handle.AddrOfPinnedObject(), data.Length, password);
-            if (_document == IntPtr.Zero)
+            Document = PDFium.FPDF_LoadMemDocument(handle.AddrOfPinnedObject(), data.Length, password);
+            if (Document == IntPtr.Zero)
             {
                 throw new InvalidOperationException(
                     $"Failed to load PDF document from memory. Error: {PDFium.FPDF_GetLastError()}");
@@ -62,7 +62,7 @@ public class PdfDocument : IDisposable
         {
             if (_metadata == null)
             {
-                _metadata = new PdfMetadata(_document);
+                _metadata = new PdfMetadata(Document);
             }
             return _metadata;
         }
@@ -74,7 +74,7 @@ public class PdfDocument : IDisposable
         {
             if (_bookmarks == null)
             {
-                _bookmarks = new PdfBookmarks(_document);
+                _bookmarks = new PdfBookmarks(Document);
             }
             return _bookmarks;
         }
@@ -86,22 +86,24 @@ public class PdfDocument : IDisposable
         {
             if (_attachments == null)
             {
-                _attachments = new PdfAttachments(_document);
+                _attachments = new PdfAttachments(Document);
             }
             return _attachments;
         }
     }
 
-    public int PageCount => PDFium.FPDF_GetPageCount(_document);
+    public int PageCount => PDFium.FPDF_GetPageCount(Document);
 
-    public uint Permissions => PDFium.FPDF_GetDocPermissions(_document);
+    public uint Permissions => PDFium.FPDF_GetDocPermissions(Document);
+
+    internal IntPtr Document { get => document; set => document = value; }
 
     public PdfPage GetPage(int pageIndex)
     {
         if (pageIndex < 0 || pageIndex >= PageCount)
             throw new ArgumentOutOfRangeException(nameof(pageIndex));
 
-        return new PdfPage(_document, pageIndex);
+        return new PdfPage(Document, pageIndex);
     }
 
     public PdfPage[] GetAllPages()
@@ -182,7 +184,7 @@ public class PdfDocument : IDisposable
         if (pageIndex < 0 || pageIndex >= PageCount)
             throw new ArgumentOutOfRangeException(nameof(pageIndex));
 
-        var result = PDFium.FPDF_GetPageSizeByIndex(_document, pageIndex, out double width, out double height);
+        var result = PDFium.FPDF_GetPageSizeByIndex(Document, pageIndex, out double width, out double height);
         if (result == 0)
             throw new InvalidOperationException($"Failed to get size for page {pageIndex}");
 
@@ -350,7 +352,7 @@ public class PdfDocument : IDisposable
 
     public PdfForm? GetForm()
     {
-        var pdfForm = new PdfForm(_document, PageCount);
+        var pdfForm = new PdfForm(Document, PageCount);
         if(pdfForm.HasFormFields)
             return pdfForm;
 
@@ -417,7 +419,7 @@ public class PdfDocument : IDisposable
                 };
 
                 // Call PDFium save function - pass fileWrite by ref
-                bool success = PDFium.FPDF_SaveAsCopy(_document, ref fileWrite, flags);
+                bool success = PDFium.FPDF_SaveAsCopy(Document, ref fileWrite, flags);
 
                 if (!success)
                 {
@@ -446,10 +448,10 @@ public class PdfDocument : IDisposable
     {
         if (!_disposed)
         {
-            if (_document != IntPtr.Zero)
+            if (Document != IntPtr.Zero)
             {
-                PDFium.FPDF_CloseDocument(_document);
-                _document = IntPtr.Zero;
+                PDFium.FPDF_CloseDocument(Document);
+                Document = IntPtr.Zero;
             }
 
             _disposed = true;

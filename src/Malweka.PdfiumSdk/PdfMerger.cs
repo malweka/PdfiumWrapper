@@ -248,14 +248,7 @@ public class PdfMerger : IDisposable
 
     private IntPtr GetDocumentHandle(PdfDocument doc)
     {
-        // Use reflection to access private _document field
-        var field = typeof(PdfDocument).GetField("_document",
-            System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
-
-        if (field == null)
-            throw new InvalidOperationException("Cannot access document handle");
-
-        return (IntPtr)field.GetValue(doc);
+        return doc.Document;
     }
 
     public void Dispose()
