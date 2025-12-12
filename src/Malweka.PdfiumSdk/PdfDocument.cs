@@ -106,7 +106,48 @@ public class PdfDocument : IDisposable
 
     public int PageCount => PDFium.FPDF_GetPageCount(Document);
 
-    public uint Permissions => PDFium.FPDF_GetDocPermissions(Document);
+    /// <summary>
+    /// Gets the document permissions as a PdfPermissions flags enum
+    /// </summary>
+    public PdfPermissions Permissions
+    {
+        get
+        {
+            uint rawPermissions = PDFium.FPDF_GetDocPermissions(Document);
+            return (PdfPermissions)rawPermissions;
+        }
+    }
+
+    /// <summary>
+    /// Gets the document identifier (ID) from the trailer dictionary
+    /// </summary>
+    public string? DocumentId
+    {
+        get
+        {
+            // First, get the original file ID (type 0)
+            var size = PDFium.FPDF_GetFileIdentifier(Document, 0, IntPtr.Zero, 0);
+            if (size == 0)
+                return null;
+
+            var buffer = Marshal.AllocHGlobal((int)size);
+            try
+            {
+                var actualSize = PDFium.FPDF_GetFileIdentifier(Document, 0, buffer, size);
+                if (actualSize == 0)
+                    return null;
+
+                // Convert bytes to hex string
+                var bytes = new byte[actualSize];
+                Marshal.Copy(buffer, bytes, 0, (int)actualSize);
+                return BitConverter.ToString(bytes).Replace("-", "");
+            }
+            finally
+            {
+                Marshal.FreeHGlobal(buffer);
+            }
+        }
+    }
 
     internal IntPtr Document { get => document; set => document = value; }
 
@@ -251,6 +292,51 @@ public class PdfDocument : IDisposable
             throw new InvalidOperationException($"Failed to get size for page {pageIndex}");
 
         return (width, height);
+    }
+
+    /// <summary>
+    /// Get the label for a specific page
+    /// </summary>
+    /// <param name="pageIndex">0-based page index</param>
+    /// <returns>The page label string, or null if no label is defined</returns>
+    public string? GetPageLabel(int pageIndex)
+    {
+        if (pageIndex < 0 || pageIndex >= PageCount)
+            throw new ArgumentOutOfRangeException(nameof(pageIndex));
+
+        // Get the required buffer size
+        var size = PDFium.FPDF_GetPageLabel(Document, pageIndex, IntPtr.Zero, 0);
+        if (size == 0)
+            return null;
+
+        var buffer = Marshal.AllocHGlobal((int)size);
+        try
+        {
+            var actualSize = PDFium.FPDF_GetPageLabel(Document, pageIndex, buffer, size);
+            if (actualSize == 0)
+                return null;
+
+            // Convert UTF-16LE to string
+            return Marshal.PtrToStringUni(buffer, (int)(actualSize / 2) - 1); // -1 to exclude null terminator
+        }
+        finally
+        {
+            Marshal.FreeHGlobal(buffer);
+        }
+    }
+
+    /// <summary>
+    /// Get all page labels for the document
+    /// </summary>
+    /// <returns>Array of page labels (null for pages without labels)</returns>
+    public string?[] GetAllPageLabels()
+    {
+        var labels = new string?[PageCount];
+        for (int i = 0; i < PageCount; i++)
+        {
+            labels[i] = GetPageLabel(i);
+        }
+        return labels;
     }
 
     public (double width, double height)[] GetAllPageSizes()

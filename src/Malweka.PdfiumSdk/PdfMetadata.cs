@@ -98,7 +98,7 @@ public class PdfMetadata
     /// <summary>
     /// PDF version (e.g., 14 for PDF 1.4, 17 for PDF 1.7)
     /// </summary>
-    public int FileVersion
+    public int PdfVersion
     {
         get
         {
@@ -110,11 +110,11 @@ public class PdfMetadata
     /// <summary>
     /// PDF version as a string (e.g., "1.4", "1.7")
     /// </summary>
-    public string FileVersionString
+    public string PdfVersionString
     {
         get
         {
-            int version = FileVersion;
+            int version = PdfVersion;
             if (version == 0) return "Unknown";
             int major = version / 10;
             int minor = version % 10;
@@ -135,7 +135,8 @@ public class PdfMetadata
     /// <summary>
     /// Get a custom metadata value by tag
     /// </summary>
-    public string GetMetadataString(string tag)
+    public string 
+        GetMetadataString(string tag)
     {
         ulong length = PDFium.FPDF_GetMetaText(_document, tag, IntPtr.Zero, 0);
         if (length == 0)
@@ -224,7 +225,7 @@ public class PdfMetadata
             { "CreationDate", CreationDate },
             { "ModificationDate", ModificationDate },
             { "Trapped", Trapped },
-            { "FileVersion", FileVersionString }
+            { "FileVersion", PdfVersionString }
         };
     }
 

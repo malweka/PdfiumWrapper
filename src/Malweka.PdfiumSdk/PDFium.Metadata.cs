@@ -1,4 +1,4 @@
-﻿﻿using System.Runtime.InteropServices;
+﻿﻿﻿using System.Runtime.InteropServices;
 
 namespace Malweka.PdfiumSdk;
 
@@ -33,6 +33,21 @@ public static partial class PDFium
     [LibraryImport(LibraryName)]
     [return: MarshalAs(UnmanagedType.Bool)]
     public static partial bool FPDF_GetFileVersion(IntPtr doc, out int fileVersion);
+
+    #endregion
+
+    #region File Identifier
+
+    /// <summary>
+    /// Get the file identifier (ID) from the document's trailer dictionary
+    /// </summary>
+    /// <param name="document">Document handle</param>
+    /// <param name="id_type">The file identifier type (0 for original file ID, 1 for changed file ID)</param>
+    /// <param name="buffer">Buffer to receive the identifier</param>
+    /// <param name="buflen">Length of buffer in bytes</param>
+    /// <returns>Number of bytes in the file identifier, or 0 on error</returns>
+    [LibraryImport(LibraryName)]
+    public static partial ulong FPDF_GetFileIdentifier(IntPtr document, int id_type, IntPtr buffer, ulong buflen);
 
     #endregion
 
