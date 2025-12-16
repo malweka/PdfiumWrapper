@@ -4,7 +4,7 @@ namespace Malweka.PdfiumSdk;
 /// PDF document permissions/restrictions flags
 /// </summary>
 [Flags]
-public enum PdfPermissions
+public enum PdfPermissions : uint
 {
     /// <summary>
     /// No permissions granted

@@ -29,9 +29,20 @@ public class PdfDocumentTests : IDisposable
         _tempDirectories.Add(tempDir);
         return tempDir;
     }
-    
+
     #region Constructor Tests
-    
+
+    [Fact]
+    public void Constructor_Empty_ShouldCreateNewDocument()
+    {
+        // Arrange & Act
+        using var doc = new PdfDocument();
+
+        // Assert
+        Assert.NotNull(doc);
+        Assert.Equal(0, doc.PageCount);
+    }
+
     [Fact]
     public void Constructor_WithValidFilePath_ShouldLoadDocument()
     {
@@ -561,8 +572,18 @@ public class PdfDocumentTests : IDisposable
         // Act
         var permissions = doc.Permissions;
         
-        // Assert
-        Assert.True(permissions >= 0);
+        // Assert - Contract PDF has all permissions (4294967295 = 0xFFFFFFFF)
+        Assert.Equal((PdfPermissions)4294967295, permissions); // Should equal the uint max value
+        
+        // Verify all permission flags are set
+        Assert.True(permissions.HasFlag(PdfPermissions.Print));
+        Assert.True(permissions.HasFlag(PdfPermissions.ModifyContents));
+        Assert.True(permissions.HasFlag(PdfPermissions.CopyContents));
+        Assert.True(permissions.HasFlag(PdfPermissions.ModifyAnnotations));
+        Assert.True(permissions.HasFlag(PdfPermissions.FillForms));
+        Assert.True(permissions.HasFlag(PdfPermissions.ExtractForAccessibility));
+        Assert.True(permissions.HasFlag(PdfPermissions.AssembleDocument));
+        Assert.True(permissions.HasFlag(PdfPermissions.PrintHighQuality));
     }
     
     #endregion
