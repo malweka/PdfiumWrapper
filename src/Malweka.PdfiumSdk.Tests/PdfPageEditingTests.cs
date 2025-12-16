@@ -1,3 +1,4 @@
+using System.Drawing;
 ﻿using Xunit;
 
 namespace Malweka.PdfiumSdk.Tests;
@@ -154,6 +155,139 @@ public class PdfPageEditingTests : IDisposable
         // Verify we can load it back
         using var loadedDoc = new PdfDocument(outputPath);
         Assert.Equal(1, loadedDoc.PageCount);
+    }
+
+    #endregion
+
+    #region Page Content Editing Tests
+
+    [Fact]
+    public void AddText_ShouldIncreaseObjectCount()
+    {
+        // Arrange
+        using var doc = new PdfDocument();
+        using var page = doc.AddPage();
+        int initialObjects = page.ObjectCount;
+
+        // Act
+        page.AddText("Hello World", 100, 100);
+        page.GenerateContent();
+
+        // Assert
+        Assert.Equal(initialObjects + 1, page.ObjectCount);
+    }
+
+    [Fact]
+    public void AddRectangle_ShouldIncreaseObjectCount()
+    {
+        // Arrange
+        using var doc = new PdfDocument();
+        using var page = doc.AddPage();
+        int initialObjects = page.ObjectCount;
+
+        // Act
+        page.AddRectangle(50, 50, 200, 100, Color.Red, Color.Black);
+        page.GenerateContent();
+
+        // Assert
+        Assert.Equal(initialObjects + 1, page.ObjectCount);
+    }
+
+    [Fact]
+    public void AddPath_ShouldIncreaseObjectCount()
+    {
+        // Arrange
+        using var doc = new PdfDocument();
+        using var page = doc.AddPage();
+        int initialObjects = page.ObjectCount;
+
+        // Act
+        var path = page.AddPath();
+        // Just adding a path object should increase count even if empty
+        // But usually we would add segments. The SDK method just creates and inserts it.
+        page.GenerateContent();
+
+        // Assert
+        Assert.Equal(initialObjects + 1, page.ObjectCount);
+    }
+
+    [Fact]
+    public void RemoveObject_ShouldDecreaseObjectCount()
+    {
+        // Arrange
+        using var doc = new PdfDocument();
+        using var page = doc.AddPage();
+        var textObj = page.AddText("To be removed", 100, 100);
+        page.GenerateContent();
+        int countAfterAdd = page.ObjectCount;
+
+        // Act
+        page.RemoveObject(textObj);
+        page.GenerateContent();
+
+        // Assert
+        Assert.Equal(countAfterAdd - 1, page.ObjectCount);
+    }
+
+    [Fact]
+    public void AddImage_ShouldIncreaseObjectCount()
+    {
+        // Arrange
+        using var doc = new PdfDocument();
+        using var page = doc.AddPage();
+        int initialObjects = page.ObjectCount;
+
+        // Create a simple 1x1 bitmap byte array (fake image data)
+        // In a real scenario we would need valid image bytes.
+        // For unit test without external dependencies, we might need a small valid image resource.
+        // However, looking at PdfPage.AddImage implementation, it calls PDFium functions.
+        // If we pass invalid bytes, it might fail or crash if PDFium validates it immediately.
+
+        // Let's try to create a small valid BMP or similar if possible.
+        // Or check if there is a helper to get sample image.
+        // We can use a 1x1 pixel PNG represented as bytes.
+        byte[] pngBytes = new byte[]
+        {
+            0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44, 0x52,
+            0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x02, 0x00, 0x00, 0x00, 0x90, 0x77, 0x53,
+            0xDE, 0x00, 0x00, 0x00, 0x01, 0x73, 0x52, 0x47, 0x42, 0x00, 0xAE, 0xCE, 0x1C, 0xE9, 0x00, 0x00,
+            0x00, 0x04, 0x67, 0x41, 0x4D, 0x41, 0x00, 0x00, 0xB1, 0x8F, 0x0B, 0xFC, 0x61, 0x05, 0x00, 0x00,
+            0x00, 0x09, 0x70, 0x48, 0x59, 0x73, 0x00, 0x00, 0x0E, 0xC3, 0x00, 0x00, 0x0E, 0xC3, 0x01, 0xC7,
+            0x6F, 0xA8, 0x64, 0x00, 0x00, 0x00, 0x0C, 0x49, 0x44, 0x41, 0x54, 0x18, 0x57, 0x63, 0xF8, 0xFF,
+            0xFF, 0x3F, 0x00, 0x05, 0xFE, 0x02, 0xFE, 0xA7, 0x35, 0x81, 0x84, 0x00, 0x00, 0x00, 0x00, 0x49,
+            0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82
+        };
+
+        // Act
+        page.AddImage(pngBytes, 50, 50, 100, 100);
+        page.GenerateContent();
+
+        // Assert
+        Assert.Equal(initialObjects + 1, page.ObjectCount);
+    }
+
+    [Fact]
+    public void Page_Edit_And_Save_ShouldPersistChanges()
+    {
+        // Arrange
+        using var doc = new PdfDocument();
+        using var page = doc.AddPage();
+        page.AddText("Persistent Text", 100, 100);
+        page.GenerateContent();
+
+        var tempDir = CreateTempDirectory();
+        var outputPath = Path.Combine(tempDir, "edited_doc.pdf");
+
+        // Act
+        doc.Save(outputPath);
+
+        // Assert
+        Assert.True(File.Exists(outputPath));
+
+        // Verify content persists
+        using var loadedDoc = new PdfDocument(outputPath);
+        using var loadedPage = loadedDoc.GetPage(0);
+        Assert.Equal(1, loadedPage.ObjectCount);
     }
 
     #endregion

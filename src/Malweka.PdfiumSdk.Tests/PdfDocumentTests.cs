@@ -98,6 +98,50 @@ public class PdfDocumentTests : IDisposable
         // Act & Assert
         Assert.Throws<InvalidOperationException>(() => new PdfDocument(invalidBytes));
     }
+
+    [Fact]
+    public void CreateNewDocument_AndAddMultiplePages_ShouldSucceed()
+    {
+        // Arrange
+        using var doc = new PdfDocument();
+        int expectedPages = 5;
+
+        // Act
+        for (int i = 0; i < expectedPages; i++)
+        {
+            doc.AddPage();
+        }
+
+        // Assert
+        Assert.Equal(expectedPages, doc.PageCount);
+    }
+
+    [Fact]
+    public void CreateNewDocument_AddContent_AndSave_ShouldCreateValidFile()
+    {
+        // Arrange
+        using var doc = new PdfDocument();
+        using var page = doc.AddPage(800, 600);
+        page.AddText("New Document Test", 50, 550);
+        page.GenerateContent();
+
+        var tempDir = CreateTempDirectory();
+        var outputPath = Path.Combine(tempDir, "created_doc.pdf");
+
+        // Act
+        doc.Save(outputPath);
+
+        // Assert
+        Assert.True(File.Exists(outputPath));
+        Assert.True(new FileInfo(outputPath).Length > 0);
+
+        // Validation load
+        using var loadedDoc = new PdfDocument(outputPath);
+        Assert.Equal(1, loadedDoc.PageCount);
+        var size = loadedDoc.GetPageSize(0);
+        Assert.Equal(800, size.width);
+        Assert.Equal(600, size.height);
+    }
     
     #endregion
     
