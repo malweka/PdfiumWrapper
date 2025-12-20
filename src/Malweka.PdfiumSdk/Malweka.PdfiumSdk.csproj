@@ -15,12 +15,12 @@
 	</ItemGroup>
 
 	<!-- Linux x64 -->
-<!--	<ItemGroup>-->
-<!--		<Content Include="../libs/linux-x64/libpdfium.so">-->
-<!--			<CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>-->
-<!--			<TargetPath>runtimes/linux-x64/native/libpdfium.so</TargetPath>-->
-<!--		</Content>-->
-<!--	</ItemGroup>-->
+	<ItemGroup>
+		<Content Include="../libs/linux-x64/libpdfium.so">
+			<CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+			<TargetPath>runtimes/linux-x64/native/libpdfium.so</TargetPath>
+		</Content>
+	</ItemGroup>
 
 	<!-- macOS x64 -->
 	<ItemGroup>

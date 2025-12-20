@@ -44,6 +44,41 @@ public class PdfDocumentTests : IDisposable
     }
 
     [Fact]
+    public void Constructor_CreateDocumentWithPages_ShouldWork()
+    {
+        // Arrange
+        using var doc = new PdfDocument();
+
+        // Act
+        // Add pages with different sizes
+        doc.AddPage(612, 792); // Letter
+        doc.AddPage(842, 595); // A4 Landscape
+
+        // Assert
+        Assert.Equal(2, doc.PageCount);
+
+        // Verify page sizes
+        var size0 = doc.GetPageSize(0);
+        Assert.Equal(612, size0.width);
+        Assert.Equal(792, size0.height);
+
+        var size1 = doc.GetPageSize(1);
+        Assert.Equal(842, size1.width);
+        Assert.Equal(595, size1.height);
+
+        // Save and reload to verify persistence
+        var tempDir = CreateTempDirectory();
+        var outputPath = Path.Combine(tempDir, "created_doc.pdf");
+        doc.Save(outputPath);
+
+        using var loadedDoc = new PdfDocument(outputPath);
+        Assert.Equal(2, loadedDoc.PageCount);
+        var loadedSize0 = loadedDoc.GetPageSize(0);
+        Assert.Equal(612, loadedSize0.width);
+        Assert.Equal(792, loadedSize0.height);
+    }
+
+    [Fact]
     public void Constructor_WithValidFilePath_ShouldLoadDocument()
     {
         // Arrange & Act
