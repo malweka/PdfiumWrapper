@@ -638,5 +638,48 @@ public class PdfDocumentTests : IDisposable
         Assert.NotNull(page2);
     }
     
+    [Fact]
+    public void CreateNewDocument_ComplexScenario_ShouldWork()
+    {
+        // Arrange
+        using var doc = new PdfDocument();
+
+        // Act - Add multiple pages with different sizes
+        doc.AddPage(612, 792); // US Letter
+        doc.AddPage(595, 842); // A4
+        doc.AddPage(200, 200); // Small square
+
+        // Act - Add content to the first page
+        using (var page = doc.GetPage(0))
+        {
+            page.AddText("Hello World", 100, 700);
+            page.AddRectangle(50, 50, 200, 100, System.Drawing.Color.Blue, System.Drawing.Color.Black);
+            page.GenerateContent();
+        }
+
+        // Save to a temp file
+        var tempDir = CreateTempDirectory();
+        var outputPath = Path.Combine(tempDir, "complex_test.pdf");
+        doc.Save(outputPath);
+
+        // Assert - Verify file exists
+        Assert.True(File.Exists(outputPath));
+
+        // Assert - Reload and verify
+        using var loadedDoc = new PdfDocument(outputPath);
+        Assert.Equal(3, loadedDoc.PageCount);
+
+        var (w0, h0) = loadedDoc.GetPageSize(0);
+        var (w1, h1) = loadedDoc.GetPageSize(1);
+        var (w2, h2) = loadedDoc.GetPageSize(2);
+
+        Assert.Equal(612, w0);
+        Assert.Equal(792, h0);
+        Assert.Equal(595, w1);
+        Assert.Equal(842, h1);
+        Assert.Equal(200, w2);
+        Assert.Equal(200, h2);
+    }
+
     #endregion
 }
