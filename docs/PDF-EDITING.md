@@ -1,6 +1,6 @@
 # PDF Editing Guide
 
-This guide covers creating new PDF documents and adding content using Malweka.PdfiumSdk's page editing API.
+This guide covers creating new PDF documents and adding content using PdfiumWrapper's page editing API.
 
 ## Table of Contents
 
@@ -50,7 +50,7 @@ document.Save("output.pdf");
 ### Create an Empty Document
 
 ```csharp
-using Malweka.PdfiumSdk;
+using PdfiumWrapper;
 
 // Create a new empty PDF document
 using var document = new PdfDocument();
@@ -425,7 +425,7 @@ text.Font = "Courier";
 ### Example 1: Simple Document
 
 ```csharp
-using Malweka.PdfiumSdk;
+using PdfiumWrapper;
 using System.Drawing;
 
 using var document = new PdfDocument();
@@ -438,7 +438,7 @@ title.FontSize = 24;
 title.Color = Color.Black;
 
 // Add body text
-var body = page.AddText("This is a sample PDF created with Malweka.PdfiumSdk", x: 100, y: 650);
+var body = page.AddText("This is a sample PDF created with PdfiumWrapper", x: 100, y: 650);
 body.Font = "Helvetica";
 body.FontSize = 12;
 body.Color = Color.Gray;
@@ -600,3 +600,4 @@ document.Save("output.pdf");
 4. **Custom fonts** can be loaded using `FPDFText_LoadFont` for embedding non-standard fonts.
 
 5. **Coordinate system** — remember that Y increases upward, and (0,0) is at the bottom-left.
+

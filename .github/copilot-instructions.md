@@ -1,4 +1,4 @@
-# Copilot Instructions for Malweka.PdfiumSdk
+# Copilot Instructions for PdfiumWrapper
 
 ## Project Overview
 
@@ -87,7 +87,7 @@ The `PDFium` class is split into partial classes by functionality:
 
 **Run tests:**
 ```bash
-dotnet test src/Malweka.PdfiumSdk.Tests/Malweka.PdfiumSdk.Tests.csproj
+dotnet test src/PdfiumWrapper.Tests/PdfiumWrapper.Tests.csproj
 ```
 
 ## Build Configuration
