@@ -1,6 +1,6 @@
 # API Reference
 
-This document provides complete API documentation for all public classes in Malweka.PdfiumSdk.
+This document provides complete API documentation for all public classes in PdfiumWrapper.
 
 ## Table of Contents
 
@@ -30,7 +30,7 @@ The main entry point for working with PDF documents. Provides access to pages, m
 ### Namespace
 
 ```csharp
-namespace Malweka.PdfiumSdk;
+namespace PdfiumWrapper;
 ```
 
 ### Declaration
@@ -1201,3 +1201,4 @@ public class PdfAttachment
 | `Name` | `string` | File name |
 | `Size` | `long` | File size in bytes |
 | `Data` | `byte[]` | File contents |
+

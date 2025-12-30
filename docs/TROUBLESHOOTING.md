@@ -1,6 +1,6 @@
 # Troubleshooting
 
-This guide covers common issues and their solutions when using Malweka.PdfiumSdk.
+This guide covers common issues and their solutions when using PdfiumWrapper.
 
 ## Table of Contents
 
@@ -627,3 +627,4 @@ Console.WriteLine($"OS: {Environment.OSVersion}");
 Console.WriteLine($".NET: {Environment.Version}");
 Console.WriteLine($"64-bit: {Environment.Is64BitProcess}");
 ```
+

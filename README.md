@@ -1,4 +1,4 @@
-# Malweka.PdfiumSdk
+# PdfiumWrapper
 
 A modern, high-level .NET 8 wrapper for PDFium that makes PDF manipulation easy and intuitive. This library provides a clean C# API for working with PDF documents, including creation, rendering, merging, form filling, metadata management, and more.
 
@@ -20,7 +20,7 @@ A modern, high-level .NET 8 wrapper for PDFium that makes PDF manipulation easy 
 ## Installation
 
 ```bash
-dotnet add package Malweka.PdfiumSdk
+dotnet add package PdfiumWrapper
 ```
 
 ## Requirements
@@ -34,7 +34,7 @@ dotnet add package Malweka.PdfiumSdk
 ### Load a PDF Document
 
 ```csharp
-using Malweka.PdfiumSdk;
+using PdfiumWrapper;
 
 // Load from file
 using var document = new PdfDocument("sample.pdf");
@@ -54,7 +54,7 @@ using var document = new PdfDocument("secure.pdf", password: "secret");
 ### Create a New PDF Document
 
 ```csharp
-using Malweka.PdfiumSdk;
+using PdfiumWrapper;
 using System.Drawing;
 
 // Create a new empty document

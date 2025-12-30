@@ -1,6 +1,6 @@
 # Examples
 
-This document provides detailed code examples for common scenarios using Malweka.PdfiumSdk.
+This document provides detailed code examples for common scenarios using PdfiumWrapper.
 
 ## Table of Contents
 
@@ -21,7 +21,7 @@ This document provides detailed code examples for common scenarios using Malweka
 ### Create a Simple PDF
 
 ```csharp
-using Malweka.PdfiumSdk;
+using PdfiumWrapper;
 using System.Drawing;
 
 using var document = new PdfDocument();
@@ -181,7 +181,7 @@ for (int i = 0; i < 5; i++)
     
     // Footer
     var footer = page.AddText(
-        "Generated with Malweka.PdfiumSdk", 
+        "Generated with PdfiumWrapper", 
         x: 200, y: 30
     );
     footer.Font = "Helvetica";
@@ -302,7 +302,7 @@ document.Save("invoice.pdf");
 ### Convert All Pages to PNG Images
 
 ```csharp
-using Malweka.PdfiumSdk;
+using PdfiumWrapper;
 
 using var document = new PdfDocument("document.pdf");
 
@@ -323,7 +323,7 @@ document.SaveAsJpegs("output_folder", fileNamePrefix: "scan", quality: 85, dpi: 
 ### Convert to WebP Format
 
 ```csharp
-using Malweka.PdfiumSdk;
+using PdfiumWrapper;
 using SkiaSharp;
 
 using var document = new PdfDocument("document.pdf");
@@ -360,7 +360,7 @@ for (int i = 0; i < pngImages.Count; i++)
 ### Get SkiaSharp Bitmaps for Custom Processing
 
 ```csharp
-using Malweka.PdfiumSdk;
+using PdfiumWrapper;
 using SkiaSharp;
 
 using var document = new PdfDocument("document.pdf");
@@ -450,7 +450,7 @@ var bitmaps = document.ConvertToBitmaps(dpiWidth: 300, dpiHeight: 150);
 ### Merge Multiple PDF Files
 
 ```csharp
-using Malweka.PdfiumSdk;
+using PdfiumWrapper;
 
 using var merger = new PdfMerger();
 
@@ -899,7 +899,7 @@ document.Metadata.SetAllMetadata(
     subject: "Technical Specification",
     keywords: "api, documentation, v2.0",
     creator: "DocGenerator v1.0",
-    producer: "Malweka.PdfiumSdk"
+    producer: "PdfiumWrapper"
 );
 
 document.Save("documented.pdf");
@@ -1219,3 +1219,4 @@ public async Task<byte[]> GenerateReportAsync(
     return merger.ToBytes();
 }
 ```
+

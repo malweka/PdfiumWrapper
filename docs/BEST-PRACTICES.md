@@ -1,6 +1,6 @@
 # Best Practices
 
-This guide covers thread safety, ASP.NET Core integration, performance optimization, and common pitfalls when using Malweka.PdfiumSdk.
+This guide covers thread safety, ASP.NET Core integration, performance optimization, and common pitfalls when using PdfiumWrapper.
 
 ## Table of Contents
 
@@ -778,3 +778,4 @@ document.SaveAsPngs("thumbs", dpi: 300); // Generates huge images
 // ✅ EFFICIENT: Use appropriate DPI
 document.SaveAsPngs("thumbs", dpi: 72);
 ```
+
