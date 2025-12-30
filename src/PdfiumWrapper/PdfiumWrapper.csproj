@@ -3,7 +3,7 @@
 		<TargetFramework>net8.0</TargetFramework>
 		<ImplicitUsings>enable</ImplicitUsings>
 		<AllowUnsafeBlocks>true</AllowUnsafeBlocks>
-		<Nullable>enable</Nullable>		
+		<Nullable>enable</Nullable>
 		<Version>1.0.0</Version>
 		<FileVersion>1.0.0.0</FileVersion>
 		<AssemblyVersion>1.0.0.0</AssemblyVersion>
@@ -20,40 +20,37 @@
 		<PackageReadmeFile>README.md</PackageReadmeFile>
 	</PropertyGroup>
 
+	<!-- Platform detection fallbacks when NativeRid/NativeLibName not provided -->
+	<PropertyGroup Condition="'$(NativeRid)' == '' And $([MSBuild]::IsOSPlatform('Windows'))">
+		<NativeRid>win-x64</NativeRid>
+		<NativeLibName>pdfium.dll</NativeLibName>
+	</PropertyGroup>
+
+	<PropertyGroup Condition="'$(NativeRid)' == '' And $([MSBuild]::IsOSPlatform('OSX')) And '$([System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture)' == 'Arm64'">
+		<NativeRid>osx-arm64</NativeRid>
+		<NativeLibName>libpdfium.dylib</NativeLibName>
+	</PropertyGroup>
+
+	<PropertyGroup Condition="'$(NativeRid)' == '' And $([MSBuild]::IsOSPlatform('OSX')) And '$([System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture)' == 'X64'">
+		<NativeRid>osx-x64</NativeRid>
+		<NativeLibName>libpdfium.dylib</NativeLibName>
+	</PropertyGroup>
+
+	<PropertyGroup Condition="'$(NativeRid)' == '' And $([MSBuild]::IsOSPlatform('Linux'))">
+		<NativeRid>linux-x64</NativeRid>
+		<NativeLibName>libpdfium.so</NativeLibName>
+	</PropertyGroup>
+
 	<!-- Include README in package -->
 	<ItemGroup>
 		<None Include="../../README.md" Pack="true" PackagePath="\" />
 	</ItemGroup>
 
-	<!-- Windows x64 -->
-	<ItemGroup Condition="$([MSBuild]::IsOSPlatform('Windows'))">
-		<Content Include="../libs/win-x64/pdfium.dll">
+	<!-- Native library - uses detected or injected RID -->
+	<ItemGroup Condition="'$(NativeRid)' != ''">
+		<Content Include="../libs/$(NativeRid)/$(NativeLibName)">
 			<CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-			<TargetPath>runtimes/win-x64/native/pdfium.dll</TargetPath>
-		</Content>
-	</ItemGroup>
-
-	<!-- macOS x64 -->
-	<ItemGroup Condition="$([MSBuild]::IsOSPlatform('OSX')) And '$([System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture)' == 'X64'">
-		<Content Include="../libs/osx-x64/libpdfium.dylib">
-			<CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-			<TargetPath>runtimes/osx-x64/native/libpdfium.dylib</TargetPath>
-		</Content>
-	</ItemGroup>
-
-	<!-- macOS ARM64 -->
-	<ItemGroup Condition="$([MSBuild]::IsOSPlatform('OSX')) And '$([System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture)' == 'Arm64'">
-		<Content Include="../libs/osx-arm64/libpdfium.dylib">
-			<CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-			<TargetPath>runtimes/osx-arm64/native/libpdfium.dylib</TargetPath>
-		</Content>
-	</ItemGroup>
-
-	<!-- Linux x64 -->
-	<ItemGroup Condition="$([MSBuild]::IsOSPlatform('Linux'))">
-		<Content Include="../libs/linux-x64/libpdfium.so">
-			<CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-			<TargetPath>runtimes/linux-x64/native/libpdfium.so</TargetPath>
+			<TargetPath>runtimes/$(NativeRid)/native/$(NativeLibName)</TargetPath>
 		</Content>
 	</ItemGroup>
 

@@ -1,0 +1,59 @@
+name: PR Build and Test
+
+on:
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  build-and-test:
+    name: Build and Run Tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Restore dependencies
+        run: dotnet restore src/PdfiumWrapper.sln
+
+      - name: Build solution
+        run: dotnet build src/PdfiumWrapper.sln --configuration Release --no-restore
+
+      - name: Run unit tests
+        run: dotnet test src/PdfiumWrapper.sln --configuration Release --no-build --verbosity normal
+
+  multi-platform-build:
+    name: Multi-Platform Build
+    needs: build-and-test
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        platform:
+          - { rid: 'win-x64', libname: 'pdfium.dll' }
+          - { rid: 'osx-arm64', libname: 'libpdfium.dylib' }
+          - { rid: 'osx-x64', libname: 'libpdfium.dylib' }
+          - { rid: 'linux-x64', libname: 'libpdfium.so' }
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Restore dependencies
+        run: dotnet restore src/PdfiumWrapper/PdfiumWrapper.csproj
+
+      - name: Build for ${{ matrix.platform.rid }}
+        run: dotnet build src/PdfiumWrapper/PdfiumWrapper.csproj --configuration Release --no-restore /p:NativeRid=${{ matrix.platform.rid }} /p:NativeLibName=${{ matrix.platform.libname }}
+
+      - name: Pack NuGet package for ${{ matrix.platform.rid }}
+        run: dotnet pack src/PdfiumWrapper/PdfiumWrapper.csproj --configuration Release --no-build /p:NativeRid=${{ matrix.platform.rid }} /p:NativeLibName=${{ matrix.platform.libname }}
