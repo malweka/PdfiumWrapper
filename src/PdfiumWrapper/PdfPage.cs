@@ -285,16 +285,44 @@ public class PdfPage : IDisposable
 
     #endregion
 
+    /// <summary>
+    /// Releases all resources used by the PdfPage.
+    /// </summary>
     public void Dispose()
+    {
+        Dispose(true);
+        GC.SuppressFinalize(this);
+    }
+
+    /// <summary>
+    /// Releases the unmanaged resources and optionally releases managed resources.
+    /// </summary>
+    /// <param name="disposing">true to release both managed and unmanaged resources; false to release only unmanaged resources.</param>
+    protected virtual void Dispose(bool disposing)
     {
         if (!_disposed)
         {
+            if (disposing)
+            {
+                // Dispose managed resources if needed
+            }
+
+            // Always release native handle
             if (_page != IntPtr.Zero)
             {
                 PDFium.FPDF_ClosePage(_page);
                 _page = IntPtr.Zero;
             }
+
             _disposed = true;
         }
+    }
+
+    /// <summary>
+    /// Destructor to ensure native resources are released if Dispose is not called.
+    /// </summary>
+    ~PdfPage()
+    {
+        Dispose(false);
     }
 }

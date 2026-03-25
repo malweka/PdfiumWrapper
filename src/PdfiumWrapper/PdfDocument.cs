@@ -209,6 +209,16 @@ public class PdfDocument : IDisposable
         DeletePage(page.PageIndex);
     }
 
+    /// <summary>
+    /// Gets all pages in the document. CALLER IS RESPONSIBLE FOR DISPOSING EACH PAGE.
+    /// </summary>
+    /// <remarks>
+    /// ⚠️ WARNING: Each PdfPage in the returned array must be disposed by the caller.
+    /// For high-throughput scenarios, prefer <see cref="ProcessAllPages{TResult}(Func{PdfPage, TResult})"/> 
+    /// or <see cref="ProcessAllPages(Action{PdfPage})"/> which handle disposal automatically.
+    /// </remarks>
+    /// <returns>Array of PdfPage objects that must be disposed by the caller</returns>
+    [Obsolete("Use ProcessAllPages() for automatic disposal, or ensure each page is disposed manually. This method may cause memory leaks if pages are not disposed.")]
     public PdfPage[] GetAllPages()
     {
         var pages = new PdfPage[PageCount];
@@ -217,6 +227,96 @@ public class PdfDocument : IDisposable
             pages[i] = GetPage(i);
         }
         return pages;
+    }
+
+    /// <summary>
+    /// Process all pages with automatic disposal. Safe for high-throughput scenarios.
+    /// </summary>
+    /// <typeparam name="TResult">The type of result to return for each page</typeparam>
+    /// <param name="processor">Function to process each page and return a result</param>
+    /// <returns>Array of results from processing each page</returns>
+    /// <example>
+    /// <code>
+    /// // Extract text from all pages safely
+    /// var texts = doc.ProcessAllPages(page => page.ExtractText());
+    /// 
+    /// // Get all page sizes safely
+    /// var sizes = doc.ProcessAllPages(page => (page.Width, page.Height));
+    /// </code>
+    /// </example>
+    public TResult[] ProcessAllPages<TResult>(Func<PdfPage, TResult> processor)
+    {
+        if (processor == null)
+            throw new ArgumentNullException(nameof(processor));
+
+        var results = new TResult[PageCount];
+        for (int i = 0; i < PageCount; i++)
+        {
+            using var page = GetPage(i);
+            results[i] = processor(page);
+        }
+        return results;
+    }
+
+    /// <summary>
+    /// Process all pages with automatic disposal. Safe for high-throughput scenarios.
+    /// </summary>
+    /// <param name="action">Action to perform on each page</param>
+    /// <example>
+    /// <code>
+    /// // Process each page (e.g., for side effects like logging)
+    /// doc.ProcessAllPages(page => Console.WriteLine($"Page {page.PageIndex}: {page.Width}x{page.Height}"));
+    /// </code>
+    /// </example>
+    public void ProcessAllPages(Action<PdfPage> action)
+    {
+        if (action == null)
+            throw new ArgumentNullException(nameof(action));
+
+        for (int i = 0; i < PageCount; i++)
+        {
+            using var page = GetPage(i);
+            action(page);
+        }
+    }
+
+    /// <summary>
+    /// Process all pages asynchronously with automatic disposal. Safe for high-throughput scenarios.
+    /// Uses Task.Yield() for UI responsiveness while processing sequentially (PDFium is not thread-safe).
+    /// </summary>
+    /// <typeparam name="TResult">The type of result to return for each page</typeparam>
+    /// <param name="processor">Function to process each page and return a result</param>
+    /// <returns>Array of results from processing each page</returns>
+    public async Task<TResult[]> ProcessAllPagesAsync<TResult>(Func<PdfPage, TResult> processor)
+    {
+        if (processor == null)
+            throw new ArgumentNullException(nameof(processor));
+
+        var results = new TResult[PageCount];
+        for (int i = 0; i < PageCount; i++)
+        {
+            await Task.Yield();
+            using var page = GetPage(i);
+            results[i] = processor(page);
+        }
+        return results;
+    }
+
+    /// <summary>
+    /// Process all pages asynchronously with automatic disposal. Safe for high-throughput scenarios.
+    /// </summary>
+    /// <param name="action">Action to perform on each page</param>
+    public async Task ProcessAllPagesAsync(Action<PdfPage> action)
+    {
+        if (action == null)
+            throw new ArgumentNullException(nameof(action));
+
+        for (int i = 0; i < PageCount; i++)
+        {
+            await Task.Yield();
+            using var page = GetPage(i);
+            action(page);
+        }
     }
 
     public SKBitmap[] ConvertToBitmaps(int dpi = 300)
@@ -229,13 +329,23 @@ public class PdfDocument : IDisposable
         if (PageCount == 0)
             throw new InvalidOperationException("Document has no pages");
 
-        var bitmaps = new SKBitmap[PageCount];
-        for (int i = 0; i < PageCount; i++)
+        var bitmaps = new List<SKBitmap>(PageCount);
+        try
         {
-            using var page = GetPage(i);
-            bitmaps[i] = RenderPageToSkBitmap(page, dpiWidth, dpiHeight);
+            for (int i = 0; i < PageCount; i++)
+            {
+                using var page = GetPage(i);
+                bitmaps.Add(RenderPageToSkBitmap(page, dpiWidth, dpiHeight));
+            }
+            return bitmaps.ToArray();
         }
-        return bitmaps;
+        catch
+        {
+            // Clean up any bitmaps created before the exception
+            foreach (var bitmap in bitmaps)
+                bitmap.Dispose();
+            throw;
+        }
     }
 
     public async Task<SKBitmap[]> ConvertToBitmapsAsync(int dpi = 300)
@@ -248,16 +358,24 @@ public class PdfDocument : IDisposable
         if (PageCount == 0)
             throw new InvalidOperationException("Document has no pages");
 
-        var bitmaps = new SKBitmap[PageCount];
-        
-        for (int i = 0; i < PageCount; i++)
+        var bitmaps = new List<SKBitmap>(PageCount);
+        try
         {
-            await Task.Yield();
-            using var page = GetPage(i);
-            bitmaps[i] = RenderPageToSkBitmap(page, dpiWidth, dpiHeight);
+            for (int i = 0; i < PageCount; i++)
+            {
+                await Task.Yield();
+                using var page = GetPage(i);
+                bitmaps.Add(RenderPageToSkBitmap(page, dpiWidth, dpiHeight));
+            }
+            return bitmaps.ToArray();
         }
-        
-        return bitmaps;
+        catch
+        {
+            // Clean up any bitmaps created before the exception
+            foreach (var bitmap in bitmaps)
+                bitmap.Dispose();
+            throw;
+        }
     }
 
     public List<byte[]> ConvertToImageBytes(SKEncodedImageFormat format, int quality = 100, int dpi = 300)
@@ -532,7 +650,11 @@ public class PdfDocument : IDisposable
         if (_disposed)
             throw new ObjectDisposedException(nameof(PdfDocument));
 
-        // Create a GCHandle to keep the stream alive during the save operation
+        // Create a GCHandle to keep the stream alive during the save operation.
+        // We need TWO GCHandles here:
+        // 1. streamHandle - keeps the stream object alive and accessible from the callback
+        // 2. delegateHandle - prevents the delegate from being garbage collected during P/Invoke
+        // Without both, the GC could collect either object while PDFium is still using them.
         var streamHandle = GCHandle.Alloc(stream);
 
         try
@@ -592,10 +714,29 @@ public class PdfDocument : IDisposable
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     private delegate int WriteBlockDelegate(IntPtr pThis, IntPtr data, uint size);
 
+    /// <summary>
+    /// Releases all resources used by the PdfDocument.
+    /// </summary>
     public void Dispose()
+    {
+        Dispose(true);
+        GC.SuppressFinalize(this);
+    }
+
+    /// <summary>
+    /// Releases the unmanaged resources and optionally releases managed resources.
+    /// </summary>
+    /// <param name="disposing">true to release both managed and unmanaged resources; false to release only unmanaged resources.</param>
+    protected virtual void Dispose(bool disposing)
     {
         if (!_disposed)
         {
+            if (disposing)
+            {
+                // Dispose managed resources if needed
+            }
+
+            // Always release native handle
             if (Document != IntPtr.Zero)
             {
                 PDFium.FPDF_CloseDocument(Document);
@@ -604,5 +745,13 @@ public class PdfDocument : IDisposable
 
             _disposed = true;
         }
+    }
+
+    /// <summary>
+    /// Destructor to ensure native resources are released if Dispose is not called.
+    /// </summary>
+    ~PdfDocument()
+    {
+        Dispose(false);
     }
 }

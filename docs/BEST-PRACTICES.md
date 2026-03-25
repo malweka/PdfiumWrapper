@@ -779,3 +779,12 @@ document.SaveAsPngs("thumbs", dpi: 300); // Generates huge images
 document.SaveAsPngs("thumbs", dpi: 72);
 ```
 
+
+---
+
+## See Also
+
+- [High-Throughput Processing](HIGH-THROUGHPUT-PROCESSING.md) - Processing large volumes of PDFs efficiently
+- [API Reference](API-REFERENCE.md) - Complete API documentation
+- [PDF Editing](PDF-EDITING.md) - Creating and editing PDF content
+- [Troubleshooting](TROUBLESHOOTING.md) - Common issues and solutions
