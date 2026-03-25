@@ -192,21 +192,297 @@ public class PdfDocumentTests : IDisposable
     {
         // Arrange
         using var doc = new PdfDocument(ContractPdfPath);
-        
+
         // Act
+#pragma warning disable CS0618 // Type or member is obsolete
         var pages = doc.GetAllPages();
-        
+#pragma warning restore CS0618 // Type or member is obsolete
+
         // Assert
         Assert.NotNull(pages);
         Assert.Equal(doc.PageCount, pages.Length);
-        
+
         // Clean up
         foreach (var page in pages)
         {
             page.Dispose();
         }
     }
-    
+
+    [Fact]
+    public void ProcessAllPages_WithFunc_ShouldReturnResults()
+    {
+        // Arrange
+        using var doc = new PdfDocument(ContractPdfPath);
+
+        // Act
+        var sizes = doc.ProcessAllPages(page => (page.Width, page.Height));
+
+        // Assert
+        Assert.NotNull(sizes);
+        Assert.Equal(doc.PageCount, sizes.Length);
+        Assert.All(sizes, size =>
+        {
+            Assert.True(size.Width > 0);
+            Assert.True(size.Height > 0);
+        });
+    }
+
+    [Fact]
+    public void ProcessAllPages_WithFunc_ShouldExtractTextFromAllPages()
+    {
+        // Arrange
+        using var doc = new PdfDocument(ContractPdfPath);
+
+        // Act
+        var texts = doc.ProcessAllPages(page => page.ExtractText());
+
+        // Assert
+        Assert.NotNull(texts);
+        Assert.Equal(doc.PageCount, texts.Length);
+        // At least some pages should have text content
+        Assert.Contains(texts, text => !string.IsNullOrWhiteSpace(text));
+    }
+
+    [Fact]
+    public void ProcessAllPages_WithFunc_ShouldHandleComplexProcessing()
+    {
+        // Arrange
+        using var doc = new PdfDocument(ContractPdfPath);
+
+        // Act - Complex processing: get page info objects
+        var pageInfos = doc.ProcessAllPages(page => new
+        {
+            Index = page.PageIndex,
+            Width = page.Width,
+            Height = page.Height,
+            TextLength = page.ExtractText().Length
+        });
+
+        // Assert
+        Assert.NotNull(pageInfos);
+        Assert.Equal(doc.PageCount, pageInfos.Length);
+        for (int i = 0; i < pageInfos.Length; i++)
+        {
+            Assert.Equal(i, pageInfos[i].Index);
+            Assert.True(pageInfos[i].Width > 0);
+            Assert.True(pageInfos[i].Height > 0);
+            Assert.True(pageInfos[i].TextLength >= 0);
+        }
+    }
+
+    [Fact]
+    public void ProcessAllPages_WithFunc_NullProcessor_ShouldThrowArgumentNullException()
+    {
+        // Arrange
+        using var doc = new PdfDocument(ContractPdfPath);
+
+        // Act & Assert
+        Assert.Throws<ArgumentNullException>(() => 
+            doc.ProcessAllPages<string>(null!));
+    }
+
+    [Fact]
+    public void ProcessAllPages_WithAction_ShouldProcessAllPages()
+    {
+        // Arrange
+        using var doc = new PdfDocument(ContractPdfPath);
+        var processedIndices = new List<int>();
+
+        // Act
+        doc.ProcessAllPages(page =>
+        {
+            processedIndices.Add(page.PageIndex);
+        });
+
+        // Assert
+        Assert.Equal(doc.PageCount, processedIndices.Count);
+        for (int i = 0; i < doc.PageCount; i++)
+        {
+            Assert.Contains(i, processedIndices);
+        }
+    }
+
+    [Fact]
+    public void ProcessAllPages_WithAction_ShouldAllowSideEffects()
+    {
+        // Arrange
+        using var doc = new PdfDocument(ContractPdfPath);
+        var totalTextLength = 0;
+        var maxWidth = 0.0;
+
+        // Act
+        doc.ProcessAllPages(page =>
+        {
+            totalTextLength += page.ExtractText().Length;
+            maxWidth = Math.Max(maxWidth, page.Width);
+        });
+
+        // Assert
+        Assert.True(totalTextLength >= 0);
+        Assert.True(maxWidth > 0);
+    }
+
+    [Fact]
+    public void ProcessAllPages_WithAction_NullAction_ShouldThrowArgumentNullException()
+    {
+        // Arrange
+        using var doc = new PdfDocument(ContractPdfPath);
+
+        // Act & Assert
+        Assert.Throws<ArgumentNullException>(() => 
+            doc.ProcessAllPages((Action<PdfPage>)null!));
+    }
+
+    [Fact]
+    public async Task ProcessAllPagesAsync_WithFunc_ShouldReturnResults()
+    {
+        // Arrange
+        using var doc = new PdfDocument(ContractPdfPath);
+
+        // Act
+        var sizes = await doc.ProcessAllPagesAsync(page => (page.Width, page.Height));
+
+        // Assert
+        Assert.NotNull(sizes);
+        Assert.Equal(doc.PageCount, sizes.Length);
+        Assert.All(sizes, size =>
+        {
+            Assert.True(size.Width > 0);
+            Assert.True(size.Height > 0);
+        });
+    }
+
+    [Fact]
+    public async Task ProcessAllPagesAsync_WithFunc_ShouldExtractTextFromAllPages()
+    {
+        // Arrange
+        using var doc = new PdfDocument(PresentationPdfPath);
+
+        // Act
+        var texts = await doc.ProcessAllPagesAsync(page => page.ExtractText());
+
+        // Assert
+        Assert.NotNull(texts);
+        Assert.Equal(doc.PageCount, texts.Length);
+    }
+
+    [Fact]
+    public async Task ProcessAllPagesAsync_WithFunc_NullProcessor_ShouldThrowArgumentNullException()
+    {
+        // Arrange
+        using var doc = new PdfDocument(ContractPdfPath);
+
+        // Act & Assert
+        await Assert.ThrowsAsync<ArgumentNullException>(async () => 
+            await doc.ProcessAllPagesAsync<string>(null!));
+    }
+
+    [Fact]
+    public async Task ProcessAllPagesAsync_WithAction_ShouldProcessAllPages()
+    {
+        // Arrange
+        using var doc = new PdfDocument(ContractPdfPath);
+        var processedIndices = new List<int>();
+
+        // Act
+        await doc.ProcessAllPagesAsync(page =>
+        {
+            processedIndices.Add(page.PageIndex);
+        });
+
+        // Assert
+        Assert.Equal(doc.PageCount, processedIndices.Count);
+        for (int i = 0; i < doc.PageCount; i++)
+        {
+            Assert.Contains(i, processedIndices);
+        }
+    }
+
+    [Fact]
+    public async Task ProcessAllPagesAsync_WithAction_NullAction_ShouldThrowArgumentNullException()
+    {
+        // Arrange
+        using var doc = new PdfDocument(ContractPdfPath);
+
+        // Act & Assert
+        await Assert.ThrowsAsync<ArgumentNullException>(async () => 
+            await doc.ProcessAllPagesAsync((Action<PdfPage>)null!));
+    }
+
+    [Fact]
+    public void ProcessAllPages_WithFunc_ShouldNotLeakMemory_HighThroughput()
+    {
+        // Arrange - Simulate high-throughput scenario
+        using var doc = new PdfDocument(ContractPdfPath);
+
+        // Act - Process pages multiple times to ensure no leaks
+        for (int iteration = 0; iteration < 10; iteration++)
+        {
+            var results = doc.ProcessAllPages(page => new
+            {
+                Index = page.PageIndex,
+                Text = page.ExtractText(),
+                Size = (page.Width, page.Height)
+            });
+
+            // Assert
+            Assert.Equal(doc.PageCount, results.Length);
+        }
+
+        // If we get here without exceptions or hanging, disposal is working correctly
+    }
+
+    [Fact]
+    public async Task ProcessAllPagesAsync_WithFunc_ShouldNotLeakMemory_HighThroughput()
+    {
+        // Arrange - Simulate high-throughput scenario
+        using var doc = new PdfDocument(PresentationPdfPath);
+
+        // Act - Process pages multiple times to ensure no leaks
+        for (int iteration = 0; iteration < 10; iteration++)
+        {
+            var results = await doc.ProcessAllPagesAsync(page => new
+            {
+                Index = page.PageIndex,
+                Size = (page.Width, page.Height)
+            });
+
+            // Assert
+            Assert.Equal(doc.PageCount, results.Length);
+        }
+
+        // If we get here without exceptions or hanging, disposal is working correctly
+    }
+
+    [Fact]
+    public void ProcessAllPages_ComparedToGetAllPages_ShouldProduceSameResults()
+    {
+        // Arrange
+        using var doc = new PdfDocument(ContractPdfPath);
+
+        // Act - Using old GetAllPages method
+        List<string> textsOld = new();
+#pragma warning disable CS0618 // Type or member is obsolete
+        var pages = doc.GetAllPages();
+#pragma warning restore CS0618 // Type or member is obsolete
+        foreach (var page in pages)
+        {
+            textsOld.Add(page.ExtractText());
+            page.Dispose();
+        }
+
+        // Act - Using new ProcessAllPages method
+        var textsNew = doc.ProcessAllPages(page => page.ExtractText());
+
+        // Assert - Should produce identical results
+        Assert.Equal(textsOld.Count, textsNew.Length);
+        for (int i = 0; i < textsOld.Count; i++)
+        {
+            Assert.Equal(textsOld[i], textsNew[i]);
+        }
+    }
+
     #endregion
     
     #region Page Size Tests
