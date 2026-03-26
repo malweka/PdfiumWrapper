@@ -32,6 +32,22 @@ public class PdfPage : IDisposable
     internal IntPtr Handle => _page;
     internal IntPtr DocumentHandle => _document;
 
+    /// <summary>
+    /// Renders the page to a native PDFium bitmap handle.
+    /// The caller MUST call PDFium.FPDFBitmap_Destroy on the returned handle.
+    /// Use FPDFBitmap_GetBuffer/GetStride to read the BGRA pixel data directly.
+    /// </summary>
+    internal IntPtr RenderToBitmapHandle(int width, int height, int flags = 0)
+    {
+        var bitmap = PDFium.FPDFBitmap_Create(width, height, 0);
+        if (bitmap == IntPtr.Zero)
+            throw new OutOfMemoryException("Failed to create bitmap");
+
+        PDFium.FPDFBitmap_FillRect(bitmap, 0, 0, width, height, 0xFFFFFFFF);
+        PDFium.FPDF_RenderPageBitmap(bitmap, _page, 0, 0, width, height, 0, flags);
+        return bitmap;
+    }
+
     public byte[] RenderToBytes(int width, int height, int flags = 0)
     {
         var bitmap = PDFium.FPDFBitmap_Create(width, height, 0);

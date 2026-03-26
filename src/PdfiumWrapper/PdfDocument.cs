@@ -13,7 +13,7 @@ namespace PdfiumWrapper;
 /// </remarks>
 public class PdfDocument : IDisposable
 {
-    private IntPtr document;
+    private IntPtr _document;
     private bool _disposed;
     private PdfMetadata? _metadata;
     private PdfBookmarks? _bookmarks;
@@ -149,7 +149,7 @@ public class PdfDocument : IDisposable
         }
     }
 
-    internal IntPtr Document { get => document; set => document = value; }
+    internal IntPtr Document { get => _document; set => _document = value; }
 
     public PdfPage GetPage(int pageIndex)
     {
@@ -507,6 +507,157 @@ public class PdfDocument : IDisposable
         }
     }
 
+    /// <summary>
+    /// Saves all pages as a single multi-page TIFF file.
+    /// Uses a direct PDFium-to-libtiff pipeline with no intermediate image encoding,
+    /// making it significantly faster than going through SkiaSharp for high-throughput workloads.
+    /// </summary>
+    /// <param name="outputPath">Path to the output .tiff file.</param>
+    /// <param name="dpi">Resolution in dots per inch (default: 200).</param>
+    /// <param name="colorMode">Bilevel (1-bit CCITT G4) or Grayscale (8-bit LZW). Default: Bilevel.</param>
+    /// <param name="threshold">Luminance threshold 0–255 for bilevel mode. Ignored for grayscale. Default: 128.</param>
+    public void SaveAsTiff(string outputPath, int dpi = 200,
+        TiffColorMode colorMode = TiffColorMode.Bilevel, byte threshold = 128)
+    {
+        SaveAsTiff(outputPath, dpi, dpi, colorMode, threshold);
+    }
+
+    /// <summary>
+    /// Saves all pages as a single multi-page TIFF file with separate horizontal and vertical DPI.
+    /// </summary>
+    public void SaveAsTiff(string outputPath, int dpiWidth, int dpiHeight,
+        TiffColorMode colorMode = TiffColorMode.Bilevel, byte threshold = 128)
+    {
+        using var writer = new TiffWriter(outputPath);
+        WriteAllPagesToTiff(writer, dpiWidth, dpiHeight, colorMode, threshold);
+    }
+
+    /// <summary>
+    /// Saves all pages as a single multi-page TIFF to a Stream.
+    /// The stream must be writable and seekable (e.g. MemoryStream or FileStream).
+    /// </summary>
+    public void SaveAsTiff(Stream output, int dpi = 200,
+        TiffColorMode colorMode = TiffColorMode.Bilevel, byte threshold = 128)
+    {
+        SaveAsTiff(output, dpi, dpi, colorMode, threshold);
+    }
+
+    /// <summary>
+    /// Saves all pages as a single multi-page TIFF to a Stream with separate horizontal and vertical DPI.
+    /// </summary>
+    public void SaveAsTiff(Stream output, int dpiWidth, int dpiHeight,
+        TiffColorMode colorMode = TiffColorMode.Bilevel, byte threshold = 128)
+    {
+        using var writer = new TiffWriter(output);
+        WriteAllPagesToTiff(writer, dpiWidth, dpiHeight, colorMode, threshold);
+    }
+
+    /// <summary>
+    /// Async version of <see cref="SaveAsTiff(string, int, TiffColorMode, byte)"/>.
+    /// Uses Task.Yield() between pages for UI responsiveness.
+    /// </summary>
+    public Task SaveAsTiffAsync(string outputPath, int dpi = 200,
+        TiffColorMode colorMode = TiffColorMode.Bilevel, byte threshold = 128)
+    {
+        return SaveAsTiffAsync(outputPath, dpi, dpi, colorMode, threshold);
+    }
+
+    /// <summary>
+    /// Async version of <see cref="SaveAsTiff(string, int, int, TiffColorMode, byte)"/>.
+    /// </summary>
+    public async Task SaveAsTiffAsync(string outputPath, int dpiWidth, int dpiHeight,
+        TiffColorMode colorMode = TiffColorMode.Bilevel, byte threshold = 128)
+    {
+        using var writer = new TiffWriter(outputPath);
+        await WriteAllPagesToTiffAsync(writer, dpiWidth, dpiHeight, colorMode, threshold);
+    }
+
+    /// <summary>
+    /// Async version of <see cref="SaveAsTiff(Stream, int, TiffColorMode, byte)"/>.
+    /// </summary>
+    public Task SaveAsTiffAsync(Stream output, int dpi = 200,
+        TiffColorMode colorMode = TiffColorMode.Bilevel, byte threshold = 128)
+    {
+        return SaveAsTiffAsync(output, dpi, dpi, colorMode, threshold);
+    }
+
+    /// <summary>
+    /// Async version of <see cref="SaveAsTiff(Stream, int, int, TiffColorMode, byte)"/>.
+    /// </summary>
+    public async Task SaveAsTiffAsync(Stream output, int dpiWidth, int dpiHeight,
+        TiffColorMode colorMode = TiffColorMode.Bilevel, byte threshold = 128)
+    {
+        using var writer = new TiffWriter(output);
+        await WriteAllPagesToTiffAsync(writer, dpiWidth, dpiHeight, colorMode, threshold);
+    }
+
+    private void WriteAllPagesToTiff(TiffWriter writer, int dpiWidth, int dpiHeight,
+        TiffColorMode colorMode, byte threshold)
+    {
+        if (_disposed)
+            throw new ObjectDisposedException(nameof(PdfDocument));
+        if (PageCount == 0)
+            throw new InvalidOperationException("Document has no pages");
+
+        int pageCount = PageCount;
+        for (int i = 0; i < pageCount; i++)
+        {
+            RenderPageToTiff(writer, i, dpiWidth, dpiHeight, colorMode, threshold, pageCount);
+        }
+    }
+
+    private async Task WriteAllPagesToTiffAsync(TiffWriter writer, int dpiWidth, int dpiHeight,
+        TiffColorMode colorMode, byte threshold)
+    {
+        if (_disposed)
+            throw new ObjectDisposedException(nameof(PdfDocument));
+        if (PageCount == 0)
+            throw new InvalidOperationException("Document has no pages");
+
+        int pageCount = PageCount;
+        for (int i = 0; i < pageCount; i++)
+        {
+            await Task.Yield();
+            RenderPageToTiff(writer, i, dpiWidth, dpiHeight, colorMode, threshold, pageCount);
+        }
+    }
+
+    private void RenderPageToTiff(TiffWriter writer, int pageIndex, int dpiWidth, int dpiHeight,
+        TiffColorMode colorMode, byte threshold, int totalPages)
+    {
+        using var page = GetPage(pageIndex);
+
+        int widthPx = (int)Math.Round(page.Width / 72.0 * dpiWidth);
+        int heightPx = (int)Math.Round(page.Height / 72.0 * dpiHeight);
+
+        var bitmap = page.RenderToBitmapHandle(widthPx, heightPx, PDFium.FPDF_PRINTING | PDFium.FPDF_ANNOT);
+        try
+        {
+            var buffer = PDFium.FPDFBitmap_GetBuffer(bitmap);
+            var stride = PDFium.FPDFBitmap_GetStride(bitmap);
+
+            switch (colorMode)
+            {
+                case TiffColorMode.Bilevel:
+                    var bilevelData = PixelConverter.BgraToPackedBilevel(buffer, widthPx, heightPx, stride, threshold);
+                    writer.WriteBilevelPage(bilevelData, widthPx, heightPx, dpiWidth, dpiHeight, totalPages);
+                    break;
+
+                case TiffColorMode.Grayscale:
+                    var grayData = PixelConverter.BgraToGrayscale(buffer, widthPx, heightPx, stride);
+                    writer.WriteGrayscalePage(grayData, widthPx, heightPx, dpiWidth, dpiHeight, totalPages);
+                    break;
+
+                default:
+                    throw new ArgumentOutOfRangeException(nameof(colorMode));
+            }
+        }
+        finally
+        {
+            PDFium.FPDFBitmap_Destroy(bitmap);
+        }
+    }
+
     // Convenience methods for saving to directory (calls stream-based methods internally)
     public void SaveAsPngs(string outputDirectory, string fileNamePrefix = "page", int dpi = 300)
     {
@@ -569,36 +720,39 @@ public class PdfDocument : IDisposable
             var fileName = $"{fileNamePrefix}_{i + 1:D3}.{extension}";
             var filePath = Path.Combine(outputDirectory, fileName);
 
-            using var stream = File.Create(filePath);
+            await using var stream = File.Create(filePath);
             await data.AsStream().CopyToAsync(stream);
         }
     }
 
     private SKBitmap RenderPageToSkBitmap(PdfPage page, int dpiWidth, int dpiHeight)
     {
-        // Get original page dimensions in points
-        var originalWidthPoints = page.Width;
-        var originalHeightPoints = page.Height;
+        int finalWidthPixels = (int)Math.Round(page.Width / 72.0 * dpiWidth);
+        int finalHeightPixels = (int)Math.Round(page.Height / 72.0 * dpiHeight);
 
-        // Convert points to inches (points / 72)
-        var originalWidthInches = originalWidthPoints / 72.0;
-        var originalHeightInches = originalHeightPoints / 72.0;
+        // Render to native PDFium bitmap — no managed byte[] allocation
+        var pdfBitmap = page.RenderToBitmapHandle(finalWidthPixels, finalHeightPixels, PDFium.FPDF_ANNOT);
+        try
+        {
+            var buffer = PDFium.FPDFBitmap_GetBuffer(pdfBitmap);
+            var stride = PDFium.FPDFBitmap_GetStride(pdfBitmap);
+            long size = (long)stride * finalHeightPixels;
 
-        // Calculate final dimensions in pixels based on DPI
-        int finalWidthPixels = (int)Math.Round(originalWidthInches * dpiWidth);
-        int finalHeightPixels = (int)Math.Round(originalHeightInches * dpiHeight);
+            var skBitmap = new SKBitmap(finalWidthPixels, finalHeightPixels, SKColorType.Bgra8888, SKAlphaType.Premul);
+            var pixels = skBitmap.GetPixels();
 
-        // Render PDF page to bytes using PDFium (BGRA format)
-        var pdfBytes = page.RenderToBytes(finalWidthPixels, finalHeightPixels, PDFium.FPDF_ANNOT);
+            // Single native-to-native copy (no intermediate managed byte[])
+            unsafe
+            {
+                Buffer.MemoryCopy((void*)buffer, (void*)pixels, size, size);
+            }
 
-        // Create SKBitmap and copy the BGRA data
-        var bitmap = new SKBitmap(finalWidthPixels, finalHeightPixels, SKColorType.Bgra8888, SKAlphaType.Premul);
-
-        // Copy the PDFium buffer directly into the SKBitmap
-        var pixels = bitmap.GetPixels();
-        Marshal.Copy(pdfBytes, 0, pixels, pdfBytes.Length);
-
-        return bitmap;
+            return skBitmap;
+        }
+        finally
+        {
+            PDFium.FPDFBitmap_Destroy(pdfBitmap);
+        }
     }
 
 
