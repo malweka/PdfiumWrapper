@@ -25,21 +25,29 @@
 	<PropertyGroup Condition="'$(NativeRid)' == '' And $([MSBuild]::IsOSPlatform('Windows'))">
 		<NativeRid>win-x64</NativeRid>
 		<NativeLibName>pdfium.dll</NativeLibName>
+		<TiffLibName>tiff.dll</TiffLibName>
+		<TiffShimLibName>tiff_shim.dll</TiffShimLibName>
 	</PropertyGroup>
 
 	<PropertyGroup Condition="'$(NativeRid)' == '' And $([MSBuild]::IsOSPlatform('OSX')) And '$([System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture)' == 'Arm64'">
 		<NativeRid>osx-arm64</NativeRid>
 		<NativeLibName>libpdfium.dylib</NativeLibName>
+		<TiffLibName>libtiff.dylib</TiffLibName>
+		<TiffShimLibName>libtiff_shim.dylib</TiffShimLibName>
 	</PropertyGroup>
 
 	<PropertyGroup Condition="'$(NativeRid)' == '' And $([MSBuild]::IsOSPlatform('OSX')) And '$([System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture)' == 'X64'">
 		<NativeRid>osx-x64</NativeRid>
 		<NativeLibName>libpdfium.dylib</NativeLibName>
+		<TiffLibName>libtiff.dylib</TiffLibName>
+		<TiffShimLibName>libtiff_shim.dylib</TiffShimLibName>
 	</PropertyGroup>
 
 	<PropertyGroup Condition="'$(NativeRid)' == '' And $([MSBuild]::IsOSPlatform('Linux'))">
 		<NativeRid>linux-x64</NativeRid>
 		<NativeLibName>libpdfium.so</NativeLibName>
+		<TiffLibName>libtiff.so</TiffLibName>
+		<TiffShimLibName>libtiff_shim.so</TiffShimLibName>
 	</PropertyGroup>
 
 	<!-- Include README and icon in package -->
@@ -48,11 +56,27 @@
 		<None Include="../../icon.png" Pack="true" PackagePath="\" />
 	</ItemGroup>
 
-	<!-- Native library - uses detected or injected RID -->
+	<!-- Native PDFium library - uses detected or injected RID -->
 	<ItemGroup Condition="'$(NativeRid)' != ''">
 		<Content Include="../libs/$(NativeRid)/$(NativeLibName)">
 			<CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
 			<TargetPath>runtimes/$(NativeRid)/native/$(NativeLibName)</TargetPath>
+		</Content>
+	</ItemGroup>
+
+	<!-- Native libtiff library - included when binary exists for the platform -->
+	<ItemGroup Condition="'$(NativeRid)' != '' And '$(TiffLibName)' != '' And Exists('../libs/$(NativeRid)/$(TiffLibName)')">
+		<Content Include="../libs/$(NativeRid)/$(TiffLibName)">
+			<CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+			<TargetPath>runtimes/$(NativeRid)/native/$(TiffLibName)</TargetPath>
+		</Content>
+	</ItemGroup>
+
+	<!-- TIFFSetField shim - non-variadic wrappers for ARM64 compatibility -->
+	<ItemGroup Condition="'$(NativeRid)' != '' And '$(TiffShimLibName)' != '' And Exists('../libs/$(NativeRid)/$(TiffShimLibName)')">
+		<Content Include="../libs/$(NativeRid)/$(TiffShimLibName)">
+			<CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+			<TargetPath>runtimes/$(NativeRid)/native/$(TiffShimLibName)</TargetPath>
 		</Content>
 	</ItemGroup>
 

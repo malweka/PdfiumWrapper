@@ -62,8 +62,8 @@ public async Task<IActionResult> ConvertPdf(IFormFile file)
     using var stream = file.OpenReadStream();
     using var document = new PdfDocument(stream);
     
-    var images = document.ConvertToImageBytes(SKEncodedImageFormat.Png, 100, 150);
-    return File(images[0], "image/png");
+    var image = document.StreamImageBytes(SKEncodedImageFormat.Png, 100, 150).First();
+    return File(image, "image/png");
 }
 ```
 
@@ -233,7 +233,7 @@ public class PdfController : ControllerBase
             using var document = _pdfFactory.CreateFromStream(stream);
             
             // For large documents, consider streaming response
-            var images = document.ConvertToImageBytes(SKEncodedImageFormat.Png, 100, dpi);
+            var images = document.StreamImageBytes(SKEncodedImageFormat.Png, 100, dpi).ToList();
             
             // Return as zip for multiple pages
             if (images.Count > 1)
@@ -508,8 +508,11 @@ For very large output, stream to disk instead of memory:
 // ✅ Stream to files instead of holding all in memory
 document.SaveAsImages("output", "page", SKEncodedImageFormat.Png, 100, 300, 300);
 
-// Rather than:
-var allBytes = document.ConvertToImageBytes(...); // Holds everything in memory
+// Or stream one page at a time for minimal memory:
+foreach (var bytes in document.StreamImageBytes(SKEncodedImageFormat.Png, 100, 300))
+{
+    // Process and discard — only one page in memory at a time
+}
 ```
 
 ### Use JPEG for Size, PNG for Quality

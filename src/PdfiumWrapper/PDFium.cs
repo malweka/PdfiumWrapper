@@ -1,5 +1,4 @@
-﻿using System.Reflection;
-using System.Runtime.InteropServices;
+﻿using System.Runtime.InteropServices;
 
 namespace PdfiumWrapper;
 
@@ -12,68 +11,7 @@ public static partial class PDFium
 
     static PDFium()
     {
-        // Set up custom library resolver for cross-platform loading
-        NativeLibrary.SetDllImportResolver(typeof(PDFium).Assembly, DllImportResolver);
-    }
-
-    private static IntPtr DllImportResolver(string libraryName, Assembly assembly, DllImportSearchPath? searchPath)
-    {
-        if (libraryName == "pdfium")
-        {
-            // Try to load the platform-specific library
-            string actualLibraryPath = GetNativeLibraryPath();
-            
-            if (File.Exists(actualLibraryPath))
-            {
-                return NativeLibrary.Load(actualLibraryPath);
-            }
-            
-            // Fallback: try standard library loading with correct name
-            string platformLibraryName = GetPlatformLibraryName();
-            if (NativeLibrary.TryLoad(platformLibraryName, assembly, searchPath, out IntPtr handle))
-            {
-                return handle;
-            }
-        }
-        
-        // Default behavior
-        return IntPtr.Zero;
-    }
-
-    private static string GetPlatformLibraryName()
-    {
-        if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
-            return "pdfium";
-        else if (RuntimeInformation.IsOSPlatform(OSPlatform.Linux))
-            return "libpdfium";
-        else if (RuntimeInformation.IsOSPlatform(OSPlatform.OSX))
-            return "libpdfium";
-        else
-            return "pdfium";
-    }
-
-    private static string GetNativeLibraryPath()
-    {
-        string baseDir = AppContext.BaseDirectory;
-        string architecture = RuntimeInformation.ProcessArchitecture.ToString().ToLowerInvariant();
-        
-        if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
-        {
-            string rid = $"win-{architecture}";
-            return Path.Combine(baseDir, "libs", rid, "pdfium.dll");
-        }
-        else if (RuntimeInformation.IsOSPlatform(OSPlatform.Linux))
-        {
-            string rid = $"linux-{architecture}";
-            return Path.Combine(baseDir, "libs", rid, "libpdfium.so");
-        }
-        else if (RuntimeInformation.IsOSPlatform(OSPlatform.OSX))
-        {
-            string rid = $"osx-{architecture}";
-            return Path.Combine(baseDir, "libs", rid, "libpdfium.dylib");
-        }
-        
-        throw new PlatformNotSupportedException("Unsupported platform");
+        NativeLibraryResolver.EnsureRegistered();
     }
 
     #region Library Management

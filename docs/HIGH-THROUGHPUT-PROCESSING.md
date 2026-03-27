@@ -61,58 +61,38 @@ foreach (var filePath in pdfFiles)
 
 ## Converting Pages to Images
 
-### Converting to TIFF
+### Converting to TIFF (Built-in)
 
-SkiaSharp does not have native TIFF support, but you can convert to TIFF using the rendered bitmap data:
+PdfiumWrapper includes native multi-page TIFF support via libtiff, with a zero-copy pipeline from PDFium's rendered bitmap directly to libtiff — no intermediate SkiaSharp encoding:
 
 ```csharp
-using SkiaSharp;
-
-public void ConvertPdfToTiff(string pdfPath, string outputDirectory, int dpi = 300)
+public void ConvertPdfToTiff(string pdfPath, string outputPath, int dpi = 200)
 {
     using var doc = new PdfDocument(pdfPath);
-    
-    // Process each page with automatic disposal
-    var bitmapData = doc.ProcessAllPages(page =>
-    {
-        // RenderToBytes returns raw BGRA pixel data
-        int width = (int)Math.Round(page.Width / 72.0 * dpi);
-        int height = (int)Math.Round(page.Height / 72.0 * dpi);
-        
-        return new
-        {
-            Bytes = page.RenderToBytes(width, height),
-            Width = width,
-            Height = height,
-            PageIndex = page.PageIndex
-        };
-    });
-    
-    // Convert each page to TIFF (using a TIFF library like LibTiff.Net or System.Drawing on Windows)
-    foreach (var pageData in bitmapData)
-    {
-        var outputPath = Path.Combine(outputDirectory, $"page_{pageData.PageIndex + 1:D3}.tiff");
-        SaveAsTiff(pageData.Bytes, pageData.Width, pageData.Height, outputPath);
-    }
+
+    // Bilevel (1-bit CCITT G4) — smallest files, ideal for scanned documents
+    doc.SaveAsTiff(outputPath, dpi);
+
+    // Grayscale (8-bit LZW) — preserves shading
+    doc.SaveAsTiff(outputPath, dpi, colorMode: TiffColorMode.Grayscale);
 }
 
-// Example using System.Drawing (Windows only)
-#if WINDOWS
-private void SaveAsTiff(byte[] bgraBytes, int width, int height, string outputPath)
+// Write to a stream (must be writable and seekable)
+public void ConvertPdfToTiffStream(string pdfPath, Stream output, int dpi = 200)
 {
-    using var bitmap = new System.Drawing.Bitmap(width, height, System.Drawing.Imaging.PixelFormat.Format32bppArgb);
-    var bitmapData = bitmap.LockBits(
-        new System.Drawing.Rectangle(0, 0, width, height),
-        System.Drawing.Imaging.ImageLockMode.WriteOnly,
-        System.Drawing.Imaging.PixelFormat.Format32bppArgb);
-    
-    System.Runtime.InteropServices.Marshal.Copy(bgraBytes, 0, bitmapData.Scan0, bgraBytes.Length);
-    bitmap.UnlockBits(bitmapData);
-    
-    bitmap.Save(outputPath, System.Drawing.Imaging.ImageFormat.Tiff);
+    using var doc = new PdfDocument(pdfPath);
+    doc.SaveAsTiff(output, dpi);
 }
-#endif
+
+// Async version for UI responsiveness
+public async Task ConvertPdfToTiffAsync(string pdfPath, string outputPath, int dpi = 200)
+{
+    using var doc = new PdfDocument(pdfPath);
+    await doc.SaveAsTiffAsync(outputPath, dpi);
+}
 ```
+
+The TIFF pipeline renders each page at native resolution, converts BGRA pixels to the target format (bilevel or grayscale) using optimized unsafe code, and writes scanlines directly to libtiff with pinned buffers — no managed array copies per row.
 
 ### Converting to PNG/JPEG (Built-in)
 
@@ -131,20 +111,31 @@ public void ConvertPdfToImages(string pdfPath, string outputDirectory, int dpi =
 }
 ```
 
-### Getting Image Bytes Without Saving to Disk
+### Streaming Image Bytes Without Saving to Disk
+
+Use `StreamImageBytes` / `StreamImageBytesAsync` to process one page at a time without holding all pages in memory:
 
 ```csharp
-public List<byte[]> GetPdfPagesAsImageBytes(string pdfPath, SKEncodedImageFormat format, int dpi = 300)
+public void ProcessPdfPageImages(string pdfPath, SKEncodedImageFormat format, int dpi = 300)
 {
     using var doc = new PdfDocument(pdfPath);
-    return doc.ConvertToImageBytes(format, quality: 100, dpi);
+    int i = 0;
+    foreach (var bytes in doc.StreamImageBytes(format, quality: 100, dpi))
+    {
+        File.WriteAllBytes($"page_{i++}.png", bytes);
+        // Previous page's bytes are now eligible for GC
+    }
 }
 
-// Async version for UI responsiveness
-public async Task<List<byte[]>> GetPdfPagesAsImageBytesAsync(string pdfPath, SKEncodedImageFormat format, int dpi = 300)
+// Async version — yields between pages for UI responsiveness
+public async Task ProcessPdfPageImagesAsync(string pdfPath, SKEncodedImageFormat format, int dpi = 300)
 {
     using var doc = new PdfDocument(pdfPath);
-    return await doc.ConvertToImageBytesAsync(format, quality: 100, dpi);
+    int i = 0;
+    await foreach (var bytes in doc.StreamImageBytesAsync(format, quality: 100, dpi))
+    {
+        await File.WriteAllBytesAsync($"page_{i++}.png", bytes);
+    }
 }
 ```
 
@@ -687,6 +678,8 @@ service.MergeWithOptions(new MergeOptions(
 
 | Tip | Impact |
 |-----|--------|
+| Use `SaveAsTiff` for document scanning workflows | Direct PDFium-to-libtiff pipeline, fastest TIFF output |
+| Use `StreamImageBytes` instead of collecting all pages | O(1) memory per page instead of O(N) |
 | Use `ProcessAllPages` instead of `GetAllPages` | Prevents memory leaks |
 | Dispose all PDF objects with `using` | Critical for memory management |
 | Lower DPI for previews (72-150 DPI) | Faster processing, less memory |
