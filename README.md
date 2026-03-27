@@ -9,6 +9,7 @@ A modern, high-level .NET 8 wrapper for PDFium that makes PDF manipulation easy 
 - **PDF Creation** — Create new PDF documents from scratch with text, images, and shapes
 - **Page Editing** — Add text objects, images, paths, and rectangles to pages
 - **PDF Rendering** — Convert PDF pages to images (PNG, JPEG, WebP, etc.) with customizable DPI
+- **TIFF Export** — High-performance multi-page TIFF output (bilevel CCITT G4 or grayscale LZW) via native libtiff
 - **PDF Merging** — Combine multiple PDFs or extract specific pages
 - **Form Filling** — Read and write PDF form fields (text fields, checkboxes, dropdowns, radio buttons)
 - **Metadata Management** — Read and modify PDF metadata (title, author, keywords, etc.)
@@ -30,6 +31,7 @@ dotnet add package PdfiumWrapper
 - .NET 8.0 or later
 - SkiaSharp (automatically installed as dependency)
 - Platform-specific PDFium binaries (included in the package)
+- Platform-specific libtiff + tiff_shim binaries (included; required only for TIFF export)
 
 ## Quick Start
 
@@ -90,6 +92,13 @@ document.SaveAsPngs("output_folder", fileNamePrefix: "page", dpi: 300);
 
 // Save as JPEG with quality setting
 document.SaveAsJpegs("output_folder", fileNamePrefix: "page", quality: 90, dpi: 200);
+
+// Save as multi-page TIFF (bilevel CCITT G4 — ideal for scanned documents)
+document.SaveAsTiff("output.tiff", dpi: 200);
+
+// Save TIFF to a stream
+using var stream = new MemoryStream();
+document.SaveAsTiff(stream, dpi: 200, colorMode: TiffColorMode.Grayscale);
 ```
 
 ### Fill a PDF Form
@@ -126,14 +135,18 @@ merger.Save("merged.pdf");
 | [Best Practices](docs/BEST-PRACTICES.md) | Thread safety, ASP.NET Core guidance, performance tips |
 | [Examples](docs/EXAMPLES.md) | Detailed code examples for common scenarios |
 | [Troubleshooting](docs/TROUBLESHOOTING.md) | Common issues and solutions |
+| [High-Throughput Processing](docs/HIGH-THROUGHPUT-PROCESSING.md) | Batch processing, parallelism, memory management |
+| [Building Native Libraries](docs/BUILDING-NATIVE-LIBS.md) | How to compile libtiff and tiff_shim for each platform |
 
 ## Platform Support
 
-This library includes native PDFium binaries for:
+This library includes native binaries for:
 
 - Windows (x64)
 - macOS (x64 and ARM64)
 - Linux (x64)
+
+Native libraries bundled: **PDFium** (PDF rendering), **libtiff** + **tiff_shim** (TIFF export). See [Building Native Libraries](docs/BUILDING-NATIVE-LIBS.md) for compilation instructions.
 
 ## Thread Safety Warning
 
@@ -147,6 +160,7 @@ This project is licensed under the MIT License.
 
 - [PDFium](https://pdfium.googlesource.com/pdfium/) — Google's open-source PDF rendering engine
 - [SkiaSharp](https://github.com/mono/SkiaSharp) — Cross-platform 2D graphics library
+- [libtiff](https://libtiff.gitlab.io/libtiff/) — TIFF image library
 
 ## Support
 

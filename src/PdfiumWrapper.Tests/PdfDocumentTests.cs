@@ -621,16 +621,33 @@ public class PdfDocumentTests : IDisposable
     #region Image Conversion Tests
     
     [Fact]
-    public void ConvertToImageBytes_Png_ShouldReturnValidImages()
+    public void StreamImageBytes_Png_ShouldReturnValidImages()
     {
         // Arrange
         using var doc = new PdfDocument(ContractPdfPath);
-        
+
         // Act
-        var images = doc.ConvertToImageBytes(SKEncodedImageFormat.Png, quality: 100, dpi: 72);
-        
+        var images = doc.StreamImageBytes(SKEncodedImageFormat.Png, quality: 100, dpi: 72).ToList();
+
         // Assert
-        Assert.NotNull(images);
+        Assert.Equal(doc.PageCount, images.Count);
+        Assert.All(images, imageBytes =>
+        {
+            Assert.NotNull(imageBytes);
+            Assert.True(imageBytes.Length > 0);
+        });
+    }
+
+    [Fact]
+    public void StreamImageBytes_Jpeg_ShouldReturnValidImages()
+    {
+        // Arrange
+        using var doc = new PdfDocument(ContractPdfPath);
+
+        // Act
+        var images = doc.StreamImageBytes(SKEncodedImageFormat.Jpeg, quality: 90, dpi: 72).ToList();
+
+        // Assert
         Assert.Equal(doc.PageCount, images.Count);
         Assert.All(images, imageBytes =>
         {
@@ -640,35 +657,19 @@ public class PdfDocumentTests : IDisposable
     }
     
     [Fact]
-    public void ConvertToImageBytes_Jpeg_ShouldReturnValidImages()
+    public async Task StreamImageBytesAsync_ShouldReturnValidImages()
     {
         // Arrange
         using var doc = new PdfDocument(ContractPdfPath);
-        
+
         // Act
-        var images = doc.ConvertToImageBytes(SKEncodedImageFormat.Jpeg, quality: 90, dpi: 72);
-        
-        // Assert
-        Assert.NotNull(images);
-        Assert.Equal(doc.PageCount, images.Count);
-        Assert.All(images, imageBytes =>
+        var images = new List<byte[]>();
+        await foreach (var bytes in doc.StreamImageBytesAsync(SKEncodedImageFormat.Png, quality: 100, dpi: 72))
         {
-            Assert.NotNull(imageBytes);
-            Assert.True(imageBytes.Length > 0);
-        });
-    }
-    
-    [Fact]
-    public async Task ConvertToImageBytesAsync_ShouldReturnValidImages()
-    {
-        // Arrange
-        using var doc = new PdfDocument(ContractPdfPath);
-        
-        // Act
-        var images = await doc.ConvertToImageBytesAsync(SKEncodedImageFormat.Png, quality: 100, dpi: 72);
-        
+            images.Add(bytes);
+        }
+
         // Assert
-        Assert.NotNull(images);
         Assert.Equal(doc.PageCount, images.Count);
         Assert.All(images, imageBytes =>
         {
@@ -789,12 +790,216 @@ public class PdfDocumentTests : IDisposable
         // Arrange
         using var doc = new PdfDocument(ContractPdfPath);
         var streams = new MemoryStream[doc.PageCount - 1]; // Wrong count
-        
+
         // Act & Assert
-        Assert.Throws<ArgumentException>(() => 
+        Assert.Throws<ArgumentException>(() =>
             doc.SaveAsImages(streams, SKEncodedImageFormat.Png, quality: 100, dpiWidth: 72, dpiHeight: 72));
     }
-    
+
+    #endregion
+
+    #region Save As TIFF Tests
+
+    [Fact]
+    public void SaveAsTiff_Bilevel_ShouldCreateValidFile()
+    {
+        // Arrange
+        using var doc = new PdfDocument(ContractPdfPath);
+        var outputDir = CreateTempDirectory();
+        var outputPath = Path.Combine(outputDir, "output.tiff");
+
+        // Act
+        doc.SaveAsTiff(outputPath, dpi: 72, colorMode: TiffColorMode.Bilevel);
+
+        // Assert
+        Assert.True(File.Exists(outputPath));
+        var fileInfo = new FileInfo(outputPath);
+        Assert.True(fileInfo.Length > 0);
+    }
+
+    [Fact]
+    public void SaveAsTiff_Grayscale_ShouldCreateValidFile()
+    {
+        // Arrange
+        using var doc = new PdfDocument(ContractPdfPath);
+        var outputDir = CreateTempDirectory();
+        var outputPath = Path.Combine(outputDir, "output_gray.tiff");
+
+        // Act
+        doc.SaveAsTiff(outputPath, dpi: 72, colorMode: TiffColorMode.Grayscale);
+
+        // Assert
+        Assert.True(File.Exists(outputPath));
+        var fileInfo = new FileInfo(outputPath);
+        Assert.True(fileInfo.Length > 0);
+    }
+
+    [Fact]
+    public void SaveAsTiff_SeparateDpi_ShouldCreateValidFile()
+    {
+        // Arrange
+        using var doc = new PdfDocument(ContractPdfPath);
+        var outputDir = CreateTempDirectory();
+        var outputPath = Path.Combine(outputDir, "output_dpi.tiff");
+
+        // Act
+        doc.SaveAsTiff(outputPath, dpiWidth: 150, dpiHeight: 200, colorMode: TiffColorMode.Bilevel);
+
+        // Assert
+        Assert.True(File.Exists(outputPath));
+        Assert.True(new FileInfo(outputPath).Length > 0);
+    }
+
+    [Fact]
+    public void SaveAsTiff_DefaultParameters_ShouldCreateValidFile()
+    {
+        // Arrange
+        using var doc = new PdfDocument(ContractPdfPath);
+        var outputDir = CreateTempDirectory();
+        var outputPath = Path.Combine(outputDir, "output_default.tiff");
+
+        // Act
+        doc.SaveAsTiff(outputPath);
+
+        // Assert
+        Assert.True(File.Exists(outputPath));
+        Assert.True(new FileInfo(outputPath).Length > 0);
+    }
+
+    [Fact]
+    public void SaveAsTiff_MultiPageDocument_ShouldProduceLargerFileThanSinglePage()
+    {
+        // Arrange
+        using var multiPageDoc = new PdfDocument(ContractPdfPath);
+        Assert.True(multiPageDoc.PageCount > 1, "Test requires a multi-page PDF");
+
+        var outputDir = CreateTempDirectory();
+        var multiPagePath = Path.Combine(outputDir, "multi.tiff");
+
+        // Act
+        multiPageDoc.SaveAsTiff(multiPagePath, dpi: 72);
+
+        // Assert — multi-page TIFF should have non-trivial size
+        var fileInfo = new FileInfo(multiPagePath);
+        Assert.True(fileInfo.Length > 0);
+    }
+
+    [Fact]
+    public void SaveAsTiff_ToStream_ShouldWriteValidData()
+    {
+        // Arrange
+        using var doc = new PdfDocument(ContractPdfPath);
+        using var stream = new MemoryStream();
+
+        // Act
+        doc.SaveAsTiff(stream, dpi: 72, colorMode: TiffColorMode.Bilevel);
+
+        // Assert
+        Assert.True(stream.Length > 0);
+    }
+
+    [Fact]
+    public void SaveAsTiff_ToStream_Grayscale_ShouldWriteValidData()
+    {
+        // Arrange
+        using var doc = new PdfDocument(ContractPdfPath);
+        using var stream = new MemoryStream();
+
+        // Act
+        doc.SaveAsTiff(stream, dpi: 72, colorMode: TiffColorMode.Grayscale);
+
+        // Assert
+        Assert.True(stream.Length > 0);
+    }
+
+    [Fact]
+    public void SaveAsTiff_ToStream_ShouldMatchFileOutput()
+    {
+        // Arrange
+        using var doc = new PdfDocument(ContractPdfPath);
+        var outputDir = CreateTempDirectory();
+        var filePath = Path.Combine(outputDir, "file.tiff");
+        using var stream = new MemoryStream();
+
+        // Act
+        doc.SaveAsTiff(filePath, dpi: 72);
+        doc.SaveAsTiff(stream, dpi: 72);
+
+        // Assert — both outputs should have the same length
+        var fileBytes = File.ReadAllBytes(filePath);
+        var streamBytes = stream.ToArray();
+        Assert.Equal(fileBytes.Length, streamBytes.Length);
+    }
+
+    [Fact]
+    public async Task SaveAsTiffAsync_ShouldCreateValidFile()
+    {
+        // Arrange
+        using var doc = new PdfDocument(ContractPdfPath);
+        var outputDir = CreateTempDirectory();
+        var outputPath = Path.Combine(outputDir, "async_output.tiff");
+
+        // Act
+        await doc.SaveAsTiffAsync(outputPath, dpi: 72);
+
+        // Assert
+        Assert.True(File.Exists(outputPath));
+        Assert.True(new FileInfo(outputPath).Length > 0);
+    }
+
+    [Fact]
+    public async Task SaveAsTiffAsync_ToStream_ShouldWriteValidData()
+    {
+        // Arrange
+        using var doc = new PdfDocument(ContractPdfPath);
+        using var stream = new MemoryStream();
+
+        // Act
+        await doc.SaveAsTiffAsync(stream, dpi: 72);
+
+        // Assert
+        Assert.True(stream.Length > 0);
+    }
+
+    [Fact]
+    public void SaveAsTiff_EmptyDocument_ShouldThrow()
+    {
+        // Arrange
+        using var doc = new PdfDocument();
+        var outputDir = CreateTempDirectory();
+        var outputPath = Path.Combine(outputDir, "empty.tiff");
+
+        // Act & Assert
+        Assert.Throws<InvalidOperationException>(() => doc.SaveAsTiff(outputPath));
+    }
+
+    [Fact]
+    public void SaveAsTiff_ToStream_EmptyDocument_ShouldThrow()
+    {
+        // Arrange
+        using var doc = new PdfDocument();
+        using var stream = new MemoryStream();
+
+        // Act & Assert
+        Assert.Throws<InvalidOperationException>(() => doc.SaveAsTiff(stream));
+    }
+
+    [Fact]
+    public void SaveAsTiff_PresentationPdf_ShouldCreateValidFile()
+    {
+        // Arrange
+        using var doc = new PdfDocument(PresentationPdfPath);
+        var outputDir = CreateTempDirectory();
+        var outputPath = Path.Combine(outputDir, "presentation.tiff");
+
+        // Act
+        doc.SaveAsTiff(outputPath, dpi: 72);
+
+        // Assert
+        Assert.True(File.Exists(outputPath));
+        Assert.True(new FileInfo(outputPath).Length > 0);
+    }
+
     #endregion
     
     #region Metadata Tests

@@ -57,23 +57,19 @@ public static partial class LibTiff
     #region Field Setters
 
     // TIFFSetField is variadic in C (uint32_t tag, ...).
-    // LibraryImport does not support variadic functions directly, so we provide
-    // typed overloads via EntryPoint aliasing for each value type we need.
+    // .NET P/Invoke (DllImport and LibraryImport) cannot correctly call variadic
+    // functions on ARM64, where the ABI passes variadic args differently from
+    // fixed parameters. The tiff_shim library provides non-variadic wrappers
+    // that let the C compiler handle the va_list correctly.
     //
-    // NOTE: On ARM64, the variadic calling convention differs from standard.
-    // If issues arise on ARM64 macOS, these overloads may need to fall back to
-    // DllImport with CallingConvention.Cdecl which handles variadic correctly.
+    // See native/tiff_shim.c for the source.
 
-    [LibraryImport(LibraryName, EntryPoint = "TIFFSetField")]
+    private const string ShimLibraryName = "tiff_shim";
+
+    [LibraryImport(ShimLibraryName, EntryPoint = "TIFFSetFieldInt")]
     public static partial int TIFFSetFieldInt(IntPtr tiff, uint tag, int value);
 
-    [LibraryImport(LibraryName, EntryPoint = "TIFFSetField")]
-    public static partial int TIFFSetFieldShort(IntPtr tiff, uint tag, short value);
-
-    [LibraryImport(LibraryName, EntryPoint = "TIFFSetField")]
-    public static partial int TIFFSetFieldFloat(IntPtr tiff, uint tag, float value);
-
-    [LibraryImport(LibraryName, EntryPoint = "TIFFSetField")]
+    [LibraryImport(ShimLibraryName, EntryPoint = "TIFFSetFieldDouble")]
     public static partial int TIFFSetFieldDouble(IntPtr tiff, uint tag, double value);
 
     #endregion
@@ -122,6 +118,7 @@ public static partial class LibTiff
     #region Value Constants
 
     // Compression schemes
+    public const int COMPRESSION_NONE = 1;
     public const int COMPRESSION_CCITT_T6 = 4;
     public const int COMPRESSION_LZW = 5;
     public const int COMPRESSION_DEFLATE = 32946;

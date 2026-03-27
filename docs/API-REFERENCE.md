@@ -256,13 +256,16 @@ SKBitmap[] bitmaps = await document.ConvertToBitmapsAsync(dpi: 300);
 
 **Note:** This method processes pages sequentially and uses `Task.Yield()` for responsiveness, not parallelism.
 
-#### ConvertToImageBytes(SKEncodedImageFormat format, int quality = 100, int dpi = 300)
+#### StreamImageBytes(SKEncodedImageFormat format, int quality = 100, int dpi = 300)
 
-Converts all pages to encoded image bytes.
+Streams encoded image bytes one page at a time. Only one page's data is in memory at any point.
 
 ```csharp
-var pngBytes = document.ConvertToImageBytes(SKEncodedImageFormat.Png, quality: 100, dpi: 300);
-var jpegBytes = document.ConvertToImageBytes(SKEncodedImageFormat.Jpeg, quality: 85, dpi: 200);
+foreach (var bytes in document.StreamImageBytes(SKEncodedImageFormat.Png, quality: 100, dpi: 300))
+{
+    File.WriteAllBytes($"page.png", bytes);
+    // Previous page's bytes are eligible for GC
+}
 ```
 
 **Parameters:**
@@ -270,7 +273,59 @@ var jpegBytes = document.ConvertToImageBytes(SKEncodedImageFormat.Jpeg, quality:
 - `quality` — Quality for lossy formats (1-100)
 - `dpi` — Resolution
 
-**Returns:** List of byte arrays, one per page
+**Returns:** `IEnumerable<byte[]>` — one byte array per page
+
+#### StreamImageBytesAsync(SKEncodedImageFormat format, int quality = 100, int dpi = 300)
+
+Async streaming version. Uses `Task.Yield()` between pages for UI responsiveness.
+
+```csharp
+await foreach (var bytes in document.StreamImageBytesAsync(SKEncodedImageFormat.Jpeg, 85, 200))
+{
+    await File.WriteAllBytesAsync($"page.jpg", bytes);
+}
+```
+
+**Returns:** `IAsyncEnumerable<byte[]>` — one byte array per page
+
+#### SaveAsTiff(string outputPath, int dpi = 200, TiffColorMode colorMode = TiffColorMode.Bilevel, byte threshold = 128)
+
+Saves all pages as a single multi-page TIFF file using a direct PDFium-to-libtiff pipeline (no intermediate SkiaSharp encoding).
+
+```csharp
+// Bilevel (1-bit CCITT G4) — ideal for scanned documents
+document.SaveAsTiff("output.tiff", dpi: 200);
+
+// Grayscale (8-bit LZW)
+document.SaveAsTiff("output.tiff", dpi: 200, colorMode: TiffColorMode.Grayscale);
+
+// Separate horizontal/vertical DPI
+document.SaveAsTiff("output.tiff", dpiWidth: 200, dpiHeight: 300);
+```
+
+**Parameters:**
+- `outputPath` — Path to the output .tiff file
+- `dpi` — Resolution in dots per inch (default: 200)
+- `colorMode` — `TiffColorMode.Bilevel` (1-bit CCITT G4) or `TiffColorMode.Grayscale` (8-bit LZW). Default: Bilevel
+- `threshold` — Luminance threshold 0-255 for bilevel mode. Ignored for grayscale. Default: 128
+
+#### SaveAsTiff(Stream output, int dpi = 200, TiffColorMode colorMode = TiffColorMode.Bilevel, byte threshold = 128)
+
+Saves all pages as a multi-page TIFF to a writable, seekable stream.
+
+```csharp
+using var stream = new MemoryStream();
+document.SaveAsTiff(stream, dpi: 200);
+```
+
+#### SaveAsTiffAsync(...)
+
+Async versions of both file and stream overloads. Uses `Task.Yield()` between pages for responsiveness.
+
+```csharp
+await document.SaveAsTiffAsync("output.tiff", dpi: 200);
+await document.SaveAsTiffAsync(stream, dpi: 200, colorMode: TiffColorMode.Grayscale);
+```
 
 #### SaveAsPngs(string outputDirectory, string fileNamePrefix = "page", int dpi = 300)
 

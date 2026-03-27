@@ -55,6 +55,7 @@ internal static class NativeLibraryResolver
             {
                 "pdfium" => ("pdfium.dll", "pdfium"),
                 "tiff" => ("tiff.dll", "tiff"),
+                "tiff_shim" => ("tiff_shim.dll", "tiff_shim"),
                 _ => (null, null)
             };
         }
@@ -65,6 +66,7 @@ internal static class NativeLibraryResolver
             {
                 "pdfium" => ("libpdfium.so", "libpdfium"),
                 "tiff" => ("libtiff.so", "libtiff"),
+                "tiff_shim" => ("libtiff_shim.so", "libtiff_shim"),
                 _ => (null, null)
             };
         }
@@ -75,6 +77,7 @@ internal static class NativeLibraryResolver
             {
                 "pdfium" => ("libpdfium.dylib", "libpdfium"),
                 "tiff" => ("libtiff.dylib", "libtiff"),
+                "tiff_shim" => ("libtiff_shim.dylib", "libtiff_shim"),
                 _ => (null, null)
             };
         }

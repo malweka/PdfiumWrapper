@@ -338,23 +338,39 @@ document.SaveAsImages(
 );
 ```
 
-### Get Images as Byte Arrays
+### Stream Images as Byte Arrays
 
 ```csharp
 using var document = new PdfDocument("document.pdf");
 
-// Get all pages as PNG byte arrays
-List<byte[]> pngImages = document.ConvertToImageBytes(
-    SKEncodedImageFormat.Png, 
-    quality: 100, 
-    dpi: 150
-);
-
-// Use the images
-for (int i = 0; i < pngImages.Count; i++)
+// Stream pages one at a time — only one page's bytes in memory at any point
+int i = 0;
+foreach (var bytes in document.StreamImageBytes(SKEncodedImageFormat.Png, quality: 100, dpi: 150))
 {
-    await File.WriteAllBytesAsync($"page_{i + 1}.png", pngImages[i]);
+    File.WriteAllBytes($"page_{++i}.png", bytes);
 }
+
+// Async version
+await foreach (var bytes in document.StreamImageBytesAsync(SKEncodedImageFormat.Jpeg, quality: 85, dpi: 200))
+{
+    await File.WriteAllBytesAsync($"page_{++i}.jpg", bytes);
+}
+```
+
+### Save as Multi-Page TIFF
+
+```csharp
+using var document = new PdfDocument("document.pdf");
+
+// Bilevel CCITT G4 (default) — ideal for scanned documents
+document.SaveAsTiff("output.tiff", dpi: 200);
+
+// Grayscale LZW
+document.SaveAsTiff("output.tiff", dpi: 200, colorMode: TiffColorMode.Grayscale);
+
+// Write to a stream
+using var stream = new MemoryStream();
+document.SaveAsTiff(stream, dpi: 200);
 ```
 
 ### Get SkiaSharp Bitmaps for Custom Processing
@@ -1093,12 +1109,11 @@ public class PdfProcessor
         result.FullText = textBuilder.ToString();
         
         // Generate thumbnail of first page
-        var thumbnails = document.ConvertToImageBytes(
+        result.ThumbnailBytes = document.StreamImageBytes(
             SKEncodedImageFormat.Jpeg,
             quality: 75,
             dpi: 72
-        );
-        result.ThumbnailBytes = thumbnails.FirstOrDefault();
+        ).FirstOrDefault();
         
         // Check for forms
         var form = document.GetForm();
@@ -1180,9 +1195,9 @@ public class PdfApiController : ControllerBase
         stream.Position = 0;
         
         using var document = new PdfDocument(stream);
-        var images = document.ConvertToImageBytes(SKEncodedImageFormat.Jpeg, 80, dpi);
-        
-        return File(images[0], "image/jpeg");
+        var thumbnail = document.StreamImageBytes(SKEncodedImageFormat.Jpeg, 80, dpi).First();
+
+        return File(thumbnail, "image/jpeg");
     }
 }
 ```

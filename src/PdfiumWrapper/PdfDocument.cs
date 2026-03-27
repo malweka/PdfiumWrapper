@@ -378,26 +378,41 @@ public class PdfDocument : IDisposable
         }
     }
 
-    public List<byte[]> ConvertToImageBytes(SKEncodedImageFormat format, int quality = 100, int dpi = 300)
-    {
-        return ConvertToImageBytes(format, quality, dpi, dpi);
-    }
+    /// <summary>
+    /// Streams image bytes one page at a time using <c>IEnumerable</c>.
+    /// Only one page's encoded bytes and native SkiaSharp buffers exist in memory at any point.
+    /// </summary>
+    /// <example>
+    /// <code>
+    /// int i = 0;
+    /// foreach (var bytes in doc.StreamImageBytes(SKEncodedImageFormat.Jpeg, 90, 300))
+    /// {
+    ///     File.WriteAllBytes($"page_{i++}.jpg", bytes);
+    /// }
+    /// </code>
+    /// </example>
+    public IEnumerable<byte[]> StreamImageBytes(SKEncodedImageFormat format, int quality = 100, int dpi = 300)
+        => StreamImageBytes(format, quality, dpi, dpi);
 
-    public List<byte[]> ConvertToImageBytes(SKEncodedImageFormat format, int quality, int dpiWidth, int dpiHeight)
+    /// <inheritdoc cref="StreamImageBytes(SKEncodedImageFormat, int, int)"/>
+    public IEnumerable<byte[]> StreamImageBytes(SKEncodedImageFormat format, int quality, int dpiWidth, int dpiHeight)
     {
         if (PageCount == 0)
             throw new InvalidOperationException("Document has no pages");
 
-        var imageList = new List<byte[]>();
+        return StreamImageBytesCore(format, quality, dpiWidth, dpiHeight);
+    }
+
+    private IEnumerable<byte[]> StreamImageBytesCore(SKEncodedImageFormat format, int quality, int dpiWidth, int dpiHeight)
+    {
         for (int i = 0; i < PageCount; i++)
         {
             using var page = GetPage(i);
             using var bitmap = RenderPageToSkBitmap(page, dpiWidth, dpiHeight);
             using var image = SKImage.FromBitmap(bitmap);
             using var data = image.Encode(format, quality);
-            imageList.Add(data.ToArray());
+            yield return data.ToArray();
         }
-        return imageList;
     }
 
     public (double width, double height) GetPageSize(int pageIndex)
@@ -467,18 +482,35 @@ public class PdfDocument : IDisposable
         return sizes;
     }
 
-    public async Task<List<byte[]>> ConvertToImageBytesAsync(SKEncodedImageFormat format, int quality = 100, int dpi = 300)
-    {
-        return await ConvertToImageBytesAsync(format, quality, dpi, dpi);
-    }
+    /// <summary>
+    /// Streams image bytes one page at a time using <c>IAsyncEnumerable</c>.
+    /// Only one page's encoded bytes and native SkiaSharp buffers exist in memory at any point,
+    /// making this significantly more memory-efficient than collecting all pages into a list.
+    /// </summary>
+    /// <example>
+    /// <code>
+    /// int i = 0;
+    /// await foreach (var bytes in doc.StreamImageBytesAsync(SKEncodedImageFormat.Jpeg, 90, 300))
+    /// {
+    ///     await File.WriteAllBytesAsync($"page_{i++}.jpg", bytes);
+    ///     // bytes from the previous page are now eligible for GC
+    /// }
+    /// </code>
+    /// </example>
+    public IAsyncEnumerable<byte[]> StreamImageBytesAsync(SKEncodedImageFormat format, int quality = 100, int dpi = 300)
+        => StreamImageBytesAsync(format, quality, dpi, dpi);
 
-    public async Task<List<byte[]>> ConvertToImageBytesAsync(SKEncodedImageFormat format, int quality, int dpiWidth, int dpiHeight)
+    /// <inheritdoc cref="StreamImageBytesAsync(SKEncodedImageFormat, int, int)"/>
+    public IAsyncEnumerable<byte[]> StreamImageBytesAsync(SKEncodedImageFormat format, int quality, int dpiWidth, int dpiHeight)
     {
         if (PageCount == 0)
             throw new InvalidOperationException("Document has no pages");
 
-        var imageList = new List<byte[]>();
-        
+        return StreamImageBytesCoreAsync(format, quality, dpiWidth, dpiHeight);
+    }
+
+    private async IAsyncEnumerable<byte[]> StreamImageBytesCoreAsync(SKEncodedImageFormat format, int quality, int dpiWidth, int dpiHeight)
+    {
         for (int i = 0; i < PageCount; i++)
         {
             await Task.Yield();
@@ -486,10 +518,8 @@ public class PdfDocument : IDisposable
             using var bitmap = RenderPageToSkBitmap(page, dpiWidth, dpiHeight);
             using var image = SKImage.FromBitmap(bitmap);
             using var data = image.Encode(format, quality);
-            imageList.Add(data.ToArray());
+            yield return data.ToArray();
         }
-        
-        return imageList;
     }
 
     public void SaveAsImages(Stream[] outputStreams, SKEncodedImageFormat format, int quality, int dpiWidth, int dpiHeight)

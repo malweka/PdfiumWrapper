@@ -188,19 +188,25 @@ internal sealed class TiffWriter : IDisposable
     {
         var t = _tiff;
 
-        LibTiff.TIFFSetFieldInt(t, LibTiff.TIFFTAG_SUBFILETYPE, LibTiff.FILETYPE_PAGE);
-        LibTiff.TIFFSetFieldInt(t, LibTiff.TIFFTAG_IMAGEWIDTH, width);
-        LibTiff.TIFFSetFieldInt(t, LibTiff.TIFFTAG_IMAGELENGTH, height);
-        LibTiff.TIFFSetFieldShort(t, LibTiff.TIFFTAG_BITSPERSAMPLE, (short)bitsPerSample);
-        LibTiff.TIFFSetFieldShort(t, LibTiff.TIFFTAG_SAMPLESPERPIXEL, (short)samplesPerPixel);
-        LibTiff.TIFFSetFieldInt(t, LibTiff.TIFFTAG_COMPRESSION, compression);
-        LibTiff.TIFFSetFieldInt(t, LibTiff.TIFFTAG_PHOTOMETRIC, photometric);
-        LibTiff.TIFFSetFieldInt(t, LibTiff.TIFFTAG_FILLORDER, LibTiff.FILLORDER_MSB2LSB);
-        LibTiff.TIFFSetFieldInt(t, LibTiff.TIFFTAG_PLANARCONFIG, LibTiff.PLANARCONFIG_CONTIG);
-        LibTiff.TIFFSetFieldFloat(t, LibTiff.TIFFTAG_XRESOLUTION, dpiX);
-        LibTiff.TIFFSetFieldFloat(t, LibTiff.TIFFTAG_YRESOLUTION, dpiY);
-        LibTiff.TIFFSetFieldInt(t, LibTiff.TIFFTAG_RESOLUTIONUNIT, LibTiff.RESUNIT_INCH);
-        LibTiff.TIFFSetFieldInt(t, LibTiff.TIFFTAG_ROWSPERSTRIP, height); // one strip per page
+        CheckField("SUBFILETYPE", LibTiff.TIFFSetFieldInt(t, LibTiff.TIFFTAG_SUBFILETYPE, LibTiff.FILETYPE_PAGE));
+        CheckField("IMAGEWIDTH", LibTiff.TIFFSetFieldInt(t, LibTiff.TIFFTAG_IMAGEWIDTH, width));
+        CheckField("IMAGELENGTH", LibTiff.TIFFSetFieldInt(t, LibTiff.TIFFTAG_IMAGELENGTH, height));
+        CheckField("BITSPERSAMPLE", LibTiff.TIFFSetFieldInt(t, LibTiff.TIFFTAG_BITSPERSAMPLE, bitsPerSample));
+        CheckField("SAMPLESPERPIXEL", LibTiff.TIFFSetFieldInt(t, LibTiff.TIFFTAG_SAMPLESPERPIXEL, samplesPerPixel));
+        CheckField("COMPRESSION", LibTiff.TIFFSetFieldInt(t, LibTiff.TIFFTAG_COMPRESSION, compression));
+        CheckField("PHOTOMETRIC", LibTiff.TIFFSetFieldInt(t, LibTiff.TIFFTAG_PHOTOMETRIC, photometric));
+        CheckField("FILLORDER", LibTiff.TIFFSetFieldInt(t, LibTiff.TIFFTAG_FILLORDER, LibTiff.FILLORDER_MSB2LSB));
+        CheckField("PLANARCONFIG", LibTiff.TIFFSetFieldInt(t, LibTiff.TIFFTAG_PLANARCONFIG, LibTiff.PLANARCONFIG_CONTIG));
+        CheckField("XRESOLUTION", LibTiff.TIFFSetFieldDouble(t, LibTiff.TIFFTAG_XRESOLUTION, dpiX));
+        CheckField("YRESOLUTION", LibTiff.TIFFSetFieldDouble(t, LibTiff.TIFFTAG_YRESOLUTION, dpiY));
+        CheckField("RESOLUTIONUNIT", LibTiff.TIFFSetFieldInt(t, LibTiff.TIFFTAG_RESOLUTIONUNIT, LibTiff.RESUNIT_INCH));
+        CheckField("ROWSPERSTRIP", LibTiff.TIFFSetFieldInt(t, LibTiff.TIFFTAG_ROWSPERSTRIP, height));
+    }
+
+    private static void CheckField(string name, int result)
+    {
+        if (result == 0)
+            throw new IOException($"libtiff: TIFFSetField({name}) failed.");
     }
 
     private void FinalizePage()
