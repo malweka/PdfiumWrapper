@@ -1,4 +1,3 @@
-using SkiaSharp;
 
 namespace PdfiumWrapper.Tests;
 
@@ -627,7 +626,7 @@ public class PdfDocumentTests : IDisposable
         using var doc = new PdfDocument(ContractPdfPath);
 
         // Act
-        var images = doc.StreamImageBytes(SKEncodedImageFormat.Png, quality: 100, dpi: 72).ToList();
+        var images = doc.StreamImageBytes(ImageFormat.Png, quality: 100, dpi: 72).ToList();
 
         // Assert
         Assert.Equal(doc.PageCount, images.Count);
@@ -645,7 +644,7 @@ public class PdfDocumentTests : IDisposable
         using var doc = new PdfDocument(ContractPdfPath);
 
         // Act
-        var images = doc.StreamImageBytes(SKEncodedImageFormat.Jpeg, quality: 90, dpi: 72).ToList();
+        var images = doc.StreamImageBytes(ImageFormat.Jpeg, quality: 90, dpi: 72).ToList();
 
         // Assert
         Assert.Equal(doc.PageCount, images.Count);
@@ -664,7 +663,7 @@ public class PdfDocumentTests : IDisposable
 
         // Act
         var images = new List<byte[]>();
-        await foreach (var bytes in doc.StreamImageBytesAsync(SKEncodedImageFormat.Png, quality: 100, dpi: 72))
+        await foreach (var bytes in doc.StreamImageBytesAsync(ImageFormat.Png, quality: 100, dpi: 72))
         {
             images.Add(bytes);
         }
@@ -722,7 +721,7 @@ public class PdfDocumentTests : IDisposable
         var outputDir = CreateTempDirectory();
         
         // Act
-        doc.SaveAsImages(outputDir, "custom_prefix", SKEncodedImageFormat.Png, quality: 100, dpi: 72);
+        doc.SaveAsImages(outputDir, "custom_prefix", ImageFormat.Png, quality: 100, dpi: 72);
         
         // Assert
         var files = Directory.GetFiles(outputDir, "custom_prefix_*.png");
@@ -744,7 +743,7 @@ public class PdfDocumentTests : IDisposable
         var outputDir = CreateTempDirectory();
         
         // Act
-        await doc.SaveAsImagesAsync(outputDir, "async_page", SKEncodedImageFormat.Png, quality: 100, dpiWidth: 72, dpiHeight: 72);
+        await doc.SaveAsImagesAsync(outputDir, "async_page", ImageFormat.Png, quality: 100, dpiWidth: 72, dpiHeight: 72);
         
         // Assert
         var files = Directory.GetFiles(outputDir, "*.png");
@@ -766,7 +765,7 @@ public class PdfDocumentTests : IDisposable
         try
         {
             // Act
-            doc.SaveAsImages(streams, SKEncodedImageFormat.Png, quality: 100, dpiWidth: 72, dpiHeight: 72);
+            doc.SaveAsImages(streams, ImageFormat.Png, quality: 100, dpiWidth: 72, dpiHeight: 72);
             
             // Assert
             Assert.All(streams, stream =>
@@ -793,7 +792,7 @@ public class PdfDocumentTests : IDisposable
 
         // Act & Assert
         Assert.Throws<ArgumentException>(() =>
-            doc.SaveAsImages(streams, SKEncodedImageFormat.Png, quality: 100, dpiWidth: 72, dpiHeight: 72));
+            doc.SaveAsImages(streams, ImageFormat.Png, quality: 100, dpiWidth: 72, dpiHeight: 72));
     }
 
     #endregion

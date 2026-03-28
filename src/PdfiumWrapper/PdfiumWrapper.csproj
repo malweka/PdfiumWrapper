@@ -27,6 +27,7 @@
 		<NativeLibName>pdfium.dll</NativeLibName>
 		<TiffLibName>tiff.dll</TiffLibName>
 		<TiffShimLibName>tiff_shim.dll</TiffShimLibName>
+		<TurboJpegLibName>turbojpeg.dll</TurboJpegLibName>
 	</PropertyGroup>
 
 	<PropertyGroup Condition="'$(NativeRid)' == '' And $([MSBuild]::IsOSPlatform('OSX')) And '$([System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture)' == 'Arm64'">
@@ -34,6 +35,7 @@
 		<NativeLibName>libpdfium.dylib</NativeLibName>
 		<TiffLibName>libtiff.dylib</TiffLibName>
 		<TiffShimLibName>libtiff_shim.dylib</TiffShimLibName>
+		<TurboJpegLibName>libturbojpeg.dylib</TurboJpegLibName>
 	</PropertyGroup>
 
 	<PropertyGroup Condition="'$(NativeRid)' == '' And $([MSBuild]::IsOSPlatform('OSX')) And '$([System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture)' == 'X64'">
@@ -41,6 +43,7 @@
 		<NativeLibName>libpdfium.dylib</NativeLibName>
 		<TiffLibName>libtiff.dylib</TiffLibName>
 		<TiffShimLibName>libtiff_shim.dylib</TiffShimLibName>
+		<TurboJpegLibName>libturbojpeg.dylib</TurboJpegLibName>
 	</PropertyGroup>
 
 	<PropertyGroup Condition="'$(NativeRid)' == '' And $([MSBuild]::IsOSPlatform('Linux'))">
@@ -48,6 +51,7 @@
 		<NativeLibName>libpdfium.so</NativeLibName>
 		<TiffLibName>libtiff.so</TiffLibName>
 		<TiffShimLibName>libtiff_shim.so</TiffShimLibName>
+		<TurboJpegLibName>libturbojpeg.so</TurboJpegLibName>
 	</PropertyGroup>
 
 	<!-- Include README and icon in package -->
@@ -77,6 +81,14 @@
 		<Content Include="../libs/$(NativeRid)/$(TiffShimLibName)">
 			<CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
 			<TargetPath>runtimes/$(NativeRid)/native/$(TiffShimLibName)</TargetPath>
+		</Content>
+	</ItemGroup>
+
+	<!-- Native libjpeg-turbo (TurboJPEG API) - JPEG encoding/decoding -->
+	<ItemGroup Condition="'$(NativeRid)' != '' And '$(TurboJpegLibName)' != '' And Exists('../libs/$(NativeRid)/$(TurboJpegLibName)')">
+		<Content Include="../libs/$(NativeRid)/$(TurboJpegLibName)">
+			<CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+			<TargetPath>runtimes/$(NativeRid)/native/$(TurboJpegLibName)</TargetPath>
 		</Content>
 	</ItemGroup>
 

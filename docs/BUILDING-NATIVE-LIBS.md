@@ -1,11 +1,12 @@
 # Building Native Libraries
 
-PdfiumWrapper ships with two native libraries for TIFF support:
+PdfiumWrapper ships with native libraries for image format support:
 
 - **libtiff** — The standard C library for reading and writing TIFF images
 - **tiff_shim** — A thin C wrapper around libtiff's variadic `TIFFSetField` function, required because .NET's P/Invoke cannot correctly call variadic C functions on ARM64 (and the behavior is unreliable on x64)
+- **libjpeg-turbo** — SIMD-accelerated JPEG encoding/decoding via the TurboJPEG API
 
-Both must be compiled for each target platform and placed in the `src/libs/{rid}/` directory.
+All must be compiled for each target platform and placed in the `src/libs/{rid}/` directory.
 
 ## Prerequisites
 
@@ -31,20 +32,23 @@ macOS ships with zlib already, so libtiff's core dependencies are covered.
 
 ### Linux (x64)
 
-Build tools and libtiff dependencies:
+Build tools and library dependencies:
 
 ```bash
 # Ubuntu/Debian
-apt-get update && apt-get install -y build-essential cmake zlib1g-dev libjpeg-dev
+apt-get update && apt-get install -y build-essential cmake zlib1g-dev libjpeg-dev nasm
 
 # RHEL/Fedora
-dnf install gcc gcc-c++ cmake zlib-devel libjpeg-turbo-devel
+dnf install gcc gcc-c++ cmake zlib-devel libjpeg-turbo-devel nasm
 ```
+
+> **Note**: `nasm` (or `yasm`) is required for libjpeg-turbo's SIMD optimizations. Without it, the library still builds but without SIMD acceleration.
 
 ### Windows (x64)
 
 - Visual Studio 2022 (or Build Tools) with C++ workload
 - CMake (bundled with Visual Studio or install separately)
+- NASM (for libjpeg-turbo SIMD support) — download from https://www.nasm.us/ and add to PATH
 
 ---
 
@@ -183,6 +187,67 @@ copy tiff_shim.dll src\libs\win-x64\
 
 ---
 
+## Building libjpeg-turbo
+
+Download the source distribution:
+
+```bash
+curl -LO https://github.com/libjpeg-turbo/libjpeg-turbo/archive/refs/tags/3.1.4.1.zip
+unzip 3.1.4.1.zip
+cd libjpeg-turbo-3.1.4.1
+```
+
+### macOS ARM64 (native on Apple Silicon)
+
+```bash
+cmake -B build-arm64 -DBUILD_SHARED_LIBS=ON -DCMAKE_OSX_ARCHITECTURES=arm64 \
+    -DENABLE_STATIC=OFF -DWITH_TURBOJPEG=ON
+cmake --build build-arm64 --config Release
+
+# Copy to project
+cp build-arm64/libturbojpeg.dylib /path/to/PdfiumWrapper/src/libs/osx-arm64/
+```
+
+### macOS x64 (cross-compile on Apple Silicon)
+
+```bash
+cmake -B build-x64 -DBUILD_SHARED_LIBS=ON -DCMAKE_OSX_ARCHITECTURES=x86_64 \
+    -DENABLE_STATIC=OFF -DWITH_TURBOJPEG=ON
+cmake --build build-x64 --config Release
+
+# Copy to project
+cp build-x64/libturbojpeg.dylib /path/to/PdfiumWrapper/src/libs/osx-x64/
+```
+
+> **Note**: The x64 cross-compile on Apple Silicon will warn about missing NASM/YASM for x86 SIMD. The build still succeeds but without SSE2/AVX2 acceleration for the x64 binary. Install NASM (`brew install nasm`) to enable x86 SIMD optimizations.
+
+### Linux x64 (via Docker)
+
+```bash
+docker run --rm --platform linux/amd64 -v "$(pwd):/src" -w /src ubuntu:22.04 bash -c "
+    apt-get update && apt-get install -y cmake gcc g++ nasm &&
+    cmake -B build-linux -DBUILD_SHARED_LIBS=ON -DENABLE_STATIC=OFF -DWITH_TURBOJPEG=ON &&
+    cmake --build build-linux --config Release &&
+    cp build-linux/libturbojpeg.so /src/libturbojpeg.so
+"
+
+# Copy to project
+cp libturbojpeg.so /path/to/PdfiumWrapper/src/libs/linux-x64/
+```
+
+### Windows x64
+
+From a **Developer Command Prompt for VS 2022** or **x64 Native Tools Command Prompt** (ensure NASM is on PATH):
+
+```cmd
+cmake -B build -A x64 -DENABLE_STATIC=OFF -DWITH_TURBOJPEG=ON
+cmake --build build --config Release
+
+copy build\Release\turbojpeg.dll \path\to\PdfiumWrapper\src\libs\win-x64\
+```
+
+---
+
 ## Directory Layout
 
 After building, your `src/libs/` directory should look like:
@@ -193,21 +258,25 @@ src/libs/
     libpdfium.dylib
     libtiff.dylib
     libtiff_shim.dylib
+    libturbojpeg.dylib
   osx-x64/
     libpdfium.dylib
     libtiff.dylib
     libtiff_shim.dylib
+    libturbojpeg.dylib
   linux-x64/
     libpdfium.so
     libtiff.so
     libtiff_shim.so
+    libturbojpeg.so
   win-x64/
     pdfium.dll
     tiff.dll
     tiff_shim.dll
+    turbojpeg.dll
 ```
 
-The `.csproj` uses `Exists()` conditions, so missing binaries for a platform won't cause build errors — they'll only fail at runtime if `SaveAsTiff` is called.
+The `.csproj` uses `Exists()` conditions, so missing binaries for a platform won't cause build errors — they'll only fail at runtime if the corresponding feature is used.
 
 ---
 
