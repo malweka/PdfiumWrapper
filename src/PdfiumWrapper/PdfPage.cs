@@ -1,3 +1,4 @@
+using System.Buffers;
 using System.Drawing;
 using System.Runtime.InteropServices;
 
@@ -124,19 +125,28 @@ public class PdfPage : IDisposable
             if (charCount <= 0)
                 return string.Empty;
 
-            var buffer = Marshal.AllocHGlobal((charCount + 1) * 2); // UTF-16
+            var buffer = ArrayPool<char>.Shared.Rent(charCount + 1);
             try
             {
-                var actualCount = PDFium.FPDFText_GetText(textPage, 0, charCount, buffer);
+                int actualCount;
+                unsafe
+                {
+                    fixed (char* bufferPtr = buffer)
+                    {
+                        actualCount = PDFium.FPDFText_GetText(textPage, 0, charCount, (IntPtr)bufferPtr);
+                    }
+                }
+
                 if (actualCount > 0)
                 {
-                    return Marshal.PtrToStringUni(buffer, actualCount - 1); // -1 to exclude null terminator
+                    return new string(buffer, 0, actualCount - 1);
                 }
+
                 return string.Empty;
             }
             finally
             {
-                Marshal.FreeHGlobal(buffer);
+                ArrayPool<char>.Shared.Return(buffer);
             }
         }
         finally

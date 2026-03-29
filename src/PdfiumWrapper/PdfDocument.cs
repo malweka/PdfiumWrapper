@@ -1,4 +1,5 @@
-﻿using System.Runtime.InteropServices;
+﻿using System.Buffers;
+using System.Runtime.InteropServices;
 
 namespace PdfiumWrapper;
 
@@ -153,21 +154,26 @@ public class PdfDocument : IDisposable
             if (size == 0)
                 return null;
 
-            var buffer = Marshal.AllocHGlobal((int)size);
+            var buffer = ArrayPool<byte>.Shared.Rent(checked((int)size));
             try
             {
-                var actualSize = PDFium.FPDF_GetFileIdentifier(Document, 0, buffer, size);
+                ulong actualSize;
+                unsafe
+                {
+                    fixed (byte* bufferPtr = buffer)
+                    {
+                        actualSize = PDFium.FPDF_GetFileIdentifier(Document, 0, (IntPtr)bufferPtr, size);
+                    }
+                }
+
                 if (actualSize == 0)
                     return null;
 
-                // Convert bytes to hex string
-                var bytes = new byte[actualSize];
-                Marshal.Copy(buffer, bytes, 0, (int)actualSize);
-                return BitConverter.ToString(bytes).Replace("-", "");
+                return Convert.ToHexString(buffer.AsSpan(0, checked((int)actualSize)));
             }
             finally
             {
-                Marshal.FreeHGlobal(buffer);
+                ArrayPool<byte>.Shared.Return(buffer);
             }
         }
     }
@@ -341,6 +347,8 @@ public class PdfDocument : IDisposable
     /// <exception cref="ArgumentNullException">Thrown when page is null</exception>
     public void DeletePage(PdfPage page)
     {
+        ThrowIfDisposed();
+
         if (page == null)
             throw new ArgumentNullException(nameof(page));
 
@@ -359,6 +367,8 @@ public class PdfDocument : IDisposable
     [Obsolete("Use ProcessAllPages() for automatic disposal, or ensure each page is disposed manually. This method may cause memory leaks if pages are not disposed.")]
     public PdfPage[] GetAllPages()
     {
+        ThrowIfDisposed();
+
         var pages = new PdfPage[PageCount];
         for (int i = 0; i < PageCount; i++)
         {
@@ -384,6 +394,8 @@ public class PdfDocument : IDisposable
     /// </example>
     public TResult[] ProcessAllPages<TResult>(Func<PdfPage, TResult> processor)
     {
+        ThrowIfDisposed();
+
         if (processor == null)
             throw new ArgumentNullException(nameof(processor));
 
@@ -408,6 +420,8 @@ public class PdfDocument : IDisposable
     /// </example>
     public void ProcessAllPages(Action<PdfPage> action)
     {
+        ThrowIfDisposed();
+
         if (action == null)
             throw new ArgumentNullException(nameof(action));
 
@@ -427,6 +441,8 @@ public class PdfDocument : IDisposable
     /// <returns>Array of results from processing each page</returns>
     public async Task<TResult[]> ProcessAllPagesAsync<TResult>(Func<PdfPage, TResult> processor)
     {
+        ThrowIfDisposed();
+
         if (processor == null)
             throw new ArgumentNullException(nameof(processor));
 
@@ -446,6 +462,8 @@ public class PdfDocument : IDisposable
     /// <param name="action">Action to perform on each page</param>
     public async Task ProcessAllPagesAsync(Action<PdfPage> action)
     {
+        ThrowIfDisposed();
+
         if (action == null)
             throw new ArgumentNullException(nameof(action));
 
@@ -462,11 +480,14 @@ public class PdfDocument : IDisposable
     /// </summary>
     public RawBitmap[] RenderPages(int dpi = 300)
     {
+        ThrowIfDisposed();
         return RenderPages(dpi, dpi);
     }
 
     public RawBitmap[] RenderPages(int dpiWidth, int dpiHeight)
     {
+        ThrowIfDisposed();
+
         if (PageCount == 0)
             throw new InvalidOperationException("Document has no pages");
 
@@ -481,11 +502,14 @@ public class PdfDocument : IDisposable
 
     public async Task<RawBitmap[]> RenderPagesAsync(int dpi = 300)
     {
+        ThrowIfDisposed();
         return await RenderPagesAsync(dpi, dpi);
     }
 
     public async Task<RawBitmap[]> RenderPagesAsync(int dpiWidth, int dpiHeight)
     {
+        ThrowIfDisposed();
+
         if (PageCount == 0)
             throw new InvalidOperationException("Document has no pages");
 
@@ -514,11 +538,16 @@ public class PdfDocument : IDisposable
     /// </code>
     /// </example>
     public IEnumerable<byte[]> StreamImageBytes(ImageFormat format, int quality = 100, int dpi = 300)
-        => StreamImageBytes(format, quality, dpi, dpi);
+    {
+        ThrowIfDisposed();
+        return StreamImageBytes(format, quality, dpi, dpi);
+    }
 
     /// <inheritdoc cref="StreamImageBytes(ImageFormat, int, int)"/>
     public IEnumerable<byte[]> StreamImageBytes(ImageFormat format, int quality, int dpiWidth, int dpiHeight)
     {
+        ThrowIfDisposed();
+
         if (PageCount == 0)
             throw new InvalidOperationException("Document has no pages");
 
@@ -552,6 +581,8 @@ public class PdfDocument : IDisposable
 
     public (double width, double height) GetPageSize(int pageIndex)
     {
+        ThrowIfDisposed();
+
         if (pageIndex < 0 || pageIndex >= PageCount)
             throw new ArgumentOutOfRangeException(nameof(pageIndex));
 
@@ -569,6 +600,8 @@ public class PdfDocument : IDisposable
     /// <returns>The page label string, or null if no label is defined</returns>
     public string? GetPageLabel(int pageIndex)
     {
+        ThrowIfDisposed();
+
         if (pageIndex < 0 || pageIndex >= PageCount)
             throw new ArgumentOutOfRangeException(nameof(pageIndex));
 
@@ -577,19 +610,26 @@ public class PdfDocument : IDisposable
         if (size == 0)
             return null;
 
-        var buffer = Marshal.AllocHGlobal((int)size);
+        var buffer = ArrayPool<char>.Shared.Rent(checked((int)(size / 2)));
         try
         {
-            var actualSize = PDFium.FPDF_GetPageLabel(Document, pageIndex, buffer, size);
+            ulong actualSize;
+            unsafe
+            {
+                fixed (char* bufferPtr = buffer)
+                {
+                    actualSize = PDFium.FPDF_GetPageLabel(Document, pageIndex, (IntPtr)bufferPtr, size);
+                }
+            }
+
             if (actualSize == 0)
                 return null;
 
-            // Convert UTF-16LE to string
-            return Marshal.PtrToStringUni(buffer, (int)(actualSize / 2) - 1); // -1 to exclude null terminator
+            return new string(buffer, 0, checked((int)(actualSize / 2)) - 1);
         }
         finally
         {
-            Marshal.FreeHGlobal(buffer);
+            ArrayPool<char>.Shared.Return(buffer);
         }
     }
 
@@ -599,6 +639,8 @@ public class PdfDocument : IDisposable
     /// <returns>Array of page labels (null for pages without labels)</returns>
     public string?[] GetAllPageLabels()
     {
+        ThrowIfDisposed();
+
         var labels = new string?[PageCount];
         for (int i = 0; i < PageCount; i++)
         {
@@ -609,6 +651,8 @@ public class PdfDocument : IDisposable
 
     public (double width, double height)[] GetAllPageSizes()
     {
+        ThrowIfDisposed();
+
         var sizes = new (double, double)[PageCount];
         for (int i = 0; i < PageCount; i++)
         {
@@ -634,11 +678,16 @@ public class PdfDocument : IDisposable
     /// </code>
     /// </example>
     public IAsyncEnumerable<byte[]> StreamImageBytesAsync(ImageFormat format, int quality = 100, int dpi = 300)
-        => StreamImageBytesAsync(format, quality, dpi, dpi);
+    {
+        ThrowIfDisposed();
+        return StreamImageBytesAsync(format, quality, dpi, dpi);
+    }
 
     /// <inheritdoc cref="StreamImageBytesAsync(ImageFormat, int, int)"/>
     public IAsyncEnumerable<byte[]> StreamImageBytesAsync(ImageFormat format, int quality, int dpiWidth, int dpiHeight)
     {
+        ThrowIfDisposed();
+
         if (PageCount == 0)
             throw new InvalidOperationException("Document has no pages");
 
@@ -674,6 +723,8 @@ public class PdfDocument : IDisposable
 
     public void SaveAsImages(Stream[] outputStreams, ImageFormat format, int quality, int dpiWidth, int dpiHeight)
     {
+        ThrowIfDisposed();
+
         if (outputStreams.Length != PageCount)
             throw new ArgumentException($"Number of output streams ({outputStreams.Length}) must match page count ({PageCount})");
 
@@ -712,6 +763,7 @@ public class PdfDocument : IDisposable
     public void SaveAsTiff(string outputPath, int dpi = 200,
         TiffColorMode colorMode = TiffColorMode.Bilevel, byte threshold = 128)
     {
+        ThrowIfDisposed();
         SaveAsTiff(outputPath, dpi, dpi, colorMode, threshold);
     }
 
@@ -721,6 +773,8 @@ public class PdfDocument : IDisposable
     public void SaveAsTiff(string outputPath, int dpiWidth, int dpiHeight,
         TiffColorMode colorMode = TiffColorMode.Bilevel, byte threshold = 128)
     {
+        ThrowIfDisposed();
+
         using var writer = new TiffWriter(outputPath);
         WriteAllPagesToTiff(writer, dpiWidth, dpiHeight, colorMode, threshold);
     }
@@ -732,6 +786,7 @@ public class PdfDocument : IDisposable
     public void SaveAsTiff(Stream output, int dpi = 200,
         TiffColorMode colorMode = TiffColorMode.Bilevel, byte threshold = 128)
     {
+        ThrowIfDisposed();
         SaveAsTiff(output, dpi, dpi, colorMode, threshold);
     }
 
@@ -741,6 +796,8 @@ public class PdfDocument : IDisposable
     public void SaveAsTiff(Stream output, int dpiWidth, int dpiHeight,
         TiffColorMode colorMode = TiffColorMode.Bilevel, byte threshold = 128)
     {
+        ThrowIfDisposed();
+
         using var writer = new TiffWriter(output);
         WriteAllPagesToTiff(writer, dpiWidth, dpiHeight, colorMode, threshold);
     }
@@ -752,6 +809,7 @@ public class PdfDocument : IDisposable
     public Task SaveAsTiffAsync(string outputPath, int dpi = 200,
         TiffColorMode colorMode = TiffColorMode.Bilevel, byte threshold = 128)
     {
+        ThrowIfDisposed();
         return SaveAsTiffAsync(outputPath, dpi, dpi, colorMode, threshold);
     }
 
@@ -761,6 +819,8 @@ public class PdfDocument : IDisposable
     public async Task SaveAsTiffAsync(string outputPath, int dpiWidth, int dpiHeight,
         TiffColorMode colorMode = TiffColorMode.Bilevel, byte threshold = 128)
     {
+        ThrowIfDisposed();
+
         using var writer = new TiffWriter(outputPath);
         await WriteAllPagesToTiffAsync(writer, dpiWidth, dpiHeight, colorMode, threshold);
     }
@@ -771,6 +831,7 @@ public class PdfDocument : IDisposable
     public Task SaveAsTiffAsync(Stream output, int dpi = 200,
         TiffColorMode colorMode = TiffColorMode.Bilevel, byte threshold = 128)
     {
+        ThrowIfDisposed();
         return SaveAsTiffAsync(output, dpi, dpi, colorMode, threshold);
     }
 
@@ -780,6 +841,8 @@ public class PdfDocument : IDisposable
     public async Task SaveAsTiffAsync(Stream output, int dpiWidth, int dpiHeight,
         TiffColorMode colorMode = TiffColorMode.Bilevel, byte threshold = 128)
     {
+        ThrowIfDisposed();
+
         using var writer = new TiffWriter(output);
         await WriteAllPagesToTiffAsync(writer, dpiWidth, dpiHeight, colorMode, threshold);
     }
@@ -787,8 +850,7 @@ public class PdfDocument : IDisposable
     private void WriteAllPagesToTiff(TiffWriter writer, int dpiWidth, int dpiHeight,
         TiffColorMode colorMode, byte threshold)
     {
-        if (_disposed)
-            throw new ObjectDisposedException(nameof(PdfDocument));
+        ThrowIfDisposed();
         if (PageCount == 0)
             throw new InvalidOperationException("Document has no pages");
 
@@ -802,8 +864,7 @@ public class PdfDocument : IDisposable
     private async Task WriteAllPagesToTiffAsync(TiffWriter writer, int dpiWidth, int dpiHeight,
         TiffColorMode colorMode, byte threshold)
     {
-        if (_disposed)
-            throw new ObjectDisposedException(nameof(PdfDocument));
+        ThrowIfDisposed();
         if (PageCount == 0)
             throw new InvalidOperationException("Document has no pages");
 
@@ -854,18 +915,19 @@ public class PdfDocument : IDisposable
     // Convenience methods for saving to directory
     public void SaveAsPngs(string outputDirectory, string fileNamePrefix = "page", int dpi = 300)
     {
+        ThrowIfDisposed();
         SaveAsImages(outputDirectory, fileNamePrefix, ImageFormat.Png, 100, dpi, dpi);
     }
 
     public void SaveAsJpegs(string outputDirectory, string fileNamePrefix = "page", int quality = 90, int dpi = 300)
     {
+        ThrowIfDisposed();
         SaveAsJpegs(outputDirectory, fileNamePrefix, quality, dpi, dpi);
     }
 
     public void SaveAsJpegs(string outputDirectory, string fileNamePrefix, int quality, int dpiWidth, int dpiHeight)
     {
-        if (_disposed)
-            throw new ObjectDisposedException(nameof(PdfDocument));
+        ThrowIfDisposed();
         if (PageCount == 0)
             throw new InvalidOperationException("Document has no pages");
 
@@ -884,13 +946,13 @@ public class PdfDocument : IDisposable
 
     public async Task SaveAsJpegsAsync(string outputDirectory, string fileNamePrefix = "page", int quality = 90, int dpi = 300)
     {
+        ThrowIfDisposed();
         await SaveAsJpegsAsync(outputDirectory, fileNamePrefix, quality, dpi, dpi);
     }
 
     public async Task SaveAsJpegsAsync(string outputDirectory, string fileNamePrefix, int quality, int dpiWidth, int dpiHeight)
     {
-        if (_disposed)
-            throw new ObjectDisposedException(nameof(PdfDocument));
+        ThrowIfDisposed();
         if (PageCount == 0)
             throw new InvalidOperationException("Document has no pages");
 
@@ -913,10 +975,15 @@ public class PdfDocument : IDisposable
     /// Uses native libjpeg-turbo — no SkiaSharp involved.
     /// </summary>
     public IEnumerable<byte[]> StreamJpegBytes(int quality = 90, int dpi = 300)
-        => StreamJpegBytes(quality, dpi, dpi);
+    {
+        ThrowIfDisposed();
+        return StreamJpegBytes(quality, dpi, dpi);
+    }
 
     public IEnumerable<byte[]> StreamJpegBytes(int quality, int dpiWidth, int dpiHeight)
     {
+        ThrowIfDisposed();
+
         if (PageCount == 0)
             throw new InvalidOperationException("Document has no pages");
 
@@ -939,10 +1006,15 @@ public class PdfDocument : IDisposable
     /// Uses native libjpeg-turbo — no SkiaSharp involved.
     /// </summary>
     public IAsyncEnumerable<byte[]> StreamJpegBytesAsync(int quality = 90, int dpi = 300)
-        => StreamJpegBytesAsync(quality, dpi, dpi);
+    {
+        ThrowIfDisposed();
+        return StreamJpegBytesAsync(quality, dpi, dpi);
+    }
 
     public IAsyncEnumerable<byte[]> StreamJpegBytesAsync(int quality, int dpiWidth, int dpiHeight)
     {
+        ThrowIfDisposed();
+
         if (PageCount == 0)
             throw new InvalidOperationException("Document has no pages");
 
@@ -1019,11 +1091,14 @@ public class PdfDocument : IDisposable
 
     public void SaveAsImages(string outputDirectory, string fileNamePrefix, ImageFormat format, int quality = 100, int dpi = 300)
     {
+        ThrowIfDisposed();
         SaveAsImages(outputDirectory, fileNamePrefix, format, quality, dpi, dpi);
     }
 
     public void SaveAsImages(string outputDirectory, string fileNamePrefix, ImageFormat format, int quality, int dpiWidth, int dpiHeight)
     {
+        ThrowIfDisposed();
+
         if (PageCount == 0)
             throw new InvalidOperationException("Document has no pages");
 
@@ -1059,6 +1134,8 @@ public class PdfDocument : IDisposable
 
     public async Task SaveAsImagesAsync(string outputDirectory, string fileNamePrefix, ImageFormat format, int quality, int dpiWidth, int dpiHeight)
     {
+        ThrowIfDisposed();
+
         if (PageCount == 0)
             throw new InvalidOperationException("Document has no pages");
 
@@ -1209,70 +1286,84 @@ public class PdfDocument : IDisposable
     public void SaveToStream(Stream stream, uint flags = 0)
     {
         ThrowIfDisposed();
+        ArgumentNullException.ThrowIfNull(stream);
 
-        // Create a GCHandle to keep the stream alive during the save operation.
-        // We need TWO GCHandles here:
-        // 1. streamHandle - keeps the stream object alive and accessible from the callback
-        // 2. delegateHandle - prevents the delegate from being garbage collected during P/Invoke
-        // Without both, the GC could collect either object while PDFium is still using them.
-        var streamHandle = GCHandle.Alloc(stream);
+        using var writer = new StreamFileWriter(stream);
+        var fileWrite = writer.GetFileWriteStruct();
 
-        try
+        bool success = PDFium.FPDF_SaveAsCopy(Document, ref fileWrite, flags);
+
+        if (!success)
         {
-            // Create the write callback delegate
-            WriteBlockDelegate writeDelegate = (_, dataPtr, size) =>
-            {
-                try
-                {
-                    var targetStream = (Stream)streamHandle.Target!;
-                    var buffer = new byte[size];
-                    Marshal.Copy(dataPtr, buffer, 0, (int)size);
-                    targetStream.Write(buffer, 0, (int)size);
-                    return 1; // Success
-                }
-                catch
-                {
-                    return 0; // Failure
-                }
-            };
-
-            // Keep the delegate alive
-            var delegateHandle = GCHandle.Alloc(writeDelegate);
-
-            try
-            {
-                // Create FPDF_FILEWRITE structure
-                var fileWrite = new PDFium.FPDF_FILEWRITE
-                {
-                    version = 1,
-                    WriteBlock = Marshal.GetFunctionPointerForDelegate(writeDelegate)
-                };
-
-                // Call PDFium save function - pass fileWrite by ref
-                bool success = PDFium.FPDF_SaveAsCopy(Document, ref fileWrite, flags);
-
-                if (!success)
-                {
-                    var error = PDFium.FPDF_GetLastError();
-                    throw new InvalidOperationException($"Failed to save PDF document. PDFium error code: {error}");
-                }
-            }
-            finally
-            {
-                if (delegateHandle.IsAllocated)
-                    delegateHandle.Free();
-            }
-        }
-        finally
-        {
-            if (streamHandle.IsAllocated)
-                streamHandle.Free();
+            var error = PDFium.FPDF_GetLastError();
+            throw new InvalidOperationException($"Failed to save PDF document. PDFium error code: {error}");
         }
     }
 
     // Delegate for the WriteBlock callback
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     private delegate int WriteBlockDelegate(IntPtr pThis, IntPtr data, uint size);
+
+    /// <summary>
+    /// Helper class to write PDF data to a stream.
+    /// Keeps the callback delegate alive for the duration of the save operation and
+    /// writes directly from the unmanaged PDFium buffer to avoid per-callback allocations.
+    /// </summary>
+    private sealed class StreamFileWriter : IDisposable
+    {
+        private readonly Stream _stream;
+        private readonly WriteBlockDelegate _writeDelegate;
+        private GCHandle _delegateHandle;
+        private bool _disposed;
+
+        public StreamFileWriter(Stream stream)
+        {
+            _stream = stream ?? throw new ArgumentNullException(nameof(stream));
+            _writeDelegate = WriteBlock;
+            _delegateHandle = GCHandle.Alloc(_writeDelegate);
+        }
+
+        public PDFium.FPDF_FILEWRITE GetFileWriteStruct()
+        {
+            return new PDFium.FPDF_FILEWRITE
+            {
+                version = 1,
+                WriteBlock = Marshal.GetFunctionPointerForDelegate(_writeDelegate)
+            };
+        }
+
+        private int WriteBlock(IntPtr pThis, IntPtr pData, uint size)
+        {
+            try
+            {
+                int bytesToWrite = checked((int)size);
+                unsafe
+                {
+                    var span = new ReadOnlySpan<byte>(pData.ToPointer(), bytesToWrite);
+                    _stream.Write(span);
+                }
+
+                return 1;
+            }
+            catch
+            {
+                return 0;
+            }
+        }
+
+        public void Dispose()
+        {
+            if (!_disposed)
+            {
+                if (_delegateHandle.IsAllocated)
+                {
+                    _delegateHandle.Free();
+                }
+
+                _disposed = true;
+            }
+        }
+    }
 
     /// <summary>
     /// Releases all resources used by the PdfDocument.

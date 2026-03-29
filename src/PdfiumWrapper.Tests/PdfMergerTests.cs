@@ -1,3 +1,5 @@
+using System.Reflection;
+using System.Runtime.InteropServices;
 using Xunit.Abstractions;
 
 namespace PdfiumWrapper.Tests;
@@ -15,6 +17,20 @@ public class PdfMergerTests : IDisposable
     public PdfMergerTests(ITestOutputHelper testOutputHelper)
     {
         _testOutputHelper = testOutputHelper;
+    }
+
+    private static GCHandle GetDocumentBytesHandle(PdfMerger merger)
+    {
+        var field = typeof(PdfMerger).GetField("_documentBytesHandle", BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(field);
+        return (GCHandle)field.GetValue(merger)!;
+    }
+
+    private static byte[]? GetDocumentBytes(PdfMerger merger)
+    {
+        var field = typeof(PdfMerger).GetField("_documentBytes", BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(field);
+        return (byte[]?)field.GetValue(merger);
     }
 
     public void Dispose()
@@ -93,6 +109,32 @@ public class PdfMergerTests : IDisposable
     }
 
     [Fact]
+    public void Constructor_WithByteArray_ShouldKeepPinnedBufferUntilDispose()
+    {
+        // Arrange
+        var bytes = (byte[])Doc1PageBytes.Clone();
+        var merger = new PdfMerger(bytes);
+
+        try
+        {
+            Assert.True(GetDocumentBytesHandle(merger).IsAllocated);
+
+            GC.Collect();
+            GC.WaitForPendingFinalizers();
+            GC.Collect();
+
+            Assert.Equal(1, merger.PageCount);
+        }
+        finally
+        {
+            merger.Dispose();
+        }
+
+        Assert.False(GetDocumentBytesHandle(merger).IsAllocated);
+        Assert.Null(GetDocumentBytes(merger));
+    }
+
+    [Fact]
     public void Constructor_WithStream_ShouldLoadDocument()
     {
         // Arrange
@@ -104,6 +146,52 @@ public class PdfMergerTests : IDisposable
         // Assert
         Assert.NotNull(merger);
         Assert.Equal(1, merger.PageCount);
+    }
+
+    [Fact]
+    public void Constructor_WithStream_ShouldRemainUsableAfterSourceStreamDisposed()
+    {
+        // Arrange
+        PdfMerger merger;
+        using (var stream = new MemoryStream((byte[])Doc1PageBytes.Clone()))
+        {
+            merger = new PdfMerger(stream);
+        }
+
+        try
+        {
+            GC.Collect();
+            GC.WaitForPendingFinalizers();
+            GC.Collect();
+
+            Assert.Equal(1, merger.PageCount);
+
+            var bytes = merger.ToBytes();
+            Assert.True(bytes.Length > 0);
+        }
+        finally
+        {
+            merger.Dispose();
+        }
+    }
+
+    [Fact]
+    public void Constructor_WithExposableMemoryStream_ShouldReuseBackingBuffer()
+    {
+        // Arrange
+        var bytes = (byte[])Doc1PageBytes.Clone();
+        using var stream = new MemoryStream();
+        stream.Write(bytes, 0, bytes.Length);
+        stream.Position = 0;
+
+        Assert.True(stream.TryGetBuffer(out var segment));
+
+        // Act
+        using var merger = new PdfMerger(stream);
+
+        // Assert
+        Assert.Same(segment.Array, GetDocumentBytes(merger));
+        Assert.True(GetDocumentBytesHandle(merger).IsAllocated);
     }
 
     [Fact]
@@ -555,6 +643,30 @@ public class PdfMergerTests : IDisposable
     }
 
     [Fact]
+    public void Save_ToStream_Repeatedly_ShouldRemainStable()
+    {
+        // Arrange
+        using var merger = new PdfMerger();
+        using var doc1 = new PdfDocument((byte[])Doc1PageBytes.Clone());
+        using var doc3 = new PdfDocument((byte[])Doc3PagesBytes.Clone());
+        merger.AppendDocument(doc1);
+        merger.AppendDocument(doc3);
+
+        // Act / Assert
+        for (int i = 0; i < 25; i++)
+        {
+            using var stream = new MemoryStream();
+            merger.Save(stream);
+
+            Assert.True(stream.Length > 0);
+
+            stream.Position = 0;
+            using var verifyDoc = new PdfDocument(stream);
+            Assert.Equal(4, verifyDoc.PageCount);
+        }
+    }
+
+    [Fact]
     public void Save_EmptyDocument_ShouldCreateValidPdf()
     {
         // Arrange
@@ -812,6 +924,29 @@ public class PdfMergerTests : IDisposable
 
         // Act & Assert
         merger.Dispose();
+    }
+
+    [Fact]
+    public void PageCount_AfterDispose_ShouldThrowObjectDisposedException()
+    {
+        // Arrange
+        var merger = new PdfMerger((byte[])Doc1PageBytes.Clone());
+        merger.Dispose();
+
+        // Act & Assert
+        Assert.Throws<ObjectDisposedException>(() => _ = merger.PageCount);
+    }
+
+    [Fact]
+    public void AppendDocument_WithDisposedSource_ShouldThrowObjectDisposedException()
+    {
+        // Arrange
+        using var merger = new PdfMerger();
+        var sourceDoc = new PdfDocument((byte[])Doc1PageBytes.Clone());
+        sourceDoc.Dispose();
+
+        // Act & Assert
+        Assert.Throws<ObjectDisposedException>(() => merger.AppendDocument(sourceDoc));
     }
 
     #endregion

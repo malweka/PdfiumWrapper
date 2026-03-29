@@ -170,6 +170,51 @@ public class LifetimeCoordinationTests
         Assert.Throws<ObjectDisposedException>(() => doc.GetPage(0));
     }
 
+    [Fact]
+    public void Document_PublicMethodsThrowObjectDisposedException_AfterDispose()
+    {
+        var doc = new PdfDocument(ContractPdfPath);
+        doc.Dispose();
+
+        Assert.Throws<ObjectDisposedException>(() => _ = doc.PageCount);
+        Assert.Throws<ObjectDisposedException>(() => _ = doc.Permissions);
+        Assert.Throws<ObjectDisposedException>(() => _ = doc.DocumentId);
+        Assert.Throws<ObjectDisposedException>(() => doc.DeletePage((PdfPage)null!));
+        Assert.Throws<ObjectDisposedException>(() => doc.DeletePage(-1));
+        Assert.Throws<ObjectDisposedException>(() => doc.GetAllPages());
+        Assert.Throws<ObjectDisposedException>(() => doc.ProcessAllPages((Action<PdfPage>)null!));
+        Assert.Throws<ObjectDisposedException>(() => doc.RenderPages());
+        Assert.Throws<ObjectDisposedException>(() => doc.StreamImageBytes(ImageFormat.Png));
+        Assert.Throws<ObjectDisposedException>(() => doc.GetPageSize(-1));
+        Assert.Throws<ObjectDisposedException>(() => doc.GetPageLabel(-1));
+        Assert.Throws<ObjectDisposedException>(() => doc.GetAllPageLabels());
+        Assert.Throws<ObjectDisposedException>(() => doc.GetAllPageSizes());
+        Assert.Throws<ObjectDisposedException>(() => doc.StreamImageBytesAsync(ImageFormat.Png));
+        Assert.Throws<ObjectDisposedException>(() => doc.SaveAsImages(Array.Empty<Stream>(), ImageFormat.Png, 100, 300, 300));
+        Assert.Throws<ObjectDisposedException>(() => doc.SaveAsTiff(new MemoryStream()));
+        Assert.Throws<ObjectDisposedException>(() => doc.SaveAsPngs(Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"))));
+        Assert.Throws<ObjectDisposedException>(() => doc.SaveAsJpegs(Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"))));
+        Assert.Throws<ObjectDisposedException>(() => doc.StreamJpegBytes());
+        Assert.Throws<ObjectDisposedException>(() => doc.StreamJpegBytesAsync());
+        Assert.Throws<ObjectDisposedException>(() => doc.SaveAsImages(Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N")), "page", ImageFormat.Png));
+        Assert.Throws<ObjectDisposedException>(() => doc.GetForm());
+        Assert.Throws<ObjectDisposedException>(() => doc.Save(Path.Combine(Path.GetTempPath(), $"{Guid.NewGuid():N}.pdf")));
+        Assert.Throws<ObjectDisposedException>(() => doc.SaveToStream(new MemoryStream()));
+    }
+
+    [Fact]
+    public async Task Document_AsyncPublicMethodsThrowObjectDisposedException_AfterDispose()
+    {
+        var doc = new PdfDocument(ContractPdfPath);
+        doc.Dispose();
+
+        await Assert.ThrowsAsync<ObjectDisposedException>(() => doc.ProcessAllPagesAsync((Action<PdfPage>)null!));
+        await Assert.ThrowsAsync<ObjectDisposedException>(() => doc.RenderPagesAsync());
+        await Assert.ThrowsAsync<ObjectDisposedException>(() => doc.SaveAsTiffAsync(new MemoryStream()));
+        await Assert.ThrowsAsync<ObjectDisposedException>(() => doc.SaveAsJpegsAsync(Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"))));
+        await Assert.ThrowsAsync<ObjectDisposedException>(() => doc.SaveAsImagesAsync(Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N")), "page", ImageFormat.Png, 100, 300, 300));
+    }
+
     #endregion
 
     #region Double Dispose Safety

@@ -189,6 +189,44 @@ public class PdfDocumentTests : IDisposable
     }
 
     [Fact]
+    public void SaveToStream_ShouldWriteValidPdfToMemoryStream()
+    {
+        // Arrange
+        using var doc = new PdfDocument(ContractPdfPath);
+        using var stream = new MemoryStream();
+
+        // Act
+        doc.SaveToStream(stream);
+
+        // Assert
+        Assert.True(stream.Length > 0);
+
+        stream.Position = 0;
+        using var loadedDoc = new PdfDocument(stream);
+        Assert.Equal(doc.PageCount, loadedDoc.PageCount);
+    }
+
+    [Fact]
+    public void SaveToStream_Repeatedly_ShouldRemainStable()
+    {
+        // Arrange
+        using var doc = new PdfDocument(ContractPdfPath);
+
+        // Act / Assert
+        for (int i = 0; i < 25; i++)
+        {
+            using var stream = new MemoryStream();
+            doc.SaveToStream(stream);
+
+            Assert.True(stream.Length > 0);
+
+            stream.Position = 0;
+            using var loadedDoc = new PdfDocument(stream);
+            Assert.Equal(doc.PageCount, loadedDoc.PageCount);
+        }
+    }
+
+    [Fact]
     public void CreateNewDocument_AndAddMultiplePages_ShouldSucceed()
     {
         // Arrange
@@ -263,6 +301,52 @@ public class PdfDocumentTests : IDisposable
         Assert.Equal(0, page.PageIndex);
         Assert.True(page.Width > 0);
         Assert.True(page.Height > 0);
+    }
+
+    [Fact]
+    public void ExtractText_RepeatedCalls_ShouldReturnSameContent()
+    {
+        // Arrange
+        using var doc = new PdfDocument(ContractPdfPath);
+        using var page = doc.GetPage(0);
+
+        // Act
+        var first = page.ExtractText();
+        var second = page.ExtractText();
+
+        // Assert
+        Assert.Equal(first, second);
+    }
+
+    [Fact]
+    public void GetAllPageLabels_ShouldMatchPerPageLookup()
+    {
+        // Arrange
+        using var doc = new PdfDocument(ContractPdfPath);
+
+        // Act
+        var labels = doc.GetAllPageLabels();
+
+        // Assert
+        Assert.Equal(doc.PageCount, labels.Length);
+        for (int i = 0; i < labels.Length; i++)
+        {
+            Assert.Equal(labels[i], doc.GetPageLabel(i));
+        }
+    }
+
+    [Fact]
+    public void DocumentId_RepeatedCalls_ShouldReturnSameValue()
+    {
+        // Arrange
+        using var doc = new PdfDocument(ContractPdfPath);
+
+        // Act
+        var first = doc.DocumentId;
+        var second = doc.DocumentId;
+
+        // Assert
+        Assert.Equal(first, second);
     }
     
     [Fact]
