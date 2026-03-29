@@ -1,4 +1,4 @@
-﻿using System.Drawing;
+using System.Drawing;
 using System.Runtime.InteropServices;
 
 namespace PdfiumWrapper;
@@ -9,28 +9,56 @@ namespace PdfiumWrapper;
 public class PdfPage : IDisposable
 {
     private IntPtr _page;
-    private IntPtr _document;
+    private readonly PdfDocument _owner;
     private bool _disposed;
+    private readonly object _attachedObjectsLock = new();
+    private HashSet<PdfPageObject>? _attachedObjects;
 
-    internal PdfPage(IntPtr document, int pageIndex)
+    internal PdfPage(PdfDocument owner, int pageIndex)
     {
-        _document = document;
+        _owner = owner ?? throw new ArgumentNullException(nameof(owner));
         PageIndex = pageIndex;
-        _page = PDFium.FPDF_LoadPage(document, pageIndex);
+        _page = PDFium.FPDF_LoadPage(owner.Document, pageIndex);
         if (_page == IntPtr.Zero)
         {
             throw new InvalidOperationException($"Failed to load page {pageIndex}. Error: {PDFium.FPDF_GetLastError()}");
+        }
+
+        try
+        {
+            _owner.RegisterPage(this);
+        }
+        catch
+        {
+            PDFium.FPDF_ClosePage(_page);
+            _page = IntPtr.Zero;
+            throw;
         }
     }
 
     public int PageIndex { get; }
 
-    public double Width => PDFium.FPDF_GetPageWidth(_page);
+    public double Width
+    {
+        get
+        {
+            ThrowIfDisposed();
+            return PDFium.FPDF_GetPageWidth(_page);
+        }
+    }
 
-    public double Height => PDFium.FPDF_GetPageHeight(_page);
+    public double Height
+    {
+        get
+        {
+            ThrowIfDisposed();
+            return PDFium.FPDF_GetPageHeight(_page);
+        }
+    }
 
     internal IntPtr Handle => _page;
-    internal IntPtr DocumentHandle => _document;
+    internal IntPtr DocumentHandle => _owner.Document;
+    internal bool IsDisposedForChildObjects => _disposed || _owner.IsDisposed;
 
     /// <summary>
     /// Renders the page to a native PDFium bitmap handle.
@@ -39,6 +67,8 @@ public class PdfPage : IDisposable
     /// </summary>
     internal IntPtr RenderToBitmapHandle(int width, int height, int flags = 0)
     {
+        ThrowIfDisposed();
+
         var bitmap = PDFium.FPDFBitmap_Create(width, height, 0);
         if (bitmap == IntPtr.Zero)
             throw new OutOfMemoryException("Failed to create bitmap");
@@ -50,6 +80,8 @@ public class PdfPage : IDisposable
 
     public byte[] RenderToBytes(int width, int height, int flags = 0)
     {
+        ThrowIfDisposed();
+
         var bitmap = PDFium.FPDFBitmap_Create(width, height, 0);
         if (bitmap == IntPtr.Zero)
             throw new OutOfMemoryException("Failed to create bitmap");
@@ -80,6 +112,8 @@ public class PdfPage : IDisposable
 
     public string ExtractText()
     {
+        ThrowIfDisposed();
+
         var textPage = PDFium.FPDFText_LoadPage(_page);
         if (textPage == IntPtr.Zero)
             return string.Empty;
@@ -118,6 +152,8 @@ public class PdfPage : IDisposable
     {
         get
         {
+            ThrowIfDisposed();
+
             var thumbnail = PDFium.FPDFPage_GetThumbnailAsBitmap(_page);
             if (thumbnail != IntPtr.Zero)
             {
@@ -134,6 +170,8 @@ public class PdfPage : IDisposable
     /// </summary>
     public byte[] GetEmbeddedThumbnailBytes()
     {
+        ThrowIfDisposed();
+
         var thumbnail = PDFium.FPDFPage_GetThumbnailAsBitmap(_page);
         if (thumbnail == IntPtr.Zero)
             return null;
@@ -163,6 +201,8 @@ public class PdfPage : IDisposable
     /// </summary>
     public (int width, int height)? GetEmbeddedThumbnailSize()
     {
+        ThrowIfDisposed();
+
         var thumbnail = PDFium.FPDFPage_GetThumbnailAsBitmap(_page);
         if (thumbnail == IntPtr.Zero)
             return null;
@@ -186,16 +226,18 @@ public class PdfPage : IDisposable
     /// </summary>
     public PdfTextObject AddText(string text, float x, float y, string font = "Helvetica", float fontSize = 12)
     {
-        var textObj = PdfTextObject.Create(_document, font, fontSize);
+        ThrowIfDisposed();
+
+        var textObj = PdfTextObject.Create(_owner.Document, font, fontSize);
         textObj.Text = text;
-        
+
         // Position the text object
         textObj.SetMatrix(1, 0, 0, 1, x, y);
-        
+
         // Insert into page
         PDFium.FPDFPage_InsertObject(_page, textObj.Handle);
-        textObj.IsAttachedToPage = true;
-        
+        RegisterAttachedObject(textObj);
+
         return textObj;
     }
 
@@ -204,14 +246,16 @@ public class PdfPage : IDisposable
     /// </summary>
     public PdfImageObject AddImage(byte[] imageBytes, float x, float y, float width, float height)
     {
-        var imageObj = PdfImageObject.Create(_document);
+        ThrowIfDisposed();
+
+        var imageObj = PdfImageObject.Create(_owner.Document);
         imageObj.SetImage(imageBytes, _page);
         imageObj.SetPositionAndSize(x, y, width, height);
-        
+
         // Insert into page
         PDFium.FPDFPage_InsertObject(_page, imageObj.Handle);
-        imageObj.IsAttachedToPage = true;
-        
+        RegisterAttachedObject(imageObj);
+
         return imageObj;
     }
 
@@ -220,12 +264,14 @@ public class PdfPage : IDisposable
     /// </summary>
     public PdfPathObject AddPath()
     {
-        var pathObj = PdfPathObject.Create(_document);
-        
+        ThrowIfDisposed();
+
+        var pathObj = PdfPathObject.Create(_owner.Document);
+
         // Insert into page
         PDFium.FPDFPage_InsertObject(_page, pathObj.Handle);
-        pathObj.IsAttachedToPage = true;
-        
+        RegisterAttachedObject(pathObj);
+
         return pathObj;
     }
 
@@ -234,8 +280,10 @@ public class PdfPage : IDisposable
     /// </summary>
     public PdfPathObject AddRectangle(float x, float y, float width, float height, Color? fillColor = null, Color? strokeColor = null)
     {
-        var rectObj = PdfPathObject.CreateRectangle(_document, x, y, width, height);
-        
+        ThrowIfDisposed();
+
+        var rectObj = PdfPathObject.CreateRectangle(_owner.Document, x, y, width, height);
+
         if (fillColor.HasValue)
         {
             rectObj.FillColor = fillColor.Value;
@@ -245,16 +293,16 @@ public class PdfPage : IDisposable
         {
             rectObj.SetDrawMode(PdfPathFillMode.None, true);
         }
-        
+
         if (strokeColor.HasValue)
         {
             rectObj.StrokeColor = strokeColor.Value;
         }
-        
+
         // Insert into page
         PDFium.FPDFPage_InsertObject(_page, rectObj.Handle);
-        rectObj.IsAttachedToPage = true;
-        
+        RegisterAttachedObject(rectObj);
+
         return rectObj;
     }
 
@@ -263,13 +311,16 @@ public class PdfPage : IDisposable
     /// </summary>
     public bool RemoveObject(PdfPageObject pageObject)
     {
+        ThrowIfDisposed();
+
         if (pageObject == null)
             throw new ArgumentNullException(nameof(pageObject));
 
         var result = PDFium.FPDFPage_RemoveObject(_page, pageObject.Handle);
         if (result)
         {
-            pageObject.IsAttachedToPage = false;
+            pageObject.DetachFromPage();
+            UnregisterAttachedObject(pageObject);
         }
         return result;
     }
@@ -279,6 +330,8 @@ public class PdfPage : IDisposable
     /// </summary>
     public void GenerateContent()
     {
+        ThrowIfDisposed();
+
         if (!PDFium.FPDFPage_GenerateContent(_page))
             throw new InvalidOperationException("Failed to generate page content");
     }
@@ -286,13 +339,22 @@ public class PdfPage : IDisposable
     /// <summary>
     /// Get the number of objects on the page
     /// </summary>
-    public int ObjectCount => PDFium.FPDFPage_CountObjects(_page);
+    public int ObjectCount
+    {
+        get
+        {
+            ThrowIfDisposed();
+            return PDFium.FPDFPage_CountObjects(_page);
+        }
+    }
 
     /// <summary>
     /// Get a page object by index
     /// </summary>
     public IntPtr GetObject(int index)
     {
+        ThrowIfDisposed();
+
         if (index < 0 || index >= ObjectCount)
             throw new ArgumentOutOfRangeException(nameof(index));
 
@@ -301,13 +363,66 @@ public class PdfPage : IDisposable
 
     #endregion
 
+    internal void UnregisterAttachedObject(PdfPageObject pageObject)
+    {
+        lock (_attachedObjectsLock)
+        {
+            _attachedObjects?.Remove(pageObject);
+        }
+    }
+
+    private void RegisterAttachedObject(PdfPageObject pageObject)
+    {
+        pageObject.AttachToPage(this);
+
+        lock (_attachedObjectsLock)
+        {
+            _attachedObjects ??= new HashSet<PdfPageObject>();
+            _attachedObjects.Add(pageObject);
+        }
+    }
+
+    private PdfPageObject[] DetachAttachedObjects()
+    {
+        lock (_attachedObjectsLock)
+        {
+            if (_attachedObjects == null || _attachedObjects.Count == 0)
+                return Array.Empty<PdfPageObject>();
+
+            var pageObjects = _attachedObjects.ToArray();
+            _attachedObjects.Clear();
+            _attachedObjects = null;
+            return pageObjects;
+        }
+    }
+
+    private void ThrowIfDisposed()
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        if (_owner.IsDisposed)
+            throw new ObjectDisposedException(nameof(PdfDocument), "The owning document has been disposed.");
+    }
+
     /// <summary>
     /// Releases all resources used by the PdfPage.
     /// </summary>
     public void Dispose()
     {
+        DisposeInternal(suppressFinalize: true);
+    }
+
+    internal void DisposeFromOwner()
+    {
+        DisposeInternal(suppressFinalize: false);
+    }
+
+    private void DisposeInternal(bool suppressFinalize)
+    {
         Dispose(true);
-        GC.SuppressFinalize(this);
+        if (suppressFinalize)
+        {
+            GC.SuppressFinalize(this);
+        }
     }
 
     /// <summary>
@@ -318,9 +433,11 @@ public class PdfPage : IDisposable
     {
         if (!_disposed)
         {
-            if (disposing)
+            _disposed = true;
+
+            foreach (var pageObject in DetachAttachedObjects())
             {
-                // Dispose managed resources if needed
+                pageObject.InvalidateFromPageDisposal();
             }
 
             // Always release native handle
@@ -330,7 +447,7 @@ public class PdfPage : IDisposable
                 _page = IntPtr.Zero;
             }
 
-            _disposed = true;
+            _owner.UnregisterPage(this);
         }
     }
 

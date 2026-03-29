@@ -13,7 +13,10 @@ namespace PdfiumWrapper;
 public class PdfDocument : IDisposable
 {
     private IntPtr _document;
-    private bool _disposed;
+    private volatile bool _disposed;
+    private int _activePageCount;
+    private readonly object _pagesLock = new();
+    private HashSet<PdfPage>? _activePages;
     private PdfMetadata? _metadata;
     private PdfBookmarks? _bookmarks;
     private PdfAttachments? _attachments;
@@ -79,6 +82,7 @@ public class PdfDocument : IDisposable
     {
         get
         {
+            ThrowIfDisposed();
             if (_metadata == null)
             {
                 _metadata = new PdfMetadata(Document);
@@ -91,6 +95,7 @@ public class PdfDocument : IDisposable
     {
         get
         {
+            ThrowIfDisposed();
             if (_bookmarks == null)
             {
                 _bookmarks = new PdfBookmarks(Document);
@@ -103,6 +108,7 @@ public class PdfDocument : IDisposable
     {
         get
         {
+            ThrowIfDisposed();
             if (_attachments == null)
             {
                 _attachments = new PdfAttachments(Document);
@@ -111,7 +117,14 @@ public class PdfDocument : IDisposable
         }
     }
 
-    public int PageCount => PDFium.FPDF_GetPageCount(Document);
+    public int PageCount
+    {
+        get
+        {
+            ThrowIfDisposed();
+            return PDFium.FPDF_GetPageCount(Document);
+        }
+    }
 
     /// <summary>
     /// Gets the document permissions as a PdfPermissions flags enum
@@ -120,6 +133,7 @@ public class PdfDocument : IDisposable
     {
         get
         {
+            ThrowIfDisposed();
             uint rawPermissions = PDFium.FPDF_GetDocPermissions(Document);
             return (PdfPermissions)rawPermissions;
         }
@@ -132,6 +146,8 @@ public class PdfDocument : IDisposable
     {
         get
         {
+            ThrowIfDisposed();
+
             // First, get the original file ID (type 0)
             var size = PDFium.FPDF_GetFileIdentifier(Document, 0, IntPtr.Zero, 0);
             if (size == 0)
@@ -157,6 +173,87 @@ public class PdfDocument : IDisposable
     }
 
     internal IntPtr Document { get => _document; set => _document = value; }
+
+    /// <summary>
+    /// Indicates whether this document has been disposed. Used by PdfPage to detect
+    /// use-after-free when the owning document is disposed while pages are still alive.
+    /// </summary>
+    internal bool IsDisposed => _disposed;
+
+    private void ThrowIfDisposed()
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+    }
+
+    /// <summary>
+    /// Called by PdfPage during construction to register an active page.
+    /// </summary>
+    internal void RegisterPage(PdfPage page)
+    {
+        ThrowIfDisposed();
+
+        lock (_pagesLock)
+        {
+            ThrowIfDisposed();
+            _activePages ??= new HashSet<PdfPage>();
+            if (_activePages.Add(page))
+            {
+                Interlocked.Increment(ref _activePageCount);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Called by PdfPage.Dispose to signal that a page has been released.
+    /// Must be safe to call from finalizer threads.
+    /// </summary>
+    internal void UnregisterPage(PdfPage page)
+    {
+        lock (_pagesLock)
+        {
+            if (_activePages != null && _activePages.Remove(page))
+            {
+                Interlocked.Decrement(ref _activePageCount);
+                if (_activePages.Count == 0)
+                {
+                    _activePages = null;
+                }
+            }
+        }
+    }
+
+    private PdfPage[] SnapshotAndClearActivePages()
+    {
+        lock (_pagesLock)
+        {
+            if (_activePages == null || _activePages.Count == 0)
+            {
+                Interlocked.Exchange(ref _activePageCount, 0);
+                return Array.Empty<PdfPage>();
+            }
+
+            var pages = _activePages.ToArray();
+            _activePages.Clear();
+            _activePages = null;
+            Interlocked.Exchange(ref _activePageCount, 0);
+            return pages;
+        }
+    }
+
+    private void DisposeActivePages()
+    {
+        foreach (var page in SnapshotAndClearActivePages())
+        {
+            try
+            {
+                page.DisposeFromOwner();
+            }
+            catch
+            {
+                // Dispose must not throw because active pages still exist.
+            }
+        }
+    }
 
     private void LoadPinnedMemoryDocument(byte[] data, int offset, int length, string? password)
     {
@@ -192,10 +289,11 @@ public class PdfDocument : IDisposable
 
     public PdfPage GetPage(int pageIndex)
     {
+        ThrowIfDisposed();
         if (pageIndex < 0 || pageIndex >= PageCount)
             throw new ArgumentOutOfRangeException(nameof(pageIndex));
 
-        return new PdfPage(Document, pageIndex);
+        return new PdfPage(this, pageIndex);
     }
 
     /// <summary>
@@ -207,6 +305,8 @@ public class PdfDocument : IDisposable
     /// <returns>The newly created page</returns>
     public PdfPage AddPage(int width = 612, int height = 792, int index = -1)
     {
+        ThrowIfDisposed();
+
         if (index == -1)
             index = PageCount; // Append at end
 
@@ -216,7 +316,7 @@ public class PdfDocument : IDisposable
 
         // Close the page handle and re-open it using the standard method
         PDFium.FPDF_ClosePage(pageHandle);
-        return new PdfPage(Document, index);
+        return new PdfPage(this, index);
     }
 
     /// <summary>
@@ -226,8 +326,7 @@ public class PdfDocument : IDisposable
     /// <exception cref="ArgumentOutOfRangeException">Thrown when pageIndex is out of range</exception>
     public void DeletePage(int pageIndex)
     {
-        if (_disposed)
-            throw new ObjectDisposedException(nameof(PdfDocument));
+        ThrowIfDisposed();
 
         if (pageIndex < 0 || pageIndex >= PageCount)
             throw new ArgumentOutOfRangeException(nameof(pageIndex), $"Page index must be between 0 and {PageCount - 1}");
@@ -1079,6 +1178,8 @@ public class PdfDocument : IDisposable
 
     public PdfForm? GetForm()
     {
+        ThrowIfDisposed();
+
         var pdfForm = new PdfForm(Document, PageCount);
         if(pdfForm.HasFormFields)
             return pdfForm;
@@ -1094,8 +1195,7 @@ public class PdfDocument : IDisposable
     /// <param name="flags">Save flags (default is 0 for standard save, use PDFium.FPDF_INCREMENTAL for incremental save)</param>
     public void Save(string filePath, uint flags = 0)
     {
-        if (_disposed)
-            throw new ObjectDisposedException(nameof(PdfDocument));
+        ThrowIfDisposed();
 
         using var fileStream = new FileStream(filePath, FileMode.Create, FileAccess.Write);
         SaveToStream(fileStream, flags);
@@ -1108,8 +1208,7 @@ public class PdfDocument : IDisposable
     /// <param name="flags">Save flags (default is 0 for standard save, use PDFium.FPDF_INCREMENTAL for incremental save)</param>
     public void SaveToStream(Stream stream, uint flags = 0)
     {
-        if (_disposed)
-            throw new ObjectDisposedException(nameof(PdfDocument));
+        ThrowIfDisposed();
 
         // Create a GCHandle to keep the stream alive during the save operation.
         // We need TWO GCHandles here:
@@ -1192,10 +1291,9 @@ public class PdfDocument : IDisposable
     {
         if (!_disposed)
         {
-            if (disposing)
-            {
-                // Dispose managed resources if needed
-            }
+            _disposed = true;
+
+            DisposeActivePages();
 
             // Always release native handle
             if (Document != IntPtr.Zero)
