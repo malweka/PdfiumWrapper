@@ -496,6 +496,150 @@ public async Task ProcessWithMemoryMonitoringAsync(string[] pdfPaths)
 }
 ```
 
+### Consideration: Large Input Streams
+
+When loading from `Stream`, `PdfiumWrapper` currently keeps the document independent from the source stream after construction:
+
+- If the stream is an exposable `MemoryStream`, the wrapper reuses and pins that backing buffer.
+- For other stream types, the wrapper reads the full PDF into a managed `byte[]` and pins it for the lifetime of the `PdfDocument`.
+
+This is safe and convenient because callers can dispose the source stream immediately, but it means non-`MemoryStream` inputs still pay a full-copy cost.
+
+For very large PDFs or high-volume stream ingestion pipelines, consider these tradeoffs:
+
+- If you already have the full PDF in memory, prefer a `MemoryStream` with an exposable buffer or pass a `byte[]` directly.
+- If your stream source is very large, remember that `new PdfDocument(stream)` currently duplicates the full payload into managed memory unless the stream is an exposable `MemoryStream`.
+- A future `FPDF_LoadCustomDocument` path would be better for avoiding the full copy on large streams, but that model requires the source stream to remain alive and seekable for the full lifetime of the `PdfDocument`.
+
+### Large Stream Examples
+
+#### 1. If You Already Have the PDF as `byte[]`
+
+This is the simplest option when the payload is already fully materialized in memory:
+
+```csharp
+public void ProcessPdfBytes(byte[] pdfBytes)
+{
+    using var doc = new PdfDocument(pdfBytes);
+
+    foreach (var text in doc.ProcessAllPages(page => page.ExtractText()))
+    {
+        // Process extracted text
+    }
+}
+```
+
+Why use this:
+
+- No extra copy inside the wrapper
+- Clear ownership
+- Good when your upstream already gives you a `byte[]`
+
+#### 2. If You Control the In-Memory Stream
+
+If you receive or build the PDF in memory yourself, prefer an exposable `MemoryStream`:
+
+```csharp
+public void ProcessPdfMemoryStream(byte[] pdfBytes)
+{
+    using var stream = new MemoryStream(capacity: pdfBytes.Length);
+    stream.Write(pdfBytes, 0, pdfBytes.Length);
+    stream.Position = 0;
+
+    using var doc = new PdfDocument(stream);
+
+    doc.ProcessAllPages(page =>
+    {
+        var size = (page.Width, page.Height);
+        // Process page
+    });
+}
+```
+
+Why use this:
+
+- `PdfDocument` can reuse the `MemoryStream` backing buffer when it is exposable
+- Avoids an extra managed copy compared with a generic stream
+
+#### 3. For Very Large Streams, Spool to a Temporary File
+
+If the source stream is large or non-seekable, writing it to disk first is often the better throughput tradeoff:
+
+```csharp
+public async Task ProcessLargePdfStreamAsync(Stream input, CancellationToken cancellationToken = default)
+{
+    string tempPath = Path.Combine(Path.GetTempPath(), $"{Guid.NewGuid():N}.pdf");
+
+    try
+    {
+        await using (var file = new FileStream(
+            tempPath,
+            FileMode.Create,
+            FileAccess.Write,
+            FileShare.None,
+            bufferSize: 1024 * 1024,
+            useAsync: true))
+        {
+            await input.CopyToAsync(file, cancellationToken);
+        }
+
+        using var doc = new PdfDocument(tempPath);
+
+        await foreach (var bytes in doc.StreamImageBytesAsync(ImageFormat.Jpeg, quality: 90, dpi: 200))
+        {
+            // Process one page at a time
+        }
+    }
+    finally
+    {
+        if (File.Exists(tempPath))
+            File.Delete(tempPath);
+    }
+}
+```
+
+Why use this:
+
+- Avoids holding two full copies in managed memory
+- Better for very large files
+- Works well with network streams, HTTP uploads, and other forward-only sources
+
+#### 4. For ASP.NET Core Uploads
+
+For large uploads, avoid reading the entire request body into a new `byte[]` unless you know the files are small:
+
+```csharp
+public async Task<IActionResult> ProcessUpload(IFormFile file, CancellationToken cancellationToken)
+{
+    string tempPath = Path.Combine(Path.GetTempPath(), $"{Guid.NewGuid():N}_{file.FileName}");
+
+    try
+    {
+        await using (var output = System.IO.File.Create(tempPath))
+        await using (var input = file.OpenReadStream())
+        {
+            await input.CopyToAsync(output, cancellationToken);
+        }
+
+        using var doc = new PdfDocument(tempPath);
+        var pageCount = doc.PageCount;
+
+        return Ok(new { pageCount });
+    }
+    finally
+    {
+        if (File.Exists(tempPath))
+            File.Delete(tempPath);
+    }
+}
+```
+
+Rule of thumb:
+
+- Small payload already in memory: use `byte[]`
+- In-memory stream you control: use `MemoryStream`
+- Large or forward-only stream: spool to file, then open by path
+
 ---
 
 ## Complete Examples

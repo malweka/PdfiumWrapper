@@ -17,6 +17,8 @@ public class PdfDocument : IDisposable
     private PdfMetadata? _metadata;
     private PdfBookmarks? _bookmarks;
     private PdfAttachments? _attachments;
+    private byte[]? _documentBytes;
+    private GCHandle _documentBytesHandle;
 
     static PdfDocument()
     {
@@ -45,26 +47,32 @@ public class PdfDocument : IDisposable
     }
 
     public PdfDocument(Stream pdfStream, string? password = null)
-        : this(pdfStream.ReadStreamToBytes(), password)
     {
+        ArgumentNullException.ThrowIfNull(pdfStream);
+
+        // For large streams, FPDF_LoadCustomDocument is the better long-term option because it can avoid
+        // the full managed copy. This constructor currently preserves the simpler ownership model where the
+        // PdfDocument becomes independent from the source stream after construction.
+        if (pdfStream is MemoryStream memoryStream
+            && memoryStream.TryGetBuffer(out ArraySegment<byte> buffer))
+        {
+            int offset = buffer.Offset + checked((int)memoryStream.Position);
+            int length = checked((int)(memoryStream.Length - memoryStream.Position));
+            LoadPinnedMemoryDocument(buffer.Array!, offset, length, password);
+
+            // Match the previous CopyTo() behavior by consuming the stream.
+            memoryStream.Position = memoryStream.Length;
+            return;
+        }
+
+        var bytes = pdfStream.ReadStreamToBytes();
+        LoadPinnedMemoryDocument(bytes, 0, bytes.Length, password);
     }
 
     public PdfDocument(byte[] data, string? password = null)
     {
-        var handle = GCHandle.Alloc(data, GCHandleType.Pinned);
-        try
-        {
-            Document = PDFium.FPDF_LoadMemDocument(handle.AddrOfPinnedObject(), data.Length, password);
-            if (Document == IntPtr.Zero)
-            {
-                throw new InvalidOperationException(
-                    $"Failed to load PDF document from memory. Error: {PDFium.FPDF_GetLastError()}");
-            }
-        }
-        finally
-        {
-            handle.Free();
-        }
+        ArgumentNullException.ThrowIfNull(data);
+        LoadPinnedMemoryDocument(data, 0, data.Length, password);
     }
 
     public PdfMetadata Metadata
@@ -149,6 +157,38 @@ public class PdfDocument : IDisposable
     }
 
     internal IntPtr Document { get => _document; set => _document = value; }
+
+    private void LoadPinnedMemoryDocument(byte[] data, int offset, int length, string? password)
+    {
+        _documentBytes = data;
+        _documentBytesHandle = GCHandle.Alloc(data, GCHandleType.Pinned);
+
+        try
+        {
+            var dataPtr = IntPtr.Add(_documentBytesHandle.AddrOfPinnedObject(), offset);
+            Document = PDFium.FPDF_LoadMemDocument(dataPtr, length, password);
+            if (Document == IntPtr.Zero)
+            {
+                throw new InvalidOperationException(
+                    $"Failed to load PDF document from memory. Error: {PDFium.FPDF_GetLastError()}");
+            }
+        }
+        catch
+        {
+            ReleasePinnedMemoryDocument();
+            throw;
+        }
+    }
+
+    private void ReleasePinnedMemoryDocument()
+    {
+        if (_documentBytesHandle.IsAllocated)
+        {
+            _documentBytesHandle.Free();
+        }
+
+        _documentBytes = null;
+    }
 
     public PdfPage GetPage(int pageIndex)
     {
@@ -1163,6 +1203,8 @@ public class PdfDocument : IDisposable
                 PDFium.FPDF_CloseDocument(Document);
                 Document = IntPtr.Zero;
             }
+
+            ReleasePinnedMemoryDocument();
 
             _disposed = true;
         }
