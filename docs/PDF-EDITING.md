@@ -185,13 +185,10 @@ var image = page.AddImage(imageBytes, x: 100, y: 500, width: 200, height: 100);
 
 ### Supported Formats
 
-Images are decoded using SkiaSharp, so the following formats are supported:
+Images are decoded using native libraries (libjpeg-turbo and libpng), so the following formats are supported:
 
 - PNG
 - JPEG
-- WebP
-- GIF
-- BMP
 
 ### Image Positioning
 
@@ -595,7 +592,7 @@ document.Save("output.pdf");
 
 2. **Page objects are disposable** — they are automatically disposed when removed from a page or when the page is disposed.
 
-3. **Images are decoded using SkiaSharp** and converted to PDFium's internal format.
+3. **Images are decoded using native libraries** (libjpeg-turbo and libpng) and converted to PDFium's internal format.
 
 4. **Custom fonts** can be loaded using `FPDFText_LoadFont` for embedding non-standard fonts.
 

@@ -47,7 +47,7 @@ Use async methods for UI responsiveness, but process sequentially:
 ```csharp
 // ✅ SAFE: Sequential processing, UI stays responsive
 using var document = new PdfDocument("large.pdf");
-var bitmaps = await document.ConvertToBitmapsAsync(dpi: 300);
+var bitmaps = await document.RenderPagesAsync(dpi: 300);
 ```
 
 #### Pattern 3: Document Per Request (ASP.NET Core)
@@ -62,7 +62,7 @@ public async Task<IActionResult> ConvertPdf(IFormFile file)
     using var stream = file.OpenReadStream();
     using var document = new PdfDocument(stream);
     
-    var image = document.StreamImageBytes(SKEncodedImageFormat.Png, 100, 150).First();
+    var image = document.StreamImageBytes(ImageFormat.Png, 100, 150).First();
     return File(image, "image/png");
 }
 ```
@@ -233,7 +233,7 @@ public class PdfController : ControllerBase
             using var document = _pdfFactory.CreateFromStream(stream);
             
             // For large documents, consider streaming response
-            var images = document.StreamImageBytes(SKEncodedImageFormat.Png, 100, dpi).ToList();
+            var images = document.StreamImageBytes(ImageFormat.Png, 100, dpi).ToList();
             
             // Return as zip for multiple pages
             if (images.Count > 1)
@@ -397,28 +397,23 @@ finally
 }
 ```
 
-### Disposing Bitmaps
+### Working with RawBitmaps
 
-`SKBitmap` objects consume significant memory:
+`RawBitmap` is a lightweight record and does not require disposal, but the pixel arrays can consume significant memory:
 
 ```csharp
-var bitmaps = document.ConvertToBitmaps(300);
-try
+var bitmaps = document.RenderPages(300);
+
+for (int i = 0; i < bitmaps.Length; i++)
 {
-    for (int i = 0; i < bitmaps.Length; i++)
-    {
-        // Process bitmap
-        using var image = SKImage.FromBitmap(bitmaps[i]);
-        // ...
-    }
+    // Access raw pixel data
+    byte[] pixels = bitmaps[i].Pixels;
+    int width = bitmaps[i].Width;
+    int height = bitmaps[i].Height;
+    int stride = bitmaps[i].Stride;
+    // Process pixel data...
 }
-finally
-{
-    foreach (var bitmap in bitmaps)
-    {
-        bitmap.Dispose();
-    }
-}
+// No disposal needed — RawBitmap is a plain record
 ```
 
 ---
@@ -466,11 +461,12 @@ public async IAsyncEnumerable<byte[]> ConvertInChunksAsync(
         for (int j = i; j < endPage; j++)
         {
             using var page = document.GetPage(j);
-            using var bitmap = RenderPage(page, 150);
-            using var image = SKImage.FromBitmap(bitmap);
-            using var data = image.Encode(SKEncodedImageFormat.Png, 100);
-            
-            yield return data.ToArray();
+            // Render and encode page as PNG
+            int width = (int)(page.Width / 72.0 * 150);
+            int height = (int)(page.Height / 72.0 * 150);
+            byte[] pixels = page.RenderToBytes(width, height);
+
+            yield return pixels;
         }
         
         await Task.Yield(); // Allow other work
@@ -506,10 +502,10 @@ For very large output, stream to disk instead of memory:
 
 ```csharp
 // ✅ Stream to files instead of holding all in memory
-document.SaveAsImages("output", "page", SKEncodedImageFormat.Png, 100, 300, 300);
+document.SaveAsImages("output", "page", ImageFormat.Png, 100, 300, 300);
 
 // Or stream one page at a time for minimal memory:
-foreach (var bytes in document.StreamImageBytes(SKEncodedImageFormat.Png, 100, 300))
+foreach (var bytes in document.StreamImageBytes(ImageFormat.Png, 100, 300))
 {
     // Process and discard — only one page in memory at a time
 }

@@ -320,19 +320,19 @@ using var document = new PdfDocument("document.pdf");
 document.SaveAsJpegs("output_folder", fileNamePrefix: "scan", quality: 85, dpi: 200);
 ```
 
-### Convert to WebP Format
+### Convert to a Specific Image Format
 
 ```csharp
 using PdfiumWrapper;
-using SkiaSharp;
 
 using var document = new PdfDocument("document.pdf");
 
+// Supported formats: ImageFormat.Png, ImageFormat.Jpeg, ImageFormat.Tiff
 document.SaveAsImages(
     outputDirectory: "output_folder",
     fileNamePrefix: "page",
-    format: SKEncodedImageFormat.Webp,
-    quality: 80,
+    format: ImageFormat.Png,
+    quality: 100,
     dpiWidth: 150,
     dpiHeight: 150
 );
@@ -345,13 +345,13 @@ using var document = new PdfDocument("document.pdf");
 
 // Stream pages one at a time — only one page's bytes in memory at any point
 int i = 0;
-foreach (var bytes in document.StreamImageBytes(SKEncodedImageFormat.Png, quality: 100, dpi: 150))
+foreach (var bytes in document.StreamImageBytes(ImageFormat.Png, quality: 100, dpi: 150))
 {
     File.WriteAllBytes($"page_{++i}.png", bytes);
 }
 
 // Async version
-await foreach (var bytes in document.StreamImageBytesAsync(SKEncodedImageFormat.Jpeg, quality: 85, dpi: 200))
+await foreach (var bytes in document.StreamImageBytesAsync(ImageFormat.Jpeg, quality: 85, dpi: 200))
 {
     await File.WriteAllBytesAsync($"page_{++i}.jpg", bytes);
 }
@@ -373,46 +373,37 @@ using var stream = new MemoryStream();
 document.SaveAsTiff(stream, dpi: 200);
 ```
 
-### Get SkiaSharp Bitmaps for Custom Processing
+### Get Raw Bitmaps for Custom Processing
 
 ```csharp
 using PdfiumWrapper;
-using SkiaSharp;
 
 using var document = new PdfDocument("document.pdf");
-SKBitmap[] bitmaps = document.ConvertToBitmaps(dpi: 300);
+RawBitmap[] bitmaps = document.RenderPages(dpi: 300);
 
-try
+foreach (var bitmap in bitmaps)
 {
-    foreach (var bitmap in bitmaps)
+    // Access raw pixel data (BGRA format)
+    byte[] pixels = bitmap.Pixels;
+    int width = bitmap.Width;
+    int height = bitmap.Height;
+    int stride = bitmap.Stride;
+
+    // Example: iterate over pixels
+    for (int y = 0; y < height; y++)
     {
-        // Apply custom image processing
-        using var surface = SKSurface.Create(new SKImageInfo(bitmap.Width, bitmap.Height));
-        var canvas = surface.Canvas;
-        
-        // Draw original
-        canvas.DrawBitmap(bitmap, 0, 0);
-        
-        // Add watermark
-        using var paint = new SKPaint
+        for (int x = 0; x < width; x++)
         {
-            Color = SKColors.Red.WithAlpha(128),
-            TextSize = 48,
-            IsAntialias = true
-        };
-        canvas.DrawText("CONFIDENTIAL", 50, 100, paint);
-        
-        // Save result
-        using var image = surface.Snapshot();
-        using var data = image.Encode(SKEncodedImageFormat.Png, 100);
-        // ... save or use data
+            int offset = y * stride + x * 4;
+            byte b = pixels[offset];
+            byte g = pixels[offset + 1];
+            byte r = pixels[offset + 2];
+            byte a = pixels[offset + 3];
+            // Apply custom processing...
+        }
     }
 }
-finally
-{
-    foreach (var bitmap in bitmaps)
-        bitmap.Dispose();
-}
+// No disposal needed — RawBitmap is a lightweight record
 ```
 
 ### Async Rendering for UI Applications
@@ -421,13 +412,13 @@ finally
 using var document = new PdfDocument("large_document.pdf");
 
 // Async version keeps UI responsive
-SKBitmap[] bitmaps = await document.ConvertToBitmapsAsync(dpi: 150);
+RawBitmap[] bitmaps = await document.RenderPagesAsync(dpi: 150);
 
 // Or save directly to files asynchronously
 await document.SaveAsImagesAsync(
     "output_folder",
     "page",
-    SKEncodedImageFormat.Png,
+    ImageFormat.Png,
     quality: 100,
     dpiWidth: 300,
     dpiHeight: 300
@@ -456,7 +447,7 @@ byte[] highResPixels = page.RenderToBytes(width, height);
 using var document = new PdfDocument("document.pdf");
 
 // Non-uniform DPI (rare use case)
-var bitmaps = document.ConvertToBitmaps(dpiWidth: 300, dpiHeight: 150);
+var bitmaps = document.RenderPages(dpiWidth: 300, dpiHeight: 150);
 ```
 
 ---
@@ -1068,7 +1059,7 @@ public static async Task BatchConvertPdfsToImages(string inputFolder, string out
             await document.SaveAsImagesAsync(
                 pdfOutputFolder,
                 "page",
-                SKEncodedImageFormat.Png,
+                ImageFormat.Png,
                 100,
                 dpi,
                 dpi
@@ -1110,7 +1101,7 @@ public class PdfProcessor
         
         // Generate thumbnail of first page
         result.ThumbnailBytes = document.StreamImageBytes(
-            SKEncodedImageFormat.Jpeg,
+            ImageFormat.Jpeg,
             quality: 75,
             dpi: 72
         ).FirstOrDefault();
@@ -1195,7 +1186,7 @@ public class PdfApiController : ControllerBase
         stream.Position = 0;
         
         using var document = new PdfDocument(stream);
-        var thumbnail = document.StreamImageBytes(SKEncodedImageFormat.Jpeg, 80, dpi).First();
+        var thumbnail = document.StreamImageBytes(ImageFormat.Jpeg, 80, dpi).First();
 
         return File(thumbnail, "image/jpeg");
     }

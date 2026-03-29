@@ -57,30 +57,6 @@ This guide covers common issues and their solutions when using PdfiumWrapper.
    apk add fontconfig freetype
    ```
 
-### SkiaSharp Issues
-
-**Symptom:** `TypeInitializationException` related to SkiaSharp
-
-**Solutions:**
-
-1. Ensure SkiaSharp native assets are present:
-   ```bash
-   dotnet restore
-   ```
-
-2. For Linux, install required dependencies:
-   ```bash
-   sudo apt-get install libfontconfig1-dev
-   ```
-
-3. For Alpine Linux (Docker):
-   ```dockerfile
-   RUN apk add --no-cache \
-       fontconfig \
-       freetype \
-       libstdc++
-   ```
-
 ---
 
 ## Loading PDF Documents
@@ -354,9 +330,9 @@ This guide covers common issues and their solutions when using PdfiumWrapper.
 3. **Don't hold all bitmaps in memory**
    ```csharp
    // ❌ Holds all bitmaps in memory
-   var bitmaps = document.ConvertToBitmaps(300);
-   
-   // ✅ Process and dispose one at a time
+   var bitmaps = document.RenderPages(300);
+
+   // ✅ Process one at a time
    for (int i = 0; i < document.PageCount; i++)
    {
        using var page = document.GetPage(i);
@@ -409,16 +385,20 @@ This guide covers common issues and their solutions when using PdfiumWrapper.
        page.Dispose();
    ```
 
-3. **Not disposing SKBitmap**
+3. **Holding all rendered pages in memory**
    ```csharp
-   // ❌ Memory leak
-   var bitmaps = document.ConvertToBitmaps(300);
-   // bitmaps never disposed
-   
-   // ✅ Dispose each bitmap
-   foreach (var bitmap in bitmaps)
-       bitmap.Dispose();
+   // ❌ High memory usage: all bitmaps in memory at once
+   var bitmaps = document.RenderPages(300);
+
+   // ✅ Process pages one at a time instead
+   for (int i = 0; i < document.PageCount; i++)
+   {
+       using var page = document.GetPage(i);
+       // Render and process single page
+   }
    ```
+
+   Note: `RawBitmap` is a lightweight record and does not need disposal.
 
 ---
 
@@ -522,14 +502,6 @@ sudo apt-get install fonts-liberation fonts-dejavu-core fontconfig
 fc-cache -f -v
 ```
 
-**Issue:** `libSkiaSharp.so` not found
-
-**Solution:**
-```bash
-# Ensure LD_LIBRARY_PATH includes the runtime directory
-export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/app/runtimes/linux-x64/native
-```
-
 ### macOS
 
 **Issue:** Library not signed (Gatekeeper)
@@ -555,7 +527,7 @@ xattr -d com.apple.quarantine /path/to/libpdfium.dylib
 FROM mcr.microsoft.com/dotnet/aspnet:8.0 AS base
 WORKDIR /app
 
-# Install dependencies for PDFium and SkiaSharp
+# Install dependencies for PDFium
 RUN apt-get update && apt-get install -y \
     libfontconfig1 \
     libfreetype6 \

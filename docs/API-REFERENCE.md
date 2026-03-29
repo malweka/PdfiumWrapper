@@ -220,48 +220,46 @@ if (form != null)
 
 **Returns:** `PdfForm` instance or `null`
 
-#### ConvertToBitmaps(int dpi = 300)
+#### RenderPages(int dpi = 300)
 
-Converts all pages to SkiaSharp bitmaps.
+Renders all pages to `RawBitmap` records containing raw pixel data.
 
 ```csharp
-SKBitmap[] bitmaps = document.ConvertToBitmaps(dpi: 150);
-try
+RawBitmap[] bitmaps = document.RenderPages(dpi: 150);
+
+// Process bitmaps — RawBitmap is a lightweight record, no disposal needed
+foreach (var bitmap in bitmaps)
 {
-    // Process bitmaps...
-}
-finally
-{
-    foreach (var bitmap in bitmaps)
-        bitmap.Dispose();
+    Console.WriteLine($"{bitmap.Width}x{bitmap.Height}, stride={bitmap.Stride}");
+    byte[] pixels = bitmap.Pixels; // Raw BGRA pixel data
 }
 ```
 
 **Parameters:**
 - `dpi` — Resolution in dots per inch (default: 300)
 
-**Returns:** Array of `SKBitmap` instances (must be disposed)
+**Returns:** Array of `RawBitmap` records (with `Pixels`, `Width`, `Height`, `Stride` properties). Not disposable.
 
-#### ConvertToBitmaps(int dpiWidth, int dpiHeight)
+#### RenderPages(int dpiWidth, int dpiHeight)
 
-Converts all pages to bitmaps with different horizontal and vertical DPI.
+Renders all pages to bitmaps with different horizontal and vertical DPI.
 
-#### ConvertToBitmapsAsync(int dpi = 300)
+#### RenderPagesAsync(int dpi = 300)
 
 Async version that yields between pages for UI responsiveness.
 
 ```csharp
-SKBitmap[] bitmaps = await document.ConvertToBitmapsAsync(dpi: 300);
+RawBitmap[] bitmaps = await document.RenderPagesAsync(dpi: 300);
 ```
 
 **Note:** This method processes pages sequentially and uses `Task.Yield()` for responsiveness, not parallelism.
 
-#### StreamImageBytes(SKEncodedImageFormat format, int quality = 100, int dpi = 300)
+#### StreamImageBytes(ImageFormat format, int quality = 100, int dpi = 300)
 
 Streams encoded image bytes one page at a time. Only one page's data is in memory at any point.
 
 ```csharp
-foreach (var bytes in document.StreamImageBytes(SKEncodedImageFormat.Png, quality: 100, dpi: 300))
+foreach (var bytes in document.StreamImageBytes(ImageFormat.Png, quality: 100, dpi: 300))
 {
     File.WriteAllBytes($"page.png", bytes);
     // Previous page's bytes are eligible for GC
@@ -269,18 +267,18 @@ foreach (var bytes in document.StreamImageBytes(SKEncodedImageFormat.Png, qualit
 ```
 
 **Parameters:**
-- `format` — Image format (Png, Jpeg, Webp, Gif, Bmp, Ico)
+- `format` — Image format (`ImageFormat.Png`, `ImageFormat.Jpeg`, `ImageFormat.Tiff`)
 - `quality` — Quality for lossy formats (1-100)
 - `dpi` — Resolution
 
 **Returns:** `IEnumerable<byte[]>` — one byte array per page
 
-#### StreamImageBytesAsync(SKEncodedImageFormat format, int quality = 100, int dpi = 300)
+#### StreamImageBytesAsync(ImageFormat format, int quality = 100, int dpi = 300)
 
 Async streaming version. Uses `Task.Yield()` between pages for UI responsiveness.
 
 ```csharp
-await foreach (var bytes in document.StreamImageBytesAsync(SKEncodedImageFormat.Jpeg, 85, 200))
+await foreach (var bytes in document.StreamImageBytesAsync(ImageFormat.Jpeg, 85, 200))
 {
     await File.WriteAllBytesAsync($"page.jpg", bytes);
 }
@@ -290,7 +288,7 @@ await foreach (var bytes in document.StreamImageBytesAsync(SKEncodedImageFormat.
 
 #### SaveAsTiff(string outputPath, int dpi = 200, TiffColorMode colorMode = TiffColorMode.Bilevel, byte threshold = 128)
 
-Saves all pages as a single multi-page TIFF file using a direct PDFium-to-libtiff pipeline (no intermediate SkiaSharp encoding).
+Saves all pages as a single multi-page TIFF file using a direct PDFium-to-libtiff pipeline.
 
 ```csharp
 // Bilevel (1-bit CCITT G4) — ideal for scanned documents
@@ -344,19 +342,21 @@ Saves all pages as JPEG files.
 document.SaveAsJpegs("output", fileNamePrefix: "page", quality: 85, dpi: 200);
 ```
 
-#### SaveAsImages(string outputDirectory, string fileNamePrefix, SKEncodedImageFormat format, int quality, int dpiWidth, int dpiHeight)
+#### SaveAsImages(string outputDirectory, string fileNamePrefix, ImageFormat format, int quality, int dpiWidth, int dpiHeight)
 
 Saves all pages in the specified image format.
 
 ```csharp
-document.SaveAsImages("output", "page", SKEncodedImageFormat.Webp, quality: 80, dpiWidth: 300, dpiHeight: 300);
+document.SaveAsImages("output", "page", ImageFormat.Png, quality: 100, dpiWidth: 300, dpiHeight: 300);
 ```
+
+**Note:** Supported formats are `ImageFormat.Png`, `ImageFormat.Jpeg`, and `ImageFormat.Tiff`.
 
 #### SaveAsImagesAsync(...)
 
 Async version of `SaveAsImages`.
 
-#### SaveAsImages(Stream[] outputStreams, SKEncodedImageFormat format, int quality, int dpiWidth, int dpiHeight)
+#### SaveAsImages(Stream[] outputStreams, ImageFormat format, int quality, int dpiWidth, int dpiHeight)
 
 Saves pages to provided streams.
 
@@ -365,7 +365,7 @@ var streams = new Stream[document.PageCount];
 for (int i = 0; i < streams.Length; i++)
     streams[i] = new MemoryStream();
 
-document.SaveAsImages(streams, SKEncodedImageFormat.Png, 100, 300, 300);
+document.SaveAsImages(streams, ImageFormat.Png, 100, 300, 300);
 ```
 
 #### Save(string filePath, uint flags = 0)
@@ -643,12 +643,9 @@ var image = page.AddImage(imageBytes, x: 100, y: 500, width: 200, height: 150);
 
 #### Supported Formats
 
-Images are decoded using SkiaSharp:
+Images are decoded using native libraries (libjpeg-turbo and libpng):
 - PNG
 - JPEG
-- WebP
-- GIF
-- BMP
 
 ---
 

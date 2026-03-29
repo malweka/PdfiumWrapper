@@ -63,7 +63,7 @@ foreach (var filePath in pdfFiles)
 
 ### Converting to TIFF (Built-in)
 
-PdfiumWrapper includes native multi-page TIFF support via libtiff, with a zero-copy pipeline from PDFium's rendered bitmap directly to libtiff — no intermediate SkiaSharp encoding:
+PdfiumWrapper includes native multi-page TIFF support via libtiff, with a zero-copy pipeline from PDFium's rendered bitmap directly to libtiff:
 
 ```csharp
 public void ConvertPdfToTiff(string pdfPath, string outputPath, int dpi = 200)
@@ -116,7 +116,7 @@ public void ConvertPdfToImages(string pdfPath, string outputDirectory, int dpi =
 Use `StreamImageBytes` / `StreamImageBytesAsync` to process one page at a time without holding all pages in memory:
 
 ```csharp
-public void ProcessPdfPageImages(string pdfPath, SKEncodedImageFormat format, int dpi = 300)
+public void ProcessPdfPageImages(string pdfPath, ImageFormat format, int dpi = 300)
 {
     using var doc = new PdfDocument(pdfPath);
     int i = 0;
@@ -128,7 +128,7 @@ public void ProcessPdfPageImages(string pdfPath, SKEncodedImageFormat format, in
 }
 
 // Async version — yields between pages for UI responsiveness
-public async Task ProcessPdfPageImagesAsync(string pdfPath, SKEncodedImageFormat format, int dpi = 300)
+public async Task ProcessPdfPageImagesAsync(string pdfPath, ImageFormat format, int dpi = 300)
 {
     using var doc = new PdfDocument(pdfPath);
     int i = 0;
@@ -476,24 +476,13 @@ public async Task ProcessWithMemoryMonitoringAsync(string[] pdfPaths)
     {
         using var doc = new PdfDocument(path);
         
-        // Use ProcessAllPages for safe page handling
-        var images = doc.ConvertToBitmaps(dpi: 150);
-        
-        try
+        // Render all pages to raw pixel buffers
+        var bitmaps = doc.RenderPages(dpi: 150);
+
+        // Process each raw bitmap (RawBitmap is a lightweight record, no disposal needed)
+        for (int i = 0; i < bitmaps.Length; i++)
         {
-            // Save images...
-            for (int i = 0; i < images.Length; i++)
-            {
-                // Process each bitmap...
-            }
-        }
-        finally
-        {
-            // Always dispose bitmaps
-            foreach (var bitmap in images)
-            {
-                bitmap.Dispose();
-            }
+            // Process each bitmap — bitmaps[i].Pixels, .Width, .Height, .Stride
         }
         
         processed++;
@@ -518,9 +507,9 @@ public class PdfToImageConverter
 {
     private readonly string _outputDirectory;
     private readonly int _dpi;
-    private readonly SKEncodedImageFormat _format;
-    
-    public PdfToImageConverter(string outputDirectory, int dpi = 300, SKEncodedImageFormat format = SKEncodedImageFormat.Png)
+    private readonly ImageFormat _format;
+
+    public PdfToImageConverter(string outputDirectory, int dpi = 300, ImageFormat format = ImageFormat.Png)
     {
         _outputDirectory = outputDirectory;
         _dpi = dpi;
