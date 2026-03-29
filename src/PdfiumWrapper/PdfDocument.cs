@@ -1274,7 +1274,7 @@ public class PdfDocument : IDisposable
     {
         ThrowIfDisposed();
 
-        using var fileStream = new FileStream(filePath, FileMode.Create, FileAccess.Write);
+        using var fileStream = PdfHelpers.OpenWriteFileStream(filePath);
         SaveToStream(fileStream, flags);
     }
 
@@ -1288,7 +1288,7 @@ public class PdfDocument : IDisposable
         ThrowIfDisposed();
         ArgumentNullException.ThrowIfNull(stream);
 
-        using var writer = new StreamFileWriter(stream);
+        using var writer = new PdfStreamFileWriter(stream);
         var fileWrite = writer.GetFileWriteStruct();
 
         bool success = PDFium.FPDF_SaveAsCopy(Document, ref fileWrite, flags);
@@ -1297,71 +1297,6 @@ public class PdfDocument : IDisposable
         {
             var error = PDFium.FPDF_GetLastError();
             throw new InvalidOperationException($"Failed to save PDF document. PDFium error code: {error}");
-        }
-    }
-
-    // Delegate for the WriteBlock callback
-    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
-    private delegate int WriteBlockDelegate(IntPtr pThis, IntPtr data, uint size);
-
-    /// <summary>
-    /// Helper class to write PDF data to a stream.
-    /// Keeps the callback delegate alive for the duration of the save operation and
-    /// writes directly from the unmanaged PDFium buffer to avoid per-callback allocations.
-    /// </summary>
-    private sealed class StreamFileWriter : IDisposable
-    {
-        private readonly Stream _stream;
-        private readonly WriteBlockDelegate _writeDelegate;
-        private GCHandle _delegateHandle;
-        private bool _disposed;
-
-        public StreamFileWriter(Stream stream)
-        {
-            _stream = stream ?? throw new ArgumentNullException(nameof(stream));
-            _writeDelegate = WriteBlock;
-            _delegateHandle = GCHandle.Alloc(_writeDelegate);
-        }
-
-        public PDFium.FPDF_FILEWRITE GetFileWriteStruct()
-        {
-            return new PDFium.FPDF_FILEWRITE
-            {
-                version = 1,
-                WriteBlock = Marshal.GetFunctionPointerForDelegate(_writeDelegate)
-            };
-        }
-
-        private int WriteBlock(IntPtr pThis, IntPtr pData, uint size)
-        {
-            try
-            {
-                int bytesToWrite = checked((int)size);
-                unsafe
-                {
-                    var span = new ReadOnlySpan<byte>(pData.ToPointer(), bytesToWrite);
-                    _stream.Write(span);
-                }
-
-                return 1;
-            }
-            catch
-            {
-                return 0;
-            }
-        }
-
-        public void Dispose()
-        {
-            if (!_disposed)
-            {
-                if (_delegateHandle.IsAllocated)
-                {
-                    _delegateHandle.Free();
-                }
-
-                _disposed = true;
-            }
         }
     }
 

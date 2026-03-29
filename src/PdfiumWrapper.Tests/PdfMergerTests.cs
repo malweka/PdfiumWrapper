@@ -33,6 +33,13 @@ public class PdfMergerTests : IDisposable
         return (byte[]?)field.GetValue(merger);
     }
 
+    private static object? GetStreamDocumentLoader(PdfMerger merger)
+    {
+        var field = typeof(PdfMerger).GetField("_streamDocumentLoader", BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(field);
+        return field.GetValue(merger);
+    }
+
     public void Dispose()
     {
         // Clean up any temp files created during tests
@@ -149,6 +156,44 @@ public class PdfMergerTests : IDisposable
     }
 
     [Fact]
+    public void Constructor_WithSeekableFileStream_ShouldUseCustomLoader()
+    {
+        // Arrange
+        var tempPath = GetUniqueTestFilePath("constructor_stream_file");
+        File.WriteAllBytes(tempPath, Doc1PageBytes);
+        using var stream = File.OpenRead(tempPath);
+
+        // Act
+        using var merger = new PdfMerger(stream);
+
+        // Assert
+        Assert.Equal(1, merger.PageCount);
+        Assert.Null(GetDocumentBytes(merger));
+        Assert.False(GetDocumentBytesHandle(merger).IsAllocated);
+        Assert.NotNull(GetStreamDocumentLoader(merger));
+    }
+
+    [Fact]
+    public void Constructor_WithSeekableFileStream_ShouldRemainUsableAfterGc()
+    {
+        // Arrange
+        var tempPath = GetUniqueTestFilePath("constructor_stream_gc");
+        File.WriteAllBytes(tempPath, Doc1PageBytes);
+        using var stream = File.OpenRead(tempPath);
+        using var merger = new PdfMerger(stream);
+
+        // Act
+        GC.Collect();
+        GC.WaitForPendingFinalizers();
+        GC.Collect();
+
+        // Assert
+        Assert.Equal(1, merger.PageCount);
+        var bytes = merger.ToBytes();
+        Assert.True(bytes.Length > 0);
+    }
+
+    [Fact]
     public void Constructor_WithStream_ShouldRemainUsableAfterSourceStreamDisposed()
     {
         // Arrange
@@ -192,6 +237,23 @@ public class PdfMergerTests : IDisposable
         // Assert
         Assert.Same(segment.Array, GetDocumentBytes(merger));
         Assert.True(GetDocumentBytesHandle(merger).IsAllocated);
+    }
+
+    [Fact]
+    public void Constructor_WithNonSeekableStream_ShouldFallBackToPinnedBytes()
+    {
+        // Arrange
+        using var innerStream = new MemoryStream((byte[])Doc1PageBytes.Clone());
+        using var stream = new NonSeekableReadOnlyStream(innerStream);
+
+        // Act
+        using var merger = new PdfMerger(stream);
+
+        // Assert
+        Assert.Equal(1, merger.PageCount);
+        Assert.NotNull(GetDocumentBytes(merger));
+        Assert.True(GetDocumentBytesHandle(merger).IsAllocated);
+        Assert.Null(GetStreamDocumentLoader(merger));
     }
 
     [Fact]
@@ -1042,4 +1104,47 @@ public class PdfMergerTests : IDisposable
     }
 
     #endregion
+}
+
+internal sealed class NonSeekableReadOnlyStream : Stream
+{
+    private readonly Stream _inner;
+
+    public NonSeekableReadOnlyStream(Stream inner)
+    {
+        _inner = inner;
+    }
+
+    public override bool CanRead => _inner.CanRead;
+    public override bool CanSeek => false;
+    public override bool CanWrite => false;
+    public override long Length => throw new NotSupportedException();
+
+    public override long Position
+    {
+        get => throw new NotSupportedException();
+        set => throw new NotSupportedException();
+    }
+
+    public override void Flush() => _inner.Flush();
+
+    public override int Read(byte[] buffer, int offset, int count) => _inner.Read(buffer, offset, count);
+
+    public override int Read(Span<byte> buffer) => _inner.Read(buffer);
+
+    public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+
+    public override void SetLength(long value) => throw new NotSupportedException();
+
+    public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing)
+        {
+            _inner.Dispose();
+        }
+
+        base.Dispose(disposing);
+    }
 }

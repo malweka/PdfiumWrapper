@@ -15,6 +15,7 @@ public class PdfMerger : IDisposable
     private volatile bool _disposed;
     private byte[]? _documentBytes;
     private GCHandle _documentBytesHandle;
+    private StreamDocumentLoader? _streamDocumentLoader;
 
     /// <summary>
     /// Create a new empty PDF document for merging
@@ -50,7 +51,10 @@ public class PdfMerger : IDisposable
     }
 
     /// <summary>
-    /// Start with an existing PDF document from stream
+    /// Start with an existing PDF document from stream.
+    /// Seekable streams that do not expose a backing buffer are loaded through
+    /// PDFium's custom-loader callback path, so the stream must remain valid
+    /// for the lifetime of the merger.
     /// </summary>
     public PdfMerger(Stream pdfStream, string? password = null)
     {
@@ -68,6 +72,15 @@ public class PdfMerger : IDisposable
 
             // Match the previous CopyTo() behavior by consuming the stream.
             memoryStream.Position = memoryStream.Length;
+            return;
+        }
+
+        if (pdfStream.CanRead && pdfStream.CanSeek)
+        {
+            LoadCustomStreamDocument(pdfStream, password);
+
+            // Match the previous CopyTo() behavior by consuming the stream.
+            pdfStream.Position = pdfStream.Length;
             return;
         }
 
@@ -114,6 +127,28 @@ public class PdfMerger : IDisposable
         }
 
         _documentBytes = null;
+    }
+
+    private void LoadCustomStreamDocument(Stream stream, string? password)
+    {
+        _streamDocumentLoader = new StreamDocumentLoader(stream);
+
+        try
+        {
+            var fileAccess = _streamDocumentLoader.GetFileAccessStruct();
+            _document = PDFium.FPDF_LoadCustomDocument(ref fileAccess, password);
+            if (_document == IntPtr.Zero)
+            {
+                throw new InvalidOperationException(
+                    $"Failed to load PDF document from stream. Error: {PDFium.FPDF_GetLastError()}");
+            }
+        }
+        catch
+        {
+            _streamDocumentLoader.Dispose();
+            _streamDocumentLoader = null;
+            throw;
+        }
     }
 
     /// <summary>
@@ -315,7 +350,7 @@ public class PdfMerger : IDisposable
     public void Save(string outputPath, uint flags = 0)
     {
         ThrowIfDisposed();
-        using var fileStream = new FileStream(outputPath, FileMode.Create, FileAccess.Write);
+        using var fileStream = PdfHelpers.OpenWriteFileStream(outputPath);
         Save(fileStream, flags);
     }
 
@@ -328,7 +363,7 @@ public class PdfMerger : IDisposable
         if (outputStream == null)
             throw new ArgumentNullException(nameof(outputStream));
 
-        using var writer = new StreamFileWriter(outputStream);
+        using var writer = new PdfStreamFileWriter(outputStream);
         var fileWrite = writer.GetFileWriteStruct();
 
         bool success = PDFium.FPDF_SaveAsCopy(_document, ref fileWrite, flags);
@@ -410,6 +445,8 @@ public class PdfMerger : IDisposable
             }
 
             ReleasePinnedMemoryDocument();
+            _streamDocumentLoader?.Dispose();
+            _streamDocumentLoader = null;
         }
     }
 
@@ -421,65 +458,4 @@ public class PdfMerger : IDisposable
         Dispose(false);
     }
 
-    /// <summary>
-    /// Helper class to write PDF data to a stream.
-    /// Implements IDisposable for deterministic cleanup of GCHandle in high-throughput scenarios.
-    /// </summary>
-    private sealed class StreamFileWriter : IDisposable
-    {
-        private readonly Stream _stream;
-        private readonly WriteBlockDelegate _writeDelegate;
-        private GCHandle _delegateHandle;
-        private bool _disposed;
-
-        [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
-        private delegate int WriteBlockDelegate(IntPtr pThis, IntPtr pData, ulong size);
-
-        public StreamFileWriter(Stream stream)
-        {
-            _stream = stream ?? throw new ArgumentNullException(nameof(stream));
-            _writeDelegate = WriteBlock;
-            _delegateHandle = GCHandle.Alloc(_writeDelegate);
-        }
-
-        public PDFium.FPDF_FILEWRITE GetFileWriteStruct()
-        {
-            return new PDFium.FPDF_FILEWRITE
-            {
-                version = 1,
-                WriteBlock = Marshal.GetFunctionPointerForDelegate(_writeDelegate)
-            };
-        }
-
-        private int WriteBlock(IntPtr pThis, IntPtr pData, ulong size)
-        {
-            try
-            {
-                int bytesToWrite = checked((int)size);
-                unsafe
-                {
-                    var span = new ReadOnlySpan<byte>(pData.ToPointer(), bytesToWrite);
-                    _stream.Write(span);
-                }
-
-                return 1; // Success
-            }
-            catch
-            {
-                return 0; // Failure
-            }
-        }
-
-        public void Dispose()
-        {
-            if (!_disposed)
-            {
-                if (_delegateHandle.IsAllocated)
-                {
-                    _delegateHandle.Free();
-                }
-                _disposed = true;
-            }
-        }
-    }
 }

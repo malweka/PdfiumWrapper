@@ -1,383 +1,277 @@
-# PdfiumWrapper Lifetime And Memory Plan
+# PdfMerger Performance Plan
 
-This plan covers the first five issues from the `PdfDocument` and `PdfPage` review:
+This plan focuses on improving `PdfMerger` performance without changing the benchmark shape in `src/PdfiumWrapper.Benchmarks/PdfMergeBenchmark.cs`.
 
-1. Memory-backed document ownership
-2. `PdfDocument` / `PdfPage` lifetime coordination
-3. Consistent disposed-state enforcement
-4. Save callback allocation churn
-5. Repeated unmanaged allocation churn in text and metadata paths
+The current merge benchmark measures the full end-to-end path:
+
+1. Load the first source PDF into `PdfMerger`
+2. Load the second source PDF into `PdfDocument`
+3. Import all pages from the second document
+4. Save the merged result to disk
+
+That means the fastest path is not just "make `FPDF_ImportPages()` faster". We need to reduce overhead around document loading, page import orchestration, and final save, while preserving current API behavior.
 
 ## Goals
 
-- Make native ownership explicit and deterministic.
-- Prevent use-after-free when documents are loaded from memory.
-- Reduce allocation pressure in high-throughput workloads.
-- Keep the public API predictable for callers using `using` and per-page processing loops.
+- Improve end-to-end merge throughput in the existing benchmark.
+- Avoid API churn unless there is a clear performance benefit.
+- Keep correctness and ownership rules explicit.
+- Prefer changes that help real workloads, not only synthetic cases.
 
-## Phase 1: Fix Memory-Backed Document Ownership
+## Non-Goals
+
+- Do not modify the benchmark structure or split it into separate measurements.
+- Do not add speculative low-level changes unless profiling points to them.
+- Do not parallelize PDFium calls inside a single merge operation.
+
+## Current Observations
+
+### 1. The benchmark includes open + import + save
+
+`PdfMergeBenchmark.MergeTwoDocuments()` currently does:
+
+- `new PdfMerger(GetDocPath())`
+- `new PdfDocument(GetDocPath())`
+- `merger.AppendDocument(second)`
+- `merger.Save(outputPath)`
+
+So any meaningful optimization has to consider:
+
+- source document construction cost
+- destination document construction cost
+- `FPDF_ImportPages()` / `FPDF_ImportPagesByIndex()` cost
+- `FPDF_SaveAsCopy()` cost
+
+### 2. Append path is already thin
+
+`AppendDocument(PdfDocument)` delegates directly to `AppendPages(sourceDoc, null)`, and that goes straight to `FPDF_ImportPages()`.
+
+There is very little managed overhead here today. This suggests the biggest wins are more likely to come from:
+
+- avoiding unnecessary document copies or allocations around load
+- removing avoidable work in save
+- avoiding patterns that force more PDFium work than necessary
+
+### 3. Stream construction still copies non-memory streams
+
+`PdfMerger(Stream)` currently falls back to:
+
+- `ReadStreamToBytes()`
+- pin managed array
+- `FPDF_LoadMemDocument()`
+
+That is simple and safe, but expensive for large stream-based inputs.
+
+### 4. Save path is already on the span-based callback pattern
+
+`PdfMerger.Save(Stream)` already writes from the unmanaged buffer directly into the target stream through `ReadOnlySpan<byte>`.
+
+That means the old per-callback managed buffer allocation issue is likely not the main merge bottleneck anymore.
+
+## Phase 1: Measure The Merge Path Internally
 
 ### Problem
 
-`FPDF_LoadMemDocument()` requires the backing buffer to remain valid for the full lifetime of the PDF document. The current implementation pins the array only during the load call, then frees the pin immediately.
-
-This is the highest-priority correctness issue because it can cause invalid memory access after construction.
+The benchmark tells us the total time, but not which internal stage dominates for each document.
 
 ### Proposed Changes
 
-#### 1. Keep the backing buffer alive for the entire `PdfDocument` lifetime
+Add lightweight internal timing during local development only while implementing the optimization work:
 
-Update `PdfDocument` to store:
+- time `PdfMerger(string filePath, ...)`
+- time `PdfDocument(string filePath, ...)`
+- time `AppendDocument(PdfDocument)`
+- time `Save(string)` / `Save(Stream)`
 
-- A managed `byte[]? _documentBytes`
-- A `GCHandle _documentBytesHandle`
-- A flag indicating whether the document was loaded from memory
+This should not become public API and should not change benchmark code. The goal is only to guide implementation decisions while working.
 
-Construction flow:
+### Reasoning
 
-- `PdfDocument(byte[] data, string? password = null)`
-  - store `data` in `_documentBytes`
-  - pin once into `_documentBytesHandle`
-  - call `FPDF_LoadMemDocument()`
-  - free the handle only in `Dispose(bool)`
+Without this, we risk spending time on managed wrapper code that is not on the critical path.
 
-Dispose flow:
+### Deliverable
 
-- `FPDF_CloseDocument(Document)` first
-- then free `_documentBytesHandle`
-- then clear `_documentBytes`
+- short before/after notes captured during implementation
+- no permanent benchmark changes required
 
-Reasoning:
+## Phase 2: Add A Custom-Loader Path For `PdfMerger(Stream)`
 
-- This matches PDFium’s ownership contract.
-- It avoids any transient pinned-object bug.
-- It does not change the public API.
+### Problem
 
-#### 2. Stop forcing stream input through a temporary full-copy path by default
+`PdfMerger(Stream)` currently copies the entire remaining stream into managed memory unless the stream is a buffer-exposing `MemoryStream`.
 
-Current flow:
+That adds:
 
-- `Stream -> byte[] -> FPDF_LoadMemDocument`
+- one full managed allocation
+- one full copy
+- a pinned array for the merger lifetime
 
-Preferred flow:
+### Proposed Changes
 
-- Add a custom-loader path using `FPDF_LoadCustomDocument`
-- Keep the source stream alive for the `PdfDocument` lifetime
-- Require a readable, seekable stream for this constructor
+Implement a stream-backed load path for `PdfMerger`, mirroring the ownership model planned for `PdfDocument`:
 
-Implementation shape:
+- add a private loader object owned by `PdfMerger`
+- use `FPDF_LoadCustomDocument`
+- hold the source stream and callback state for the full lifetime of the merger
+- require a readable, seekable stream
+- keep the current memory-backed path as fallback when necessary
 
-- Add a private loader object owned by `PdfDocument`
-- Store:
-  - the source `Stream`
-  - `FPDF_FILEACCESS`
-  - pinned callback delegate / GCHandle
-- Use `m_GetBlock` to read requested ranges from the stream
+### Reasoning
 
-Fallback:
+This will not change the current file-path benchmark directly, but it improves merge throughput for real stream-based callers and removes a known whole-file copy.
 
-- If you want to keep constructor behavior permissive, add:
-  - `PdfDocument(Stream pdfStream, string? password = null, bool copyToMemory = false)`
-- When `copyToMemory` is `true`, use the pinned-byte-array path.
-- When `false`, prefer `FPDF_LoadCustomDocument`.
-
-Reasoning:
-
-- This removes an unconditional whole-file allocation for stream callers.
-- It is the right model for high-throughput services processing large PDFs.
-- It makes ownership explicit: the `PdfDocument` owns the stream loader until disposal.
+It also gives `PdfMerger` and `PdfDocument` the same ownership model, which reduces maintenance complexity.
 
 ### Files
 
-- `/Users/hamsman/Dev/PdfiumWrapper/src/PdfiumWrapper/PdfDocument.cs`
+- `/Users/hamsman/Dev/PdfiumWrapper/src/PdfiumWrapper/PdfMerger.cs`
 - `/Users/hamsman/Dev/PdfiumWrapper/src/PdfiumWrapper/PDFium.cs`
 - `/Users/hamsman/Dev/PdfiumWrapper/src/PdfiumWrapper/PdfHelpers.cs`
 
 ### Tests
 
-- Load from `byte[]`, force GC, then access page count and render a page.
-- Load from stream, force GC, then extract text and save.
-- Repeat in a loop to catch handle leaks.
+- load merger from stream, force GC, append pages, save successfully
+- repeated stream-backed merge loop to catch handle leaks
 
-## Phase 2: Coordinate `PdfDocument` And `PdfPage` Lifetimes
+## Phase 3: Remove Small Managed Overheads In Hot Merge Paths
 
 ### Problem
 
-`PdfPage` currently wraps a raw page handle with no ownership tie back to `PdfDocument`. If the document is disposed while pages are still alive, page disposal or later page access can touch invalid native state.
+The managed wrapper around page import is already thin, but there are still a few things to verify and tighten:
+
+- repeated `PageCount` calls when appending to the end
+- avoidable validation or indirection on common append paths
+- duplicated save-writer implementation between `PdfDocument` and `PdfMerger`
 
 ### Proposed Changes
 
-#### 1. Track active pages inside `PdfDocument`
+#### 1. Avoid redundant destination `PageCount` lookups
 
-Add to `PdfDocument`:
+For append operations, compute the insertion index once per call and pass it through.
 
-- `int _activePageCount`
-- `object _lifetimeLock`
+This is a small win, but it is cheap and safe.
 
-On `GetPage()`:
+#### 2. Consolidate save writer implementation
 
-- call `ThrowIfDisposed()`
-- increment `_activePageCount`
-- create `PdfPage` with an owner callback or owner reference
+`PdfMerger` and `PdfDocument` both maintain a private `StreamFileWriter`.
 
-On page disposal:
+Move to one shared internal implementation so:
 
-- decrement `_activePageCount` exactly once
+- save-path behavior stays identical
+- performance fixes land once
+- allocation behavior stays aligned between document save and merger save
 
-#### 2. Decide the disposal policy explicitly
+#### 3. Review `string` page range import usage
 
-Recommended policy:
+For "append whole document" and "append explicit indices", keep using the least expensive import shape:
 
-- `PdfDocument.Dispose()` should throw `InvalidOperationException` if pages are still open
+- `FPDF_ImportPages(..., null, ...)` for all pages
+- `FPDF_ImportPagesByIndex(...)` for selected pages
 
-Reasoning:
+Avoid any conversions that build page-range strings for index-based paths.
 
-- Failing fast is safer than silently closing the document underneath active pages.
-- In a throughput service, this makes leak bugs obvious in testing instead of becoming intermittent native crashes.
+### Reasoning
 
-Alternative policy:
-
-- Permit document disposal and make pages no-op once owner is disposed.
-
-I do not recommend this because it hides lifetime bugs and still leaves native ownership ambiguous.
-
-#### 3. Make `PdfPage` owner-aware
-
-Change `PdfPage` constructor to receive:
-
-- the owning `PdfDocument`
-- the page handle
-- a release callback or a direct owner reference
-
-`PdfPage.Dispose()` should:
-
-- close the page handle once
-- notify the owner that the page is released
-
-`PdfPage` public methods should:
-
-- call a `ThrowIfDisposed()`
-- optionally ask the owner to verify the document is still valid
+These are modest improvements, but they are low-risk and directly on the merge path.
 
 ### Files
 
+- `/Users/hamsman/Dev/PdfiumWrapper/src/PdfiumWrapper/PdfMerger.cs`
 - `/Users/hamsman/Dev/PdfiumWrapper/src/PdfiumWrapper/PdfDocument.cs`
-- `/Users/hamsman/Dev/PdfiumWrapper/src/PdfiumWrapper/PdfPage.cs`
+- `/Users/hamsman/Dev/PdfiumWrapper/src/PdfiumWrapper/PdfHelpers.cs`
 
 ### Tests
 
-- Opening multiple pages increments tracking and disposing them decrements it.
-- Disposing a document with an undisposed page throws.
-- After page disposal, document disposal succeeds.
-- Finalizer and duplicate-dispose paths do not double-decrement.
+- append full document preserves page count and ordering
+- append selected pages by index preserves page order
+- save to file and save to stream produce valid output
 
-## Phase 3: Enforce Disposed State Consistently
-
-### Problem
-
-Some methods check `_disposed`; many do not. That makes failure modes inconsistent and can push bugs into native code instead of failing at the managed boundary.
-
-### Proposed Changes
-
-#### 1. Add `ThrowIfDisposed()` helpers
-
-Add a private helper to `PdfDocument`:
-
-- `private void ThrowIfDisposed() => ObjectDisposedException.ThrowIf(_disposed, this);`
-
-Add a similar helper to `PdfPage`.
-
-#### 2. Call it from every public and internal entry point
-
-`PdfDocument`:
-
-- all properties that hit PDFium
-- `GetPage()`
-- page enumeration / rendering methods
-- save methods
-- metadata / bookmarks / attachments accessors
-
-`PdfPage`:
-
-- `Width`, `Height`
-- render helpers
-- text extraction
-- thumbnail methods
-- editing methods
-- object-count and object lookup methods
-
-#### 3. Normalize argument and state validation order
-
-Recommended order:
-
-1. disposed check
-2. argument validation
-3. native call
-
-This keeps failure modes consistent across the API surface.
-
-### Files
-
-- `/Users/hamsman/Dev/PdfiumWrapper/src/PdfiumWrapper/PdfDocument.cs`
-- `/Users/hamsman/Dev/PdfiumWrapper/src/PdfiumWrapper/PdfPage.cs`
-
-### Tests
-
-- Access every major method after disposal and assert `ObjectDisposedException`.
-- Verify page methods throw after page disposal.
-
-## Phase 4: Remove Per-Callback Save Allocations
+## Phase 4: Improve File-Path Construction Cost If Profiling Shows It Matters
 
 ### Problem
 
-`SaveToStream()` currently allocates a new managed `byte[]` on every PDFium `WriteBlock` callback, copies into it, then writes it to the target stream.
-
-This adds GC pressure during large saves and batch export.
+The benchmark uses file-path constructors for both source documents. If internal timing shows open cost is a significant part of the total merge time, improving construction may help the benchmark more than import-path work.
 
 ### Proposed Changes
 
-#### 1. Introduce a reusable callback state object
+If the numbers justify it:
 
-Create a private nested class in `PdfDocument`, for example:
+- review whether file-path constructors can share more code with optimized load helpers
+- ensure there is no avoidable extra work during `PdfMerger(string)` and `PdfDocument(string)`
+- verify that file-backed load is not doing any unnecessary managed setup compared to memory-backed load
 
-- `StreamWriteContext`
+### Reasoning
 
-State:
-
-- target `Stream`
-- optional rented buffer from `ArrayPool<byte>`
-
-#### 2. Prefer direct unmanaged-span writes on .NET 8
-
-Inside the callback:
-
-- create `ReadOnlySpan<byte>` over `dataPtr` and `size`
-- write directly to the stream
-
-Example direction:
-
-- `var span = new ReadOnlySpan<byte>(dataPtr.ToPointer(), checked((int)size));`
-- `targetStream.Write(span);`
-
-This removes the intermediate allocation entirely.
-
-If you prefer not to use unsafe code in the callback:
-
-- rent from `ArrayPool<byte>.Shared`
-- reuse one buffer across callbacks
-- grow only when the callback size exceeds capacity
-
-#### 3. Preserve delegate lifetime handling
-
-Keep the existing logic that pins:
-
-- the stream/context handle
-- the callback delegate
-
-But move the state into a dedicated context object so ownership is cleaner.
+This phase should only happen if measurement shows construction is materially contributing to total runtime.
 
 ### Files
 
+- `/Users/hamsman/Dev/PdfiumWrapper/src/PdfiumWrapper/PdfMerger.cs`
 - `/Users/hamsman/Dev/PdfiumWrapper/src/PdfiumWrapper/PdfDocument.cs`
 
 ### Tests
 
-- Save to `MemoryStream` and file stream.
-- Save repeatedly in a loop to ensure no callback lifetime issues.
-- If you add allocation-focused benchmarks, compare before/after allocation counts.
+- file-backed merge correctness on all benchmark documents
+- repeated open/append/save loop to catch leaks or lifetime regressions
 
-## Phase 5: Reduce Allocation Churn In Text And Metadata Paths
+## Phase 5: Validate Save Flags And Output Shape
 
 ### Problem
 
-`ExtractText()`, `DocumentId`, and `GetPageLabel()` allocate unmanaged memory for every call. In throughput-heavy extraction jobs this creates avoidable allocator churn.
+For merged output, save behavior can dominate end-to-end time, especially on larger documents.
 
 ### Proposed Changes
 
-#### 1. Replace `AllocHGlobal` with pooled managed buffers plus pinning
+Review whether the current default save mode is the best choice for merged documents:
 
-Use a helper pattern:
+- validate current `FPDF_SaveAsCopy(..., flags: 0)` behavior
+- test whether alternative PDFium save flags improve throughput without changing expected output semantics
+- only adopt a different default if the output contract remains acceptable
 
-- determine required byte count
-- rent `byte[]` or `char[]` from `ArrayPool<T>`
-- pin with `fixed`
-- call PDFium
-- convert to string
-- return the array to the pool
+### Reasoning
 
-Applies to:
-
-- `PdfPage.ExtractText()`
-- `PdfDocument.DocumentId`
-- `PdfDocument.GetPageLabel()`
-
-#### 2. Centralize PDFium string-buffer handling
-
-Add a small internal helper for “size query -> pooled buffer -> native call -> decode”.
-
-Suggested helper responsibilities:
-
-- UTF-16 buffer path for page text and labels
-- byte buffer path for file identifier
-
-This reduces repeated boilerplate and lowers the chance of buffer-length bugs.
-
-#### 3. Stay pragmatic about what not to optimize
-
-Do not over-engineer tiny one-off calls if they are not on hot paths.
-
-Priority within this phase:
-
-1. `PdfPage.ExtractText()`
-2. `PdfDocument.GetPageLabel()`
-3. `PdfDocument.DocumentId`
-
-Reasoning:
-
-- Text extraction is the most likely hot-path API in batch systems.
+This is potentially high leverage, but it is also the easiest place to create behavior changes. It should come after safer improvements.
 
 ### Files
 
-- `/Users/hamsman/Dev/PdfiumWrapper/src/PdfiumWrapper/PdfPage.cs`
-- `/Users/hamsman/Dev/PdfiumWrapper/src/PdfiumWrapper/PdfDocument.cs`
+- `/Users/hamsman/Dev/PdfiumWrapper/src/PdfiumWrapper/PdfMerger.cs`
+- `/Users/hamsman/Dev/PdfiumWrapper/src/PdfiumWrapper/PDFium.Ppo.cs`
 
 ### Tests
 
-- Extract text from empty pages, small pages, and large text pages.
-- Validate page labels with and without labels.
-- Validate document ID behavior on files that have and do not have an ID.
+- merged output opens correctly in `PdfDocument`
+- page count, content, and metadata remain valid
+- encrypted-source behavior remains unchanged
 
-## Recommended Delivery Order
+## Success Criteria
 
-1. Fix memory-backed document ownership.
-2. Add document/page lifetime coordination.
-3. Add disposed guards everywhere touched by phases 1 and 2.
-4. Refactor `SaveToStream()` callback allocation behavior.
-5. Optimize text and metadata buffer management.
+Primary success criteria:
 
-This order addresses correctness first, then reliability, then throughput polish.
+- measurable end-to-end improvement in the existing `PdfMergeBenchmark`
+- no regressions in merge correctness
+- no new lifetime or ownership bugs
 
-## Suggested Benchmarks
+Secondary success criteria:
 
-After implementation, benchmark these scenarios:
+- lower allocation pressure in stream-based merge workloads
+- less duplicated save-path code between `PdfDocument` and `PdfMerger`
 
-- Load 10,000 PDFs from `byte[]` and extract `PageCount`
-- Load 1,000 PDFs from stream and render page 1 to JPEG
-- Save 1,000 modified PDFs to `MemoryStream`
-- Extract text from all pages of a large document in a loop
+## Recommended Implementation Order
 
-Metrics:
+1. Internal timing to identify whether open, import, or save dominates.
+2. Low-risk hot-path cleanup in `PdfMerger` and save writer consolidation.
+3. Stream-backed custom-loader support for `PdfMerger(Stream)`.
+4. File-path constructor optimization only if timing says it matters.
+5. Save-flag experiments only if earlier changes are insufficient.
 
-- total allocated bytes
-- Gen0/Gen1/Gen2 counts
-- peak working set
-- wall-clock time
+## Risks
 
-## Definition Of Done
+- `FPDF_LoadCustomDocument` introduces more ownership complexity than the current copy-to-memory approach.
+- Save-flag changes can alter output semantics or compatibility.
+- Small mean shifts in the benchmark may still be run-to-run noise, especially on larger documents.
 
-- No memory-backed document uses an invalid buffer after construction.
-- Document disposal cannot race or conflict with live pages.
-- Public APIs consistently throw managed disposal exceptions before hitting native code.
-- Save callbacks do not allocate per chunk.
-- Text and metadata APIs no longer use repeated `AllocHGlobal` in hot paths.
-- Tests cover lifetime, disposal, and regression scenarios.
+## Out Of Scope For This Plan
+
+- redesigning the public merge API
+- adding benchmark variants
+- speculative native changes inside PDFium itself
