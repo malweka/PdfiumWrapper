@@ -8,7 +8,7 @@ A modern, high-level .NET 8 wrapper for PDFium that makes PDF manipulation easy 
 
 - **PDF Creation** — Create new PDF documents from scratch with text, images, and shapes
 - **Page Editing** — Add text objects, images, paths, and rectangles to pages
-- **PDF Rendering** — Convert PDF pages to images (PNG, JPEG, WebP, etc.) with customizable DPI
+- **PDF Rendering** — Convert PDF pages to images (PNG, JPEG) or raw pixel buffers with customizable DPI
 - **TIFF Export** — High-performance multi-page TIFF output (bilevel CCITT G4 or grayscale LZW) via native libtiff
 - **PDF Merging** — Combine multiple PDFs or extract specific pages
 - **Form Filling** — Read and write PDF form fields (text fields, checkboxes, dropdowns, radio buttons)
@@ -29,9 +29,8 @@ dotnet add package PdfiumWrapper
 ## Requirements
 
 - .NET 8.0 or later
-- SkiaSharp (automatically installed as dependency)
 - Platform-specific PDFium binaries (included in the package)
-- Platform-specific libtiff + tiff_shim binaries (included; required only for TIFF export)
+- Platform-specific native libraries (included): libtiff + tiff_shim (TIFF), libjpeg-turbo (JPEG), pdfium_png (PNG)
 
 ## Quick Start
 
@@ -136,7 +135,7 @@ merger.Save("merged.pdf");
 | [Examples](docs/EXAMPLES.md) | Detailed code examples for common scenarios |
 | [Troubleshooting](docs/TROUBLESHOOTING.md) | Common issues and solutions |
 | [High-Throughput Processing](docs/HIGH-THROUGHPUT-PROCESSING.md) | Batch processing, parallelism, memory management |
-| [Building Native Libraries](docs/BUILDING-NATIVE-LIBS.md) | How to compile libtiff and tiff_shim for each platform |
+| [Building Native Libraries](docs/BUILDING-NATIVE-LIBS.md) | How to compile native libraries (libtiff, libjpeg-turbo, libpng, zlib-ng) for each platform |
 
 ## Platform Support
 
@@ -146,7 +145,7 @@ This library includes native binaries for:
 - macOS (x64 and ARM64)
 - Linux (x64)
 
-Native libraries bundled: **PDFium** (PDF rendering), **libtiff** + **tiff_shim** (TIFF export). See [Building Native Libraries](docs/BUILDING-NATIVE-LIBS.md) for compilation instructions.
+Native libraries bundled: **PDFium** (PDF rendering), **libtiff** + **tiff_shim** (TIFF export), **libjpeg-turbo** (JPEG encoding/decoding), **pdfium_png** (PNG encoding/decoding, statically links libpng + zlib-ng). See [Building Native Libraries](docs/BUILDING-NATIVE-LIBS.md) for compilation instructions.
 
 ## Thread Safety Warning
 
@@ -159,8 +158,10 @@ This project is licensed under the MIT License.
 ## Credits
 
 - [PDFium](https://pdfium.googlesource.com/pdfium/) — Google's open-source PDF rendering engine
-- [SkiaSharp](https://github.com/mono/SkiaSharp) — Cross-platform 2D graphics library
 - [libtiff](https://libtiff.gitlab.io/libtiff/) — TIFF image library
+- [libjpeg-turbo](https://libjpeg-turbo.org/) — SIMD-accelerated JPEG encoding/decoding
+- [libpng](http://www.libpng.org/) — PNG reference library
+- [zlib-ng](https://github.com/zlib-ng/zlib-ng) — SIMD-accelerated compression (embedded in pdfium_png)
 
 ## Support
 
