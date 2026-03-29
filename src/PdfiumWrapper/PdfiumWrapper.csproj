@@ -21,12 +21,18 @@
 		<PackageIcon>icon.png</PackageIcon>
 	</PropertyGroup>
 
+	<ItemGroup>
+		<InternalsVisibleTo Include="PdfiumWrapper.Tests" />
+	</ItemGroup>
+
 	<!-- Platform detection fallbacks when NativeRid/NativeLibName not provided -->
 	<PropertyGroup Condition="'$(NativeRid)' == '' And $([MSBuild]::IsOSPlatform('Windows'))">
 		<NativeRid>win-x64</NativeRid>
 		<NativeLibName>pdfium.dll</NativeLibName>
 		<TiffLibName>tiff.dll</TiffLibName>
 		<TiffShimLibName>tiff_shim.dll</TiffShimLibName>
+		<TurboJpegLibName>turbojpeg.dll</TurboJpegLibName>
+		<PdfiumPngLibName>pdfium_png.dll</PdfiumPngLibName>
 	</PropertyGroup>
 
 	<PropertyGroup Condition="'$(NativeRid)' == '' And $([MSBuild]::IsOSPlatform('OSX')) And '$([System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture)' == 'Arm64'">
@@ -34,6 +40,8 @@
 		<NativeLibName>libpdfium.dylib</NativeLibName>
 		<TiffLibName>libtiff.dylib</TiffLibName>
 		<TiffShimLibName>libtiff_shim.dylib</TiffShimLibName>
+		<TurboJpegLibName>libturbojpeg.dylib</TurboJpegLibName>
+		<PdfiumPngLibName>libpdfium_png.dylib</PdfiumPngLibName>
 	</PropertyGroup>
 
 	<PropertyGroup Condition="'$(NativeRid)' == '' And $([MSBuild]::IsOSPlatform('OSX')) And '$([System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture)' == 'X64'">
@@ -41,6 +49,8 @@
 		<NativeLibName>libpdfium.dylib</NativeLibName>
 		<TiffLibName>libtiff.dylib</TiffLibName>
 		<TiffShimLibName>libtiff_shim.dylib</TiffShimLibName>
+		<TurboJpegLibName>libturbojpeg.dylib</TurboJpegLibName>
+		<PdfiumPngLibName>libpdfium_png.dylib</PdfiumPngLibName>
 	</PropertyGroup>
 
 	<PropertyGroup Condition="'$(NativeRid)' == '' And $([MSBuild]::IsOSPlatform('Linux'))">
@@ -48,6 +58,8 @@
 		<NativeLibName>libpdfium.so</NativeLibName>
 		<TiffLibName>libtiff.so</TiffLibName>
 		<TiffShimLibName>libtiff_shim.so</TiffShimLibName>
+		<TurboJpegLibName>libturbojpeg.so</TurboJpegLibName>
+		<PdfiumPngLibName>libpdfium_png.so</PdfiumPngLibName>
 	</PropertyGroup>
 
 	<!-- Include README and icon in package -->
@@ -80,8 +92,20 @@
 		</Content>
 	</ItemGroup>
 
-	<ItemGroup>
-		<PackageReference Include="SkiaSharp" Version="3.119.1" />
-		<PackageReference Include="SkiaSharp.NativeAssets.Linux" Version="3.119.1" />
+	<!-- Native libjpeg-turbo (TurboJPEG API) - JPEG encoding/decoding -->
+	<ItemGroup Condition="'$(NativeRid)' != '' And '$(TurboJpegLibName)' != '' And Exists('../libs/$(NativeRid)/$(TurboJpegLibName)')">
+		<Content Include="../libs/$(NativeRid)/$(TurboJpegLibName)">
+			<CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+			<TargetPath>runtimes/$(NativeRid)/native/$(TurboJpegLibName)</TargetPath>
+		</Content>
 	</ItemGroup>
+
+	<!-- Native pdfium_png shim (libpng statically linked) - PNG encoding/decoding -->
+	<ItemGroup Condition="'$(NativeRid)' != '' And '$(PdfiumPngLibName)' != '' And Exists('../libs/$(NativeRid)/$(PdfiumPngLibName)')">
+		<Content Include="../libs/$(NativeRid)/$(PdfiumPngLibName)">
+			<CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+			<TargetPath>runtimes/$(NativeRid)/native/$(PdfiumPngLibName)</TargetPath>
+		</Content>
+	</ItemGroup>
+
 </Project>

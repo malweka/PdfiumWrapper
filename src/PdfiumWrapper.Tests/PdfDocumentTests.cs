@@ -1,4 +1,3 @@
-using SkiaSharp;
 
 namespace PdfiumWrapper.Tests;
 
@@ -534,16 +533,16 @@ public class PdfDocumentTests : IDisposable
     #endregion
     
     #region Bitmap Conversion Tests
-    
+
     [Fact]
-    public void ConvertToBitmaps_ShouldReturnBitmapsForAllPages()
+    public void RenderPages_ShouldReturnBitmapsForAllPages()
     {
         // Arrange
         using var doc = new PdfDocument(ContractPdfPath);
-        
+
         // Act
-        var bitmaps = doc.ConvertToBitmaps(dpi: 72); // Low DPI for faster test
-        
+        var bitmaps = doc.RenderPages(dpi: 72);
+
         // Assert
         Assert.NotNull(bitmaps);
         Assert.Equal(doc.PageCount, bitmaps.Length);
@@ -552,53 +551,39 @@ public class PdfDocumentTests : IDisposable
             Assert.NotNull(bitmap);
             Assert.True(bitmap.Width > 0);
             Assert.True(bitmap.Height > 0);
+            Assert.True(bitmap.Pixels.Length > 0);
+            Assert.Equal(bitmap.Stride * bitmap.Height, bitmap.Pixels.Length);
         });
-        
-        // Clean up
-        foreach (var bitmap in bitmaps)
-        {
-            bitmap.Dispose();
-        }
     }
-    
+
     [Fact]
-    public void ConvertToBitmaps_WithCustomDpi_ShouldScaleCorrectly()
+    public void RenderPages_WithCustomDpi_ShouldScaleCorrectly()
     {
         // Arrange
         using var doc = new PdfDocument(ContractPdfPath);
-        
+
         // Act
-        var bitmaps72 = doc.ConvertToBitmaps(dpi: 72);
-        var bitmaps144 = doc.ConvertToBitmaps(dpi: 144);
-        
+        var bitmaps72 = doc.RenderPages(dpi: 72);
+        var bitmaps144 = doc.RenderPages(dpi: 144);
+
         // Assert
         Assert.NotNull(bitmaps72);
         Assert.NotNull(bitmaps144);
-        
+
         // Higher DPI should result in larger bitmaps (approximately 2x)
         Assert.True(bitmaps144[0].Width > bitmaps72[0].Width);
         Assert.True(bitmaps144[0].Height > bitmaps72[0].Height);
-        
-        // Clean up
-        foreach (var bitmap in bitmaps72)
-        {
-            bitmap.Dispose();
-        }
-        foreach (var bitmap in bitmaps144)
-        {
-            bitmap.Dispose();
-        }
     }
-    
+
     [Fact]
-    public async Task ConvertToBitmapsAsync_ShouldReturnBitmapsForAllPages()
+    public async Task RenderPagesAsync_ShouldReturnBitmapsForAllPages()
     {
         // Arrange
         using var doc = new PdfDocument(PresentationPdfPath);
-        
+
         // Act
-        var bitmaps = await doc.ConvertToBitmapsAsync(dpi: 72); // Low DPI for faster test
-        
+        var bitmaps = await doc.RenderPagesAsync(dpi: 72);
+
         // Assert
         Assert.NotNull(bitmaps);
         Assert.Equal(doc.PageCount, bitmaps.Length);
@@ -607,15 +592,10 @@ public class PdfDocumentTests : IDisposable
             Assert.NotNull(bitmap);
             Assert.True(bitmap.Width > 0);
             Assert.True(bitmap.Height > 0);
+            Assert.True(bitmap.Pixels.Length > 0);
         });
-        
-        // Clean up
-        foreach (var bitmap in bitmaps)
-        {
-            bitmap.Dispose();
-        }
     }
-    
+
     #endregion
     
     #region Image Conversion Tests
@@ -627,7 +607,7 @@ public class PdfDocumentTests : IDisposable
         using var doc = new PdfDocument(ContractPdfPath);
 
         // Act
-        var images = doc.StreamImageBytes(SKEncodedImageFormat.Png, quality: 100, dpi: 72).ToList();
+        var images = doc.StreamImageBytes(ImageFormat.Png, quality: 100, dpi: 72).ToList();
 
         // Assert
         Assert.Equal(doc.PageCount, images.Count);
@@ -645,7 +625,7 @@ public class PdfDocumentTests : IDisposable
         using var doc = new PdfDocument(ContractPdfPath);
 
         // Act
-        var images = doc.StreamImageBytes(SKEncodedImageFormat.Jpeg, quality: 90, dpi: 72).ToList();
+        var images = doc.StreamImageBytes(ImageFormat.Jpeg, quality: 90, dpi: 72).ToList();
 
         // Assert
         Assert.Equal(doc.PageCount, images.Count);
@@ -664,7 +644,7 @@ public class PdfDocumentTests : IDisposable
 
         // Act
         var images = new List<byte[]>();
-        await foreach (var bytes in doc.StreamImageBytesAsync(SKEncodedImageFormat.Png, quality: 100, dpi: 72))
+        await foreach (var bytes in doc.StreamImageBytesAsync(ImageFormat.Png, quality: 100, dpi: 72))
         {
             images.Add(bytes);
         }
@@ -722,7 +702,7 @@ public class PdfDocumentTests : IDisposable
         var outputDir = CreateTempDirectory();
         
         // Act
-        doc.SaveAsImages(outputDir, "custom_prefix", SKEncodedImageFormat.Png, quality: 100, dpi: 72);
+        doc.SaveAsImages(outputDir, "custom_prefix", ImageFormat.Png, quality: 100, dpi: 72);
         
         // Assert
         var files = Directory.GetFiles(outputDir, "custom_prefix_*.png");
@@ -744,7 +724,7 @@ public class PdfDocumentTests : IDisposable
         var outputDir = CreateTempDirectory();
         
         // Act
-        await doc.SaveAsImagesAsync(outputDir, "async_page", SKEncodedImageFormat.Png, quality: 100, dpiWidth: 72, dpiHeight: 72);
+        await doc.SaveAsImagesAsync(outputDir, "async_page", ImageFormat.Png, quality: 100, dpiWidth: 72, dpiHeight: 72);
         
         // Assert
         var files = Directory.GetFiles(outputDir, "*.png");
@@ -766,7 +746,7 @@ public class PdfDocumentTests : IDisposable
         try
         {
             // Act
-            doc.SaveAsImages(streams, SKEncodedImageFormat.Png, quality: 100, dpiWidth: 72, dpiHeight: 72);
+            doc.SaveAsImages(streams, ImageFormat.Png, quality: 100, dpiWidth: 72, dpiHeight: 72);
             
             // Assert
             Assert.All(streams, stream =>
@@ -793,7 +773,7 @@ public class PdfDocumentTests : IDisposable
 
         // Act & Assert
         Assert.Throws<ArgumentException>(() =>
-            doc.SaveAsImages(streams, SKEncodedImageFormat.Png, quality: 100, dpiWidth: 72, dpiHeight: 72));
+            doc.SaveAsImages(streams, ImageFormat.Png, quality: 100, dpiWidth: 72, dpiHeight: 72));
     }
 
     #endregion

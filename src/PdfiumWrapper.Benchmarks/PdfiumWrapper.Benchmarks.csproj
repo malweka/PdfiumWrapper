@@ -1,0 +1,43 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="BenchmarkDotNet" Version="0.14.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\PdfiumWrapper\PdfiumWrapper.csproj" />
+  </ItemGroup>
+
+  <!-- Copy test PDF files from the Tests project -->
+  <ItemGroup>
+    <Content Include="..\PdfiumWrapper.Tests\Docs\contract.pdf">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Link>Docs\contract.pdf</Link>
+    </Content>
+    <Content Include="..\PdfiumWrapper.Tests\Docs\presentation.pdf">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Link>Docs\presentation.pdf</Link>
+    </Content>
+    <Content Include="..\PdfiumWrapper.Tests\Docs\fw2.pdf">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Link>Docs\fw2.pdf</Link>
+    </Content>
+    <Content Include="..\PdfiumWrapper.Tests\Docs\doc-1-page.pdf">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Link>Docs\doc-1-page.pdf</Link>
+    </Content>
+    <Content Include="..\PdfiumWrapper.Tests\Docs\doc-3-pages-with-comments.pdf">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Link>Docs\doc-3-pages-with-comments.pdf</Link>
+    </Content>
+  </ItemGroup>
+
+</Project>
