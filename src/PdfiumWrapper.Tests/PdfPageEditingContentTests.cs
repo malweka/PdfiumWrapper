@@ -1,5 +1,4 @@
 using System.Drawing;
-using SkiaSharp;
 using Xunit;
 
 namespace PdfiumWrapper.Tests;
@@ -30,14 +29,21 @@ public class PdfPageEditingContentTests : IDisposable
 
     private byte[] GenerateSampleImage()
     {
-        // Generate a simple 100x100 red square image
-        using var bitmap = new SKBitmap(100, 100);
-        using var canvas = new SKCanvas(bitmap);
-        canvas.Clear(SKColors.Red);
+        // Generate a simple 100x100 red square PNG (BGRA pixel order)
+        const int size = 100;
+        const int stride = size * 4;
+        var pixels = new byte[stride * size];
 
-        using var image = SKImage.FromBitmap(bitmap);
-        using var data = image.Encode(SKEncodedImageFormat.Png, 100);
-        return data.ToArray();
+        // Fill with red in BGRA order: B=0, G=0, R=255, A=255
+        for (int i = 0; i < pixels.Length; i += 4)
+        {
+            pixels[i + 0] = 0;   // B
+            pixels[i + 1] = 0;   // G
+            pixels[i + 2] = 255; // R
+            pixels[i + 3] = 255; // A
+        }
+
+        return PngEncoder.Encode(pixels, size, size, stride);
     }
 
     [Fact]

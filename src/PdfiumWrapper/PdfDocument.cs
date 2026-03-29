@@ -1,5 +1,4 @@
-﻿﻿using SkiaSharp;
-using System.Runtime.InteropServices;
+﻿using System.Runtime.InteropServices;
 
 namespace PdfiumWrapper;
 
@@ -319,69 +318,52 @@ public class PdfDocument : IDisposable
         }
     }
 
-    public SKBitmap[] ConvertToBitmaps(int dpi = 300)
+    /// <summary>
+    /// Renders all pages to raw BGRA pixel buffers.
+    /// </summary>
+    public RawBitmap[] RenderPages(int dpi = 300)
     {
-        return ConvertToBitmaps(dpi, dpi);
+        return RenderPages(dpi, dpi);
     }
 
-    public SKBitmap[] ConvertToBitmaps(int dpiWidth, int dpiHeight)
+    public RawBitmap[] RenderPages(int dpiWidth, int dpiHeight)
     {
         if (PageCount == 0)
             throw new InvalidOperationException("Document has no pages");
 
-        var bitmaps = new List<SKBitmap>(PageCount);
-        try
+        var results = new RawBitmap[PageCount];
+        for (int i = 0; i < PageCount; i++)
         {
-            for (int i = 0; i < PageCount; i++)
-            {
-                using var page = GetPage(i);
-                bitmaps.Add(RenderPageToSkBitmap(page, dpiWidth, dpiHeight));
-            }
-            return bitmaps.ToArray();
+            using var page = GetPage(i);
+            results[i] = RenderPageToRawBitmap(page, dpiWidth, dpiHeight);
         }
-        catch
-        {
-            // Clean up any bitmaps created before the exception
-            foreach (var bitmap in bitmaps)
-                bitmap.Dispose();
-            throw;
-        }
+        return results;
     }
 
-    public async Task<SKBitmap[]> ConvertToBitmapsAsync(int dpi = 300)
+    public async Task<RawBitmap[]> RenderPagesAsync(int dpi = 300)
     {
-        return await ConvertToBitmapsAsync(dpi, dpi);
+        return await RenderPagesAsync(dpi, dpi);
     }
 
-    public async Task<SKBitmap[]> ConvertToBitmapsAsync(int dpiWidth, int dpiHeight)
+    public async Task<RawBitmap[]> RenderPagesAsync(int dpiWidth, int dpiHeight)
     {
         if (PageCount == 0)
             throw new InvalidOperationException("Document has no pages");
 
-        var bitmaps = new List<SKBitmap>(PageCount);
-        try
+        var results = new RawBitmap[PageCount];
+        for (int i = 0; i < PageCount; i++)
         {
-            for (int i = 0; i < PageCount; i++)
-            {
-                await Task.Yield();
-                using var page = GetPage(i);
-                bitmaps.Add(RenderPageToSkBitmap(page, dpiWidth, dpiHeight));
-            }
-            return bitmaps.ToArray();
+            await Task.Yield();
+            using var page = GetPage(i);
+            results[i] = RenderPageToRawBitmap(page, dpiWidth, dpiHeight);
         }
-        catch
-        {
-            // Clean up any bitmaps created before the exception
-            foreach (var bitmap in bitmaps)
-                bitmap.Dispose();
-            throw;
-        }
+        return results;
     }
 
     /// <summary>
     /// Streams image bytes one page at a time using <c>IEnumerable</c>.
     /// Only one page's encoded bytes exist in memory at any point.
-    /// JPEG uses native libjpeg-turbo; PNG uses SkiaSharp.
+    /// JPEG uses native libjpeg-turbo; PNG uses native libpng.
     /// </summary>
     /// <example>
     /// <code>
@@ -415,17 +397,17 @@ public class PdfDocument : IDisposable
                 yield return RenderPageToJpegBytes(encoder, page, dpiWidth, dpiHeight, quality);
             }
         }
-        else
+        else if (format == ImageFormat.Png)
         {
-            var skFormat = ToSkFormat(format);
             for (int i = 0; i < PageCount; i++)
             {
                 using var page = GetPage(i);
-                using var bitmap = RenderPageToSkBitmap(page, dpiWidth, dpiHeight);
-                using var image = SKImage.FromBitmap(bitmap);
-                using var data = image.Encode(skFormat, quality);
-                yield return data.ToArray();
+                yield return RenderPageToPngBytes(page, dpiWidth, dpiHeight);
             }
+        }
+        else
+        {
+            throw new ArgumentOutOfRangeException(nameof(format), "Use SaveAsTiff for TIFF output");
         }
     }
 
@@ -500,7 +482,7 @@ public class PdfDocument : IDisposable
     /// Streams image bytes one page at a time using <c>IAsyncEnumerable</c>.
     /// Only one page's encoded bytes exist in memory at any point,
     /// making this significantly more memory-efficient than collecting all pages into a list.
-    /// JPEG uses native libjpeg-turbo; PNG uses SkiaSharp.
+    /// JPEG uses native libjpeg-turbo; PNG uses native libpng.
     /// </summary>
     /// <example>
     /// <code>
@@ -536,18 +518,18 @@ public class PdfDocument : IDisposable
                 yield return RenderPageToJpegBytes(encoder, page, dpiWidth, dpiHeight, quality);
             }
         }
-        else
+        else if (format == ImageFormat.Png)
         {
-            var skFormat = ToSkFormat(format);
             for (int i = 0; i < PageCount; i++)
             {
                 await Task.Yield();
                 using var page = GetPage(i);
-                using var bitmap = RenderPageToSkBitmap(page, dpiWidth, dpiHeight);
-                using var image = SKImage.FromBitmap(bitmap);
-                using var data = image.Encode(skFormat, quality);
-                yield return data.ToArray();
+                yield return RenderPageToPngBytes(page, dpiWidth, dpiHeight);
             }
+        }
+        else
+        {
+            throw new ArgumentOutOfRangeException(nameof(format), "Use SaveAsTiff for TIFF output");
         }
     }
 
@@ -565,17 +547,17 @@ public class PdfDocument : IDisposable
                 RenderPageToJpegStream(encoder, page, dpiWidth, dpiHeight, quality, outputStreams[i]);
             }
         }
-        else
+        else if (format == ImageFormat.Png)
         {
-            var skFormat = ToSkFormat(format);
             for (int i = 0; i < PageCount; i++)
             {
                 using var page = GetPage(i);
-                using var bitmap = RenderPageToSkBitmap(page, dpiWidth, dpiHeight);
-                using var image = SKImage.FromBitmap(bitmap);
-                using var data = image.Encode(skFormat, quality);
-                data.SaveTo(outputStreams[i]);
+                RenderPageToPngStream(page, dpiWidth, dpiHeight, outputStreams[i]);
             }
+        }
+        else
+        {
+            throw new ArgumentOutOfRangeException(nameof(format), "Use SaveAsTiff for TIFF output");
         }
     }
 
@@ -921,19 +903,18 @@ public class PdfDocument : IDisposable
                 RenderPageToJpeg(encoder, page, dpiWidth, dpiHeight, quality, filePath);
             }
         }
-        else
+        else if (format == ImageFormat.Png)
         {
-            var skFormat = ToSkFormat(format);
             for (int i = 0; i < PageCount; i++)
             {
                 var filePath = Path.Combine(outputDirectory, $"{fileNamePrefix}_{i + 1:D3}.{extension}");
-                using var stream = File.OpenWrite(filePath);
                 using var page = GetPage(i);
-                using var bitmap = RenderPageToSkBitmap(page, dpiWidth, dpiHeight);
-                using var image = SKImage.FromBitmap(bitmap);
-                using var data = image.Encode(skFormat, quality);
-                data.SaveTo(stream);
+                RenderPageToPngFile(page, dpiWidth, dpiHeight, filePath);
             }
+        }
+        else
+        {
+            throw new ArgumentOutOfRangeException(nameof(format), "Use SaveAsTiff for TIFF output");
         }
     }
 
@@ -958,48 +939,89 @@ public class PdfDocument : IDisposable
                 RenderPageToJpeg(encoder, page, dpiWidth, dpiHeight, quality, filePath);
             }
         }
-        else
+        else if (format == ImageFormat.Png)
         {
-            var skFormat = ToSkFormat(format);
             for (int i = 0; i < PageCount; i++)
             {
                 await Task.Yield();
-
-                using var page = GetPage(i);
-                using var bitmap = RenderPageToSkBitmap(page, dpiWidth, dpiHeight);
-                using var image = SKImage.FromBitmap(bitmap);
-                using var data = image.Encode(skFormat, quality);
-
                 var filePath = Path.Combine(outputDirectory, $"{fileNamePrefix}_{i + 1:D3}.{extension}");
-                await using var stream = File.Create(filePath);
-                await data.AsStream().CopyToAsync(stream);
+                using var page = GetPage(i);
+                RenderPageToPngFile(page, dpiWidth, dpiHeight, filePath);
             }
+        }
+        else
+        {
+            throw new ArgumentOutOfRangeException(nameof(format), "Use SaveAsTiff for TIFF output");
         }
     }
 
-    private SKBitmap RenderPageToSkBitmap(PdfPage page, int dpiWidth, int dpiHeight)
+    private void RenderPageToPngFile(PdfPage page, int dpiWidth, int dpiHeight, string outputPath)
     {
-        int finalWidthPixels = (int)Math.Round(page.Width / 72.0 * dpiWidth);
-        int finalHeightPixels = (int)Math.Round(page.Height / 72.0 * dpiHeight);
+        int widthPx = (int)Math.Round(page.Width / 72.0 * dpiWidth);
+        int heightPx = (int)Math.Round(page.Height / 72.0 * dpiHeight);
 
-        // Render to native PDFium bitmap — no managed byte[] allocation
-        var pdfBitmap = page.RenderToBitmapHandle(finalWidthPixels, finalHeightPixels, PDFium.FPDF_ANNOT);
+        var bitmap = page.RenderToBitmapHandle(widthPx, heightPx, PDFium.FPDF_ANNOT);
+        try
+        {
+            var buffer = PDFium.FPDFBitmap_GetBuffer(bitmap);
+            var stride = PDFium.FPDFBitmap_GetStride(bitmap);
+            PngEncoder.EncodeToFile(buffer, widthPx, heightPx, stride, outputPath);
+        }
+        finally
+        {
+            PDFium.FPDFBitmap_Destroy(bitmap);
+        }
+    }
+
+    private byte[] RenderPageToPngBytes(PdfPage page, int dpiWidth, int dpiHeight)
+    {
+        int widthPx = (int)Math.Round(page.Width / 72.0 * dpiWidth);
+        int heightPx = (int)Math.Round(page.Height / 72.0 * dpiHeight);
+
+        var bitmap = page.RenderToBitmapHandle(widthPx, heightPx, PDFium.FPDF_ANNOT);
+        try
+        {
+            var buffer = PDFium.FPDFBitmap_GetBuffer(bitmap);
+            var stride = PDFium.FPDFBitmap_GetStride(bitmap);
+            return PngEncoder.Encode(buffer, widthPx, heightPx, stride);
+        }
+        finally
+        {
+            PDFium.FPDFBitmap_Destroy(bitmap);
+        }
+    }
+
+    private void RenderPageToPngStream(PdfPage page, int dpiWidth, int dpiHeight, Stream output)
+    {
+        int widthPx = (int)Math.Round(page.Width / 72.0 * dpiWidth);
+        int heightPx = (int)Math.Round(page.Height / 72.0 * dpiHeight);
+
+        var bitmap = page.RenderToBitmapHandle(widthPx, heightPx, PDFium.FPDF_ANNOT);
+        try
+        {
+            var buffer = PDFium.FPDFBitmap_GetBuffer(bitmap);
+            var stride = PDFium.FPDFBitmap_GetStride(bitmap);
+            PngEncoder.EncodeToStream(buffer, widthPx, heightPx, stride, output);
+        }
+        finally
+        {
+            PDFium.FPDFBitmap_Destroy(bitmap);
+        }
+    }
+
+    private RawBitmap RenderPageToRawBitmap(PdfPage page, int dpiWidth, int dpiHeight)
+    {
+        int widthPx = (int)Math.Round(page.Width / 72.0 * dpiWidth);
+        int heightPx = (int)Math.Round(page.Height / 72.0 * dpiHeight);
+
+        var pdfBitmap = page.RenderToBitmapHandle(widthPx, heightPx, PDFium.FPDF_ANNOT);
         try
         {
             var buffer = PDFium.FPDFBitmap_GetBuffer(pdfBitmap);
             var stride = PDFium.FPDFBitmap_GetStride(pdfBitmap);
-            long size = (long)stride * finalHeightPixels;
-
-            var skBitmap = new SKBitmap(finalWidthPixels, finalHeightPixels, SKColorType.Bgra8888, SKAlphaType.Premul);
-            var pixels = skBitmap.GetPixels();
-
-            // Single native-to-native copy (no intermediate managed byte[])
-            unsafe
-            {
-                Buffer.MemoryCopy((void*)buffer, (void*)pixels, size, size);
-            }
-
-            return skBitmap;
+            var pixels = new byte[stride * heightPx];
+            Marshal.Copy(buffer, pixels, 0, pixels.Length);
+            return new RawBitmap(pixels, widthPx, heightPx, stride);
         }
         finally
         {
@@ -1007,19 +1029,12 @@ public class PdfDocument : IDisposable
         }
     }
 
-
     private static string GetExtensionForFormat(ImageFormat format) => format switch
     {
         ImageFormat.Png => "png",
         ImageFormat.Jpeg => "jpg",
         ImageFormat.Tiff => "tiff",
         _ => throw new ArgumentOutOfRangeException(nameof(format))
-    };
-
-    private static SKEncodedImageFormat ToSkFormat(ImageFormat format) => format switch
-    {
-        ImageFormat.Png => SKEncodedImageFormat.Png,
-        _ => throw new ArgumentOutOfRangeException(nameof(format), "Only PNG is handled via SkiaSharp")
     };
 
     public PdfForm? GetForm()

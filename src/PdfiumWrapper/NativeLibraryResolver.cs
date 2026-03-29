@@ -57,6 +57,7 @@ internal static class NativeLibraryResolver
                 "tiff" => ("tiff.dll", "tiff"),
                 "tiff_shim" => ("tiff_shim.dll", "tiff_shim"),
                 "turbojpeg" => ("turbojpeg.dll", "turbojpeg"),
+                "pdfium_png" => ("pdfium_png.dll", "pdfium_png"),
                 _ => (null, null)
             };
         }
@@ -69,6 +70,7 @@ internal static class NativeLibraryResolver
                 "tiff" => ("libtiff.so", "libtiff"),
                 "tiff_shim" => ("libtiff_shim.so", "libtiff_shim"),
                 "turbojpeg" => ("libturbojpeg.so", "libturbojpeg"),
+                "pdfium_png" => ("libpdfium_png.so", "libpdfium_png"),
                 _ => (null, null)
             };
         }
@@ -81,6 +83,7 @@ internal static class NativeLibraryResolver
                 "tiff" => ("libtiff.dylib", "libtiff"),
                 "tiff_shim" => ("libtiff_shim.dylib", "libtiff_shim"),
                 "turbojpeg" => ("libturbojpeg.dylib", "libturbojpeg"),
+                "pdfium_png" => ("libpdfium_png.dylib", "libpdfium_png"),
                 _ => (null, null)
             };
         }
