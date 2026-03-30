@@ -1,3 +1,5 @@
+using System.Reflection;
+using System.Runtime.InteropServices;
 using Xunit.Abstractions;
 
 namespace PdfiumWrapper.Tests;
@@ -15,6 +17,27 @@ public class PdfMergerTests : IDisposable
     public PdfMergerTests(ITestOutputHelper testOutputHelper)
     {
         _testOutputHelper = testOutputHelper;
+    }
+
+    private static GCHandle GetDocumentBytesHandle(PdfMerger merger)
+    {
+        var field = typeof(PdfMerger).GetField("_documentBytesHandle", BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(field);
+        return (GCHandle)field.GetValue(merger)!;
+    }
+
+    private static byte[]? GetDocumentBytes(PdfMerger merger)
+    {
+        var field = typeof(PdfMerger).GetField("_documentBytes", BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(field);
+        return (byte[]?)field.GetValue(merger);
+    }
+
+    private static object? GetStreamDocumentLoader(PdfMerger merger)
+    {
+        var field = typeof(PdfMerger).GetField("_streamDocumentLoader", BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(field);
+        return field.GetValue(merger);
     }
 
     public void Dispose()
@@ -93,6 +116,32 @@ public class PdfMergerTests : IDisposable
     }
 
     [Fact]
+    public void Constructor_WithByteArray_ShouldKeepPinnedBufferUntilDispose()
+    {
+        // Arrange
+        var bytes = (byte[])Doc1PageBytes.Clone();
+        var merger = new PdfMerger(bytes);
+
+        try
+        {
+            Assert.True(GetDocumentBytesHandle(merger).IsAllocated);
+
+            GC.Collect();
+            GC.WaitForPendingFinalizers();
+            GC.Collect();
+
+            Assert.Equal(1, merger.PageCount);
+        }
+        finally
+        {
+            merger.Dispose();
+        }
+
+        Assert.False(GetDocumentBytesHandle(merger).IsAllocated);
+        Assert.Null(GetDocumentBytes(merger));
+    }
+
+    [Fact]
     public void Constructor_WithStream_ShouldLoadDocument()
     {
         // Arrange
@@ -104,6 +153,107 @@ public class PdfMergerTests : IDisposable
         // Assert
         Assert.NotNull(merger);
         Assert.Equal(1, merger.PageCount);
+    }
+
+    [Fact]
+    public void Constructor_WithSeekableFileStream_ShouldUseCustomLoader()
+    {
+        // Arrange
+        var tempPath = GetUniqueTestFilePath("constructor_stream_file");
+        File.WriteAllBytes(tempPath, Doc1PageBytes);
+        using var stream = File.OpenRead(tempPath);
+
+        // Act
+        using var merger = new PdfMerger(stream);
+
+        // Assert
+        Assert.Equal(1, merger.PageCount);
+        Assert.Null(GetDocumentBytes(merger));
+        Assert.False(GetDocumentBytesHandle(merger).IsAllocated);
+        Assert.NotNull(GetStreamDocumentLoader(merger));
+    }
+
+    [Fact]
+    public void Constructor_WithSeekableFileStream_ShouldRemainUsableAfterGc()
+    {
+        // Arrange
+        var tempPath = GetUniqueTestFilePath("constructor_stream_gc");
+        File.WriteAllBytes(tempPath, Doc1PageBytes);
+        using var stream = File.OpenRead(tempPath);
+        using var merger = new PdfMerger(stream);
+
+        // Act
+        GC.Collect();
+        GC.WaitForPendingFinalizers();
+        GC.Collect();
+
+        // Assert
+        Assert.Equal(1, merger.PageCount);
+        var bytes = merger.ToBytes();
+        Assert.True(bytes.Length > 0);
+    }
+
+    [Fact]
+    public void Constructor_WithStream_ShouldRemainUsableAfterSourceStreamDisposed()
+    {
+        // Arrange
+        PdfMerger merger;
+        using (var stream = new MemoryStream((byte[])Doc1PageBytes.Clone()))
+        {
+            merger = new PdfMerger(stream);
+        }
+
+        try
+        {
+            GC.Collect();
+            GC.WaitForPendingFinalizers();
+            GC.Collect();
+
+            Assert.Equal(1, merger.PageCount);
+
+            var bytes = merger.ToBytes();
+            Assert.True(bytes.Length > 0);
+        }
+        finally
+        {
+            merger.Dispose();
+        }
+    }
+
+    [Fact]
+    public void Constructor_WithExposableMemoryStream_ShouldReuseBackingBuffer()
+    {
+        // Arrange
+        var bytes = (byte[])Doc1PageBytes.Clone();
+        using var stream = new MemoryStream();
+        stream.Write(bytes, 0, bytes.Length);
+        stream.Position = 0;
+
+        Assert.True(stream.TryGetBuffer(out var segment));
+
+        // Act
+        using var merger = new PdfMerger(stream);
+
+        // Assert
+        Assert.Same(segment.Array, GetDocumentBytes(merger));
+        Assert.True(GetDocumentBytesHandle(merger).IsAllocated);
+    }
+
+    [Fact]
+    public void Constructor_WithNonSeekableStream_ShouldFallBackToPinnedBytes()
+    {
+        // Arrange
+        using var innerStream = new MemoryStream((byte[])Doc1PageBytes.Clone());
+        using var stream = new NonSeekableReadOnlyStream(innerStream);
+
+        // Act
+        using var merger = new PdfMerger(stream);
+
+        // Assert
+        Assert.Equal(1, merger.PageCount);
+        Assert.NotNull(GetDocumentBytes(merger));
+        Assert.True(GetDocumentBytesHandle(merger).IsAllocated);
+        Assert.Null(GetStreamDocumentLoader(merger));
     }
 
     [Fact]
@@ -555,6 +705,30 @@ public class PdfMergerTests : IDisposable
     }
 
     [Fact]
+    public void Save_ToStream_Repeatedly_ShouldRemainStable()
+    {
+        // Arrange
+        using var merger = new PdfMerger();
+        using var doc1 = new PdfDocument((byte[])Doc1PageBytes.Clone());
+        using var doc3 = new PdfDocument((byte[])Doc3PagesBytes.Clone());
+        merger.AppendDocument(doc1);
+        merger.AppendDocument(doc3);
+
+        // Act / Assert
+        for (int i = 0; i < 25; i++)
+        {
+            using var stream = new MemoryStream();
+            merger.Save(stream);
+
+            Assert.True(stream.Length > 0);
+
+            stream.Position = 0;
+            using var verifyDoc = new PdfDocument(stream);
+            Assert.Equal(4, verifyDoc.PageCount);
+        }
+    }
+
+    [Fact]
     public void Save_EmptyDocument_ShouldCreateValidPdf()
     {
         // Arrange
@@ -814,6 +988,29 @@ public class PdfMergerTests : IDisposable
         merger.Dispose();
     }
 
+    [Fact]
+    public void PageCount_AfterDispose_ShouldThrowObjectDisposedException()
+    {
+        // Arrange
+        var merger = new PdfMerger((byte[])Doc1PageBytes.Clone());
+        merger.Dispose();
+
+        // Act & Assert
+        Assert.Throws<ObjectDisposedException>(() => _ = merger.PageCount);
+    }
+
+    [Fact]
+    public void AppendDocument_WithDisposedSource_ShouldThrowObjectDisposedException()
+    {
+        // Arrange
+        using var merger = new PdfMerger();
+        var sourceDoc = new PdfDocument((byte[])Doc1PageBytes.Clone());
+        sourceDoc.Dispose();
+
+        // Act & Assert
+        Assert.Throws<ObjectDisposedException>(() => merger.AppendDocument(sourceDoc));
+    }
+
     #endregion
 
     #region Edge Cases Tests
@@ -907,4 +1104,47 @@ public class PdfMergerTests : IDisposable
     }
 
     #endregion
+}
+
+internal sealed class NonSeekableReadOnlyStream : Stream
+{
+    private readonly Stream _inner;
+
+    public NonSeekableReadOnlyStream(Stream inner)
+    {
+        _inner = inner;
+    }
+
+    public override bool CanRead => _inner.CanRead;
+    public override bool CanSeek => false;
+    public override bool CanWrite => false;
+    public override long Length => throw new NotSupportedException();
+
+    public override long Position
+    {
+        get => throw new NotSupportedException();
+        set => throw new NotSupportedException();
+    }
+
+    public override void Flush() => _inner.Flush();
+
+    public override int Read(byte[] buffer, int offset, int count) => _inner.Read(buffer, offset, count);
+
+    public override int Read(Span<byte> buffer) => _inner.Read(buffer);
+
+    public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+
+    public override void SetLength(long value) => throw new NotSupportedException();
+
+    public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing)
+        {
+            _inner.Dispose();
+        }
+
+        base.Dispose(disposing);
+    }
 }

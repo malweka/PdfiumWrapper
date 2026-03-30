@@ -1,4 +1,5 @@
-
+using System.Reflection;
+using System.Runtime.InteropServices;
 namespace PdfiumWrapper.Tests;
 
 [Collection("PDF Tests")]
@@ -27,6 +28,20 @@ public class PdfDocumentTests : IDisposable
         Directory.CreateDirectory(tempDir);
         _tempDirectories.Add(tempDir);
         return tempDir;
+    }
+
+    private static GCHandle GetDocumentBytesHandle(PdfDocument document)
+    {
+        var field = typeof(PdfDocument).GetField("_documentBytesHandle", BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(field);
+        return (GCHandle)field.GetValue(document)!;
+    }
+
+    private static byte[]? GetDocumentBytes(PdfDocument document)
+    {
+        var field = typeof(PdfDocument).GetField("_documentBytes", BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(field);
+        return (byte[]?)field.GetValue(document);
     }
 
     #region Constructor Tests
@@ -87,6 +102,81 @@ public class PdfDocumentTests : IDisposable
         Assert.NotNull(doc);
         Assert.True(doc.PageCount > 0);
     }
+
+    [Fact]
+    public void Constructor_WithByteArray_ShouldKeepPinnedBufferUntilDispose()
+    {
+        // Arrange
+        var bytes = File.ReadAllBytes(ContractPdfPath);
+        var doc = new PdfDocument(bytes);
+
+        try
+        {
+            // Assert
+            Assert.True(GetDocumentBytesHandle(doc).IsAllocated);
+
+            GC.Collect();
+            GC.WaitForPendingFinalizers();
+            GC.Collect();
+
+            using var page = doc.GetPage(0);
+            Assert.True(page.Width > 0);
+        }
+        finally
+        {
+            doc.Dispose();
+        }
+
+        Assert.False(GetDocumentBytesHandle(doc).IsAllocated);
+        Assert.Null(GetDocumentBytes(doc));
+    }
+
+    [Fact]
+    public void Constructor_WithStream_ShouldRemainUsableAfterSourceStreamDisposed()
+    {
+        // Arrange
+        PdfDocument doc;
+        using (var stream = File.OpenRead(ContractPdfPath))
+        {
+            doc = new PdfDocument(stream);
+        }
+
+        try
+        {
+            // Act
+            GC.Collect();
+            GC.WaitForPendingFinalizers();
+            GC.Collect();
+
+            // Assert
+            Assert.True(doc.PageCount > 0);
+            using var page = doc.GetPage(0);
+            Assert.False(string.IsNullOrWhiteSpace(page.ExtractText()));
+        }
+        finally
+        {
+            doc.Dispose();
+        }
+    }
+
+    [Fact]
+    public void Constructor_WithExposableMemoryStream_ShouldReuseBackingBuffer()
+    {
+        // Arrange
+        var bytes = File.ReadAllBytes(ContractPdfPath);
+        using var stream = new MemoryStream();
+        stream.Write(bytes, 0, bytes.Length);
+        stream.Position = 0;
+
+        Assert.True(stream.TryGetBuffer(out var segment));
+
+        // Act
+        using var doc = new PdfDocument(stream);
+
+        // Assert
+        Assert.Same(segment.Array, GetDocumentBytes(doc));
+        Assert.True(GetDocumentBytesHandle(doc).IsAllocated);
+    }
     
     [Fact]
     public void Constructor_WithInvalidByteArray_ShouldThrowException()
@@ -96,6 +186,44 @@ public class PdfDocumentTests : IDisposable
         
         // Act & Assert
         Assert.Throws<InvalidOperationException>(() => new PdfDocument(invalidBytes));
+    }
+
+    [Fact]
+    public void SaveToStream_ShouldWriteValidPdfToMemoryStream()
+    {
+        // Arrange
+        using var doc = new PdfDocument(ContractPdfPath);
+        using var stream = new MemoryStream();
+
+        // Act
+        doc.SaveToStream(stream);
+
+        // Assert
+        Assert.True(stream.Length > 0);
+
+        stream.Position = 0;
+        using var loadedDoc = new PdfDocument(stream);
+        Assert.Equal(doc.PageCount, loadedDoc.PageCount);
+    }
+
+    [Fact]
+    public void SaveToStream_Repeatedly_ShouldRemainStable()
+    {
+        // Arrange
+        using var doc = new PdfDocument(ContractPdfPath);
+
+        // Act / Assert
+        for (int i = 0; i < 25; i++)
+        {
+            using var stream = new MemoryStream();
+            doc.SaveToStream(stream);
+
+            Assert.True(stream.Length > 0);
+
+            stream.Position = 0;
+            using var loadedDoc = new PdfDocument(stream);
+            Assert.Equal(doc.PageCount, loadedDoc.PageCount);
+        }
     }
 
     [Fact]
@@ -173,6 +301,52 @@ public class PdfDocumentTests : IDisposable
         Assert.Equal(0, page.PageIndex);
         Assert.True(page.Width > 0);
         Assert.True(page.Height > 0);
+    }
+
+    [Fact]
+    public void ExtractText_RepeatedCalls_ShouldReturnSameContent()
+    {
+        // Arrange
+        using var doc = new PdfDocument(ContractPdfPath);
+        using var page = doc.GetPage(0);
+
+        // Act
+        var first = page.ExtractText();
+        var second = page.ExtractText();
+
+        // Assert
+        Assert.Equal(first, second);
+    }
+
+    [Fact]
+    public void GetAllPageLabels_ShouldMatchPerPageLookup()
+    {
+        // Arrange
+        using var doc = new PdfDocument(ContractPdfPath);
+
+        // Act
+        var labels = doc.GetAllPageLabels();
+
+        // Assert
+        Assert.Equal(doc.PageCount, labels.Length);
+        for (int i = 0; i < labels.Length; i++)
+        {
+            Assert.Equal(labels[i], doc.GetPageLabel(i));
+        }
+    }
+
+    [Fact]
+    public void DocumentId_RepeatedCalls_ShouldReturnSameValue()
+    {
+        // Arrange
+        using var doc = new PdfDocument(ContractPdfPath);
+
+        // Act
+        var first = doc.DocumentId;
+        var second = doc.DocumentId;
+
+        // Assert
+        Assert.Equal(first, second);
     }
     
     [Fact]

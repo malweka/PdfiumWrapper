@@ -7,6 +7,7 @@ namespace PdfiumWrapper;
 public abstract class PdfPageObject : IDisposable
 {
     private bool _disposed;
+    private PdfPage? _ownerPage;
     protected internal IntPtr Handle { get; private set; }
     protected internal IntPtr DocumentHandle { get; private set; }
     internal bool IsAttachedToPage { get; set; }
@@ -85,6 +86,33 @@ public abstract class PdfPageObject : IDisposable
     {
         if (_disposed)
             throw new ObjectDisposedException(GetType().Name);
+        if (_ownerPage?.IsDisposedForChildObjects == true)
+            throw new ObjectDisposedException(GetType().Name);
+    }
+
+    internal void AttachToPage(PdfPage ownerPage)
+    {
+        _ownerPage = ownerPage;
+        IsAttachedToPage = true;
+    }
+
+    internal void DetachFromPage()
+    {
+        _ownerPage = null;
+        IsAttachedToPage = false;
+    }
+
+    internal void ReleasePageTracking()
+    {
+        _ownerPage?.UnregisterAttachedObject(this);
+        _ownerPage = null;
+    }
+
+    internal void InvalidateFromPageDisposal()
+    {
+        _ownerPage = null;
+        Handle = IntPtr.Zero;
+        _disposed = true;
     }
 
     public void Dispose()
@@ -97,10 +125,7 @@ public abstract class PdfPageObject : IDisposable
     {
         if (!_disposed)
         {
-            if (disposing)
-            {
-                // Managed cleanup
-            }
+            ReleasePageTracking();
 
             // Only destroy if not attached to a page
             if (Handle != IntPtr.Zero && !IsAttachedToPage)
@@ -118,4 +143,3 @@ public abstract class PdfPageObject : IDisposable
         Dispose(false);
     }
 }
-

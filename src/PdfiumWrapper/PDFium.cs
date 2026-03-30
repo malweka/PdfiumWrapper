@@ -35,6 +35,9 @@ public static partial class PDFium
     [LibraryImport(LibraryName, StringMarshalling = StringMarshalling.Utf8)]
     public static partial IntPtr FPDF_LoadMemDocument(IntPtr data_buf, int size, string? password);
 
+    [LibraryImport(LibraryName, StringMarshalling = StringMarshalling.Utf8)]
+    public static partial IntPtr FPDF_LoadCustomDocument(ref FPDF_FILEACCESS fileAccess, string? password);
+
     [LibraryImport(LibraryName)]
     public static partial void FPDF_CloseDocument(IntPtr document);
 
@@ -46,6 +49,14 @@ public static partial class PDFium
 
     [LibraryImport(LibraryName)]
     public static partial int FPDF_GetSecurityHandlerRevision(IntPtr document);
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct FPDF_FILEACCESS
+    {
+        public CULong m_FileLen;
+        public IntPtr m_GetBlock;
+        public IntPtr m_Param;
+    }
 
     #endregion
 
