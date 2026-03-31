@@ -18,12 +18,18 @@
 
 #include <tiffio.h>
 
-int TIFFSetFieldInt(TIFF* tiff, uint32_t tag, int value)
+#ifdef _WIN32
+#define SHIM_EXPORT __declspec(dllexport)
+#else
+#define SHIM_EXPORT
+#endif
+
+SHIM_EXPORT int TIFFSetFieldInt(TIFF* tiff, uint32_t tag, int value)
 {
     return TIFFSetField(tiff, tag, value);
 }
 
-int TIFFSetFieldDouble(TIFF* tiff, uint32_t tag, double value)
+SHIM_EXPORT int TIFFSetFieldDouble(TIFF* tiff, uint32_t tag, double value)
 {
     return TIFFSetField(tiff, tag, value);
 }

@@ -474,6 +474,68 @@ copy pdfium_png.dll src\libs\win-x64\
 
 ---
 
+## Automated Build Script (Windows x64)
+
+Instead of running each step manually, you can use the all-in-one build script at [`src/native/build_win_x64.bat`](../src/native/build_win_x64.bat). It downloads all source archives, builds every library in the correct order, and copies the resulting DLLs to `src/libs/win-x64/`.
+
+### Prerequisites
+
+- **Visual Studio 2022 or later** with the **"Desktop development with C++"** workload (provides MSVC, CMake, and MSBuild)
+- **Git for Windows** (provides `curl` and `unzip` used by the script)
+- **(Optional) NASM** — for libjpeg-turbo SIMD acceleration. Download from https://www.nasm.us/ and add to PATH. Without NASM the build still succeeds, but JPEG encoding/decoding will be slower.
+
+### Configuration
+
+Open `src/native/build_win_x64.bat` and verify the `VSDIR` variable near the top matches your Visual Studio installation path:
+
+```bat
+set VSDIR=C:\Program Files\Microsoft Visual Studio\18\Enterprise
+```
+
+Common values:
+
+| Edition | Path |
+|---|---|
+| VS 2022 Community | `C:\Program Files\Microsoft Visual Studio\2022\Community` |
+| VS 2022 Professional | `C:\Program Files\Microsoft Visual Studio\2022\Professional` |
+| VS 2022 Enterprise | `C:\Program Files\Microsoft Visual Studio\2022\Enterprise` |
+
+The script calls `vcvarsall.bat` automatically, so you do **not** need to run it from a Developer Command Prompt — a regular Command Prompt or terminal works.
+
+### Running the script
+
+```cmd
+cd path\to\PdfiumWrapper
+src\native\build_win_x64.bat
+```
+
+The script will:
+
+1. Create a temporary `_native_build\` directory in the project root
+2. Download and extract source archives (skipped if already present from a prior run)
+3. Build each library in order:
+   - **libtiff 4.7.1** → `tiff.dll`
+   - **tiff_shim** → `tiff_shim.dll` (compiled against the libtiff from step 1)
+   - **libjpeg-turbo 3.1.4.1** → `turbojpeg.dll`
+   - **zlib-ng 2.2.4** → `zlibstatic.lib` (static, SIMD-accelerated)
+   - **libpng 1.6.56** → `libpng16_static.lib` (static, linked against zlib-ng)
+   - **pdfium_png shim** → `pdfium_png.dll` (statically embeds libpng + zlib-ng)
+4. Copy all DLLs to `src\libs\win-x64\`
+
+Each step prints `[OK]` on success. If any step fails, the script stops and prints the error code.
+
+### Cleanup
+
+After a successful build you can delete the `_native_build\` directory to reclaim disk space:
+
+```cmd
+rmdir /s /q _native_build
+```
+
+The downloaded sources are cached there, so keeping it around makes subsequent rebuilds faster (the script skips downloads if the source directories already exist).
+
+---
+
 ## Directory Layout
 
 After building, your `src/libs/` directory should look like:
