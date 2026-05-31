@@ -1,4 +1,4 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk">
 	<PropertyGroup>
 		<TargetFramework>net8.0</TargetFramework>
 		<ImplicitUsings>enable</ImplicitUsings>
@@ -11,8 +11,9 @@
 		<Copyright>Copyright © 2025 Emmanuel Hameyie</Copyright>
 		<PackageId>PdfiumWrapper</PackageId>
 		<Product>PdfiumWrapper</Product>
-		<Description>A .NET 8 wrapper around Google's PDFium library for PDF manipulation, rendering, form filling, and editing.</Description>
-		<PackageTags>pdf;pdfium;pdf-manipulation;pdf-rendering;pdf-editing;pdf-forms</PackageTags>
+		<Title>PdfiumWrapper</Title>
+		<Description>Cross-platform .NET 8 wrapper around Google's PDFium engine for rendering, manipulating, editing, and form-filling PDF documents. Native binaries for Windows (x64), Linux (x64), and macOS (x64 and Arm64) are bundled in the package, so no separate native setup is required. Supports rasterizing pages to PNG, JPEG, and multi-page TIFF.</Description>
+		<PackageTags>pdf;pdfium;pdf-manipulation;pdf-rendering;pdf-editing;pdf-forms;cross-platform;native</PackageTags>
 		<RepositoryUrl>https://github.com/malweka/PdfiumWrapper</RepositoryUrl>
 		<RepositoryType>git</RepositoryType>
 		<PackageLicenseExpression>MIT</PackageLicenseExpression>
@@ -21,11 +22,25 @@
 		<PackageIcon>icon.png</PackageIcon>
 	</PropertyGroup>
 
+	<!-- SourceLink, deterministic build, and symbol package (.snupkg) settings -->
+	<PropertyGroup>
+		<PublishRepositoryUrl>true</PublishRepositoryUrl>
+		<EmbedUntrackedSources>true</EmbedUntrackedSources>
+		<IncludeSymbols>true</IncludeSymbols>
+		<SymbolPackageFormat>snupkg</SymbolPackageFormat>
+		<Deterministic>true</Deterministic>
+		<ContinuousIntegrationBuild Condition="'$(GITHUB_ACTIONS)' == 'true'">true</ContinuousIntegrationBuild>
+	</PropertyGroup>
+
 	<ItemGroup>
 		<InternalsVisibleTo Include="PdfiumWrapper.Tests" />
 	</ItemGroup>
 
-	<!-- Platform detection fallbacks when NativeRid/NativeLibName not provided -->
+	<ItemGroup>
+		<PackageReference Include="Microsoft.SourceLink.GitHub" Version="8.0.0" PrivateAssets="All" />
+	</ItemGroup>
+
+	<!-- Platform detection fallbacks when NativeRid/NativeLibName not provided (drives local dev copy-to-output) -->
 	<PropertyGroup Condition="'$(NativeRid)' == '' And $([MSBuild]::IsOSPlatform('Windows'))">
 		<NativeRid>win-x64</NativeRid>
 		<NativeLibName>pdfium.dll</NativeLibName>
@@ -68,41 +83,56 @@
 		<None Include="../../icon.png" Pack="true" PackagePath="\" />
 	</ItemGroup>
 
-	<!-- Native PDFium library - uses detected or injected RID -->
+	<!-- Generate runtime.json mapping each RID to its PdfiumWrapper.runtime.<rid>
+	     package at the current version, and pack it at the package root. NuGet uses
+	     this to pull ONLY the consumer's-platform native package at restore time. -->
+	<Target Name="GenerateRuntimeJson" BeforeTargets="GenerateNuspec;_GetPackageFiles;Build">
+		<PropertyGroup>
+			<_RuntimeJson>{ &quot;runtimes&quot;: { &quot;win-x64&quot;: { &quot;PdfiumWrapper&quot;: { &quot;PdfiumWrapper.runtime.win-x64&quot;: &quot;$(Version)&quot; } }, &quot;linux-x64&quot;: { &quot;PdfiumWrapper&quot;: { &quot;PdfiumWrapper.runtime.linux-x64&quot;: &quot;$(Version)&quot; } }, &quot;osx-x64&quot;: { &quot;PdfiumWrapper&quot;: { &quot;PdfiumWrapper.runtime.osx-x64&quot;: &quot;$(Version)&quot; } }, &quot;osx-arm64&quot;: { &quot;PdfiumWrapper&quot;: { &quot;PdfiumWrapper.runtime.osx-arm64&quot;: &quot;$(Version)&quot; } } } }</_RuntimeJson>
+		</PropertyGroup>
+		<WriteLinesToFile File="$(IntermediateOutputPath)runtime.json" Lines="$(_RuntimeJson)" Overwrite="true" />
+	</Target>
+	<ItemGroup>
+		<None Include="$(IntermediateOutputPath)runtime.json" Pack="true" PackagePath="\" Visible="false" />
+	</ItemGroup>
+
+	<!-- Native libs copied to output for local dev/test only (Pack=false; the
+	     PdfiumWrapper.runtime.<rid> packages carry the natives in the published package). -->
 	<ItemGroup Condition="'$(NativeRid)' != ''">
 		<Content Include="../libs/$(NativeRid)/$(NativeLibName)">
+			<Pack>false</Pack>
 			<CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
 			<TargetPath>runtimes/$(NativeRid)/native/$(NativeLibName)</TargetPath>
 		</Content>
 	</ItemGroup>
 
-	<!-- Native libtiff library - included when binary exists for the platform -->
 	<ItemGroup Condition="'$(NativeRid)' != '' And '$(TiffLibName)' != '' And Exists('../libs/$(NativeRid)/$(TiffLibName)')">
 		<Content Include="../libs/$(NativeRid)/$(TiffLibName)">
+			<Pack>false</Pack>
 			<CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
 			<TargetPath>runtimes/$(NativeRid)/native/$(TiffLibName)</TargetPath>
 		</Content>
 	</ItemGroup>
 
-	<!-- TIFFSetField shim - non-variadic wrappers for ARM64 compatibility -->
 	<ItemGroup Condition="'$(NativeRid)' != '' And '$(TiffShimLibName)' != '' And Exists('../libs/$(NativeRid)/$(TiffShimLibName)')">
 		<Content Include="../libs/$(NativeRid)/$(TiffShimLibName)">
+			<Pack>false</Pack>
 			<CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
 			<TargetPath>runtimes/$(NativeRid)/native/$(TiffShimLibName)</TargetPath>
 		</Content>
 	</ItemGroup>
 
-	<!-- Native libjpeg-turbo (TurboJPEG API) - JPEG encoding/decoding -->
 	<ItemGroup Condition="'$(NativeRid)' != '' And '$(TurboJpegLibName)' != '' And Exists('../libs/$(NativeRid)/$(TurboJpegLibName)')">
 		<Content Include="../libs/$(NativeRid)/$(TurboJpegLibName)">
+			<Pack>false</Pack>
 			<CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
 			<TargetPath>runtimes/$(NativeRid)/native/$(TurboJpegLibName)</TargetPath>
 		</Content>
 	</ItemGroup>
 
-	<!-- Native pdfium_png shim (libpng statically linked) - PNG encoding/decoding -->
 	<ItemGroup Condition="'$(NativeRid)' != '' And '$(PdfiumPngLibName)' != '' And Exists('../libs/$(NativeRid)/$(PdfiumPngLibName)')">
 		<Content Include="../libs/$(NativeRid)/$(PdfiumPngLibName)">
+			<Pack>false</Pack>
 			<CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
 			<TargetPath>runtimes/$(NativeRid)/native/$(PdfiumPngLibName)</TargetPath>
 		</Content>

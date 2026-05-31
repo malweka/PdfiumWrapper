@@ -1,0 +1,41 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Per-RID native runtime package: PdfiumWrapper.runtime.<rid>
+    Pack with: dotnet pack -p:NativeRid=win-x64 (etc.)
+    Contains ONLY this platform's native binaries under runtimes/<rid>/native/.
+    No managed assembly is produced or packed (IncludeBuildOutput=false).
+    The main PdfiumWrapper package's runtime.json pulls the matching one per consumer RID.
+  -->
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <IncludeBuildOutput>false</IncludeBuildOutput>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <SuppressDependenciesWhenPacking>true</SuppressDependenciesWhenPacking>
+    <IncludeSymbols>false</IncludeSymbols>
+    <!-- NU5128: native-only package has no lib/ref assets (intentional) -->
+    <NoWarn>$(NoWarn);NU5128</NoWarn>
+
+    <NativeRid Condition="'$(NativeRid)' == ''">win-x64</NativeRid>
+    <PackageId>PdfiumWrapper.runtime.$(NativeRid)</PackageId>
+    <Version>1.0.0</Version>
+    <Authors>Emmanuel Hameyie</Authors>
+    <Copyright>Copyright © 2025 Emmanuel Hameyie</Copyright>
+    <Title>PdfiumWrapper native binaries ($(NativeRid))</Title>
+    <Description>Native PDFium runtime binaries for $(NativeRid). Internal runtime package for PdfiumWrapper; reference the main PdfiumWrapper package instead of this one directly.</Description>
+    <PackageTags>pdf;pdfium;native;runtime;$(NativeRid)</PackageTags>
+    <RepositoryUrl>https://github.com/malweka/PdfiumWrapper</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <PackageProjectUrl>https://github.com/malweka/PdfiumWrapper</PackageProjectUrl>
+  </PropertyGroup>
+
+  <!-- All native files for this RID -> runtimes/<rid>/native/ -->
+  <ItemGroup>
+    <None Include="../libs/$(NativeRid)/**/*"
+          Exclude="../libs/$(NativeRid)/**/.DS_Store"
+          Pack="true"
+          PackagePath="runtimes/$(NativeRid)/native/%(RecursiveDir)%(Filename)%(Extension)" />
+  </ItemGroup>
+
+</Project>

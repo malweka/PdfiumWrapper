@@ -9,6 +9,30 @@ PdfiumWrapper ships with native libraries for image format support:
 
 All must be compiled for each target platform and placed in the `src/libs/{rid}/` directory.
 
+## Quick Start
+
+For macOS and Linux, use the Unix build script from the repository root:
+
+```bash
+# Build the host RID
+bash src/native/build-natives.sh --target host --clean
+
+# Or build a specific RID
+bash src/native/build-natives.sh --target osx-arm64 --clean
+bash src/native/build-natives.sh --target osx-x64 --clean
+bash src/native/build-natives.sh --target linux-x64 --clean
+```
+
+The Unix script supports `osx-arm64`, `osx-x64`, and `linux-x64`. Linux builds run in Docker with `--platform linux/amd64`, so Docker must be available. Use `--only pdfium,libtiff,tiff_shim,libjpeg_turbo,pdfium_png` to rebuild selected components, or `--no-pdfium` to skip the PDFium download.
+
+For Windows x64, use the Windows build script:
+
+```cmd
+src\native\build_win_x64.bat
+```
+
+Both scripts create `_native_build/` for downloaded sources and intermediates, then copy final artifacts into `src/libs/{rid}/`. The manual sections below are retained as reference material for troubleshooting or one-off builds.
+
 ## Source Versions
 
 | Library | Version | Source |
@@ -16,7 +40,7 @@ All must be compiled for each target platform and placed in the `src/libs/{rid}/
 | libtiff | 4.7.1 | https://download.osgeo.org/libtiff/tiff-4.7.1.zip |
 | libjpeg-turbo | 3.1.4.1 | https://github.com/libjpeg-turbo/libjpeg-turbo/archive/refs/tags/3.1.4.1.zip |
 | zlib-ng | 2.2.4 | https://github.com/zlib-ng/zlib-ng/archive/refs/tags/2.2.4.zip |
-| libpng | 1.6.56 | http://prdownloads.sourceforge.net/libpng/lpng1656.zip?download |
+| libpng | 1.6.56 | https://github.com/pnggroup/libpng/archive/refs/tags/v1.6.56.zip |
 
 ## Prerequisites
 
@@ -41,6 +65,8 @@ brew install cmake
 macOS ships with zlib already, so libtiff's core dependencies are covered.
 
 ### Linux (x64)
+
+Docker is required for the automated `build-natives.sh --target linux-x64` path. The manual commands below can also be run directly on a Linux host with the native toolchain installed.
 
 Build tools and library dependencies:
 
@@ -322,9 +348,9 @@ rem output: build\Release\zlibstatic.lib
 Download the source:
 
 ```bash
-curl -L -o lpng1656.zip "http://prdownloads.sourceforge.net/libpng/lpng1656.zip?download"
-unzip lpng1656.zip
-cd lpng1656
+curl -L -o libpng-1.6.56.zip https://github.com/pnggroup/libpng/archive/refs/tags/v1.6.56.zip
+unzip libpng-1.6.56.zip
+cd libpng-1.6.56
 ```
 
 Point CMake at the zlib-ng headers and static library from Step 1.
@@ -389,10 +415,10 @@ Link against both libpng and zlib-ng static libraries. No `-lz` flag needed — 
 ```bash
 clang -shared -o libpdfium_png.dylib \
     -arch arm64 \
-    -I/path/to/lpng1656 -I/path/to/lpng1656/build-arm64-static \
+    -I/path/to/libpng-1.6.56 -I/path/to/libpng-1.6.56/build-arm64-static \
     -I/path/to/zlib-ng-2.2.4 \
     src/native/pdfium_png.c \
-    /path/to/lpng1656/build-arm64-static/libpng16.a \
+    /path/to/libpng-1.6.56/build-arm64-static/libpng16.a \
     /path/to/zlib-ng-2.2.4/build-arm64/libz.a \
     -O2 -fPIC -fvisibility=hidden \
     -Wl,-install_name,@rpath/libpdfium_png.dylib
@@ -405,10 +431,10 @@ cp libpdfium_png.dylib src/libs/osx-arm64/
 ```bash
 clang -shared -o libpdfium_png.dylib \
     -arch x86_64 \
-    -I/path/to/lpng1656 -I/path/to/lpng1656/build-x64-static \
+    -I/path/to/libpng-1.6.56 -I/path/to/libpng-1.6.56/build-x64-static \
     -I/path/to/zlib-ng-2.2.4 \
     src/native/pdfium_png.c \
-    /path/to/lpng1656/build-x64-static/libpng16.a \
+    /path/to/libpng-1.6.56/build-x64-static/libpng16.a \
     /path/to/zlib-ng-2.2.4/build-x64/libz.a \
     -O2 -fPIC -fvisibility=hidden \
     -Wl,-install_name,@rpath/libpdfium_png.dylib
@@ -434,8 +460,8 @@ docker run --rm --platform linux/amd64 \
     cd /build &&
 
     # Build libpng against zlib-ng
-    curl -sL -o lpng1656.zip 'http://prdownloads.sourceforge.net/libpng/lpng1656.zip?download' &&
-    unzip -q lpng1656.zip && cd lpng1656 &&
+    curl -sL -o libpng-1.6.56.zip https://github.com/pnggroup/libpng/archive/refs/tags/v1.6.56.zip &&
+    unzip -q libpng-1.6.56.zip && cd libpng-1.6.56 &&
     cmake -B build-static -DBUILD_SHARED_LIBS=OFF -DPNG_TESTS=OFF -DPNG_TOOLS=OFF \
         -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
         -DZLIB_INCLUDE_DIR=/build/zlib-ng-install/include \
@@ -445,10 +471,10 @@ docker run --rm --platform linux/amd64 \
 
     # Build shim
     gcc -shared -o /shim/libpdfium_png.so \
-        -I/build/lpng1656 -I/build/lpng1656/build-static \
+        -I/build/libpng-1.6.56 -I/build/libpng-1.6.56/build-static \
         -I/build/zlib-ng-install/include \
         /shim/pdfium_png.c \
-        /build/lpng1656/build-static/libpng16.a \
+        /build/libpng-1.6.56/build-static/libpng16.a \
         /build/zlib-ng-install/lib/libz.a \
         -O2 -fPIC -fvisibility=hidden -lm
 "
@@ -461,9 +487,9 @@ cp src/native/libpdfium_png.so src/libs/linux-x64/
 From a **x64 Native Tools Command Prompt** (build zlib-ng and libpng static libs first using CMake):
 
 ```cmd
-cl /LD src\native\pdfium_png.c /I \path\to\lpng1656 /I \path\to\lpng1656\build-static ^
+cl /LD src\native\pdfium_png.c /I \path\to\libpng-1.6.56 /I \path\to\libpng-1.6.56\build-static ^
     /I \path\to\zlib-ng-2.2.4 ^
-    \path\to\lpng1656\build-static\Release\libpng16_static.lib ^
+    \path\to\libpng-1.6.56\build-static\Release\libpng16_static.lib ^
     \path\to\zlib-ng-2.2.4\build\Release\zlibstatic.lib ^
     /O2 /link /out:pdfium_png.dll
 
