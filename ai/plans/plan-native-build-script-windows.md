@@ -62,8 +62,8 @@ src\libs\win-x64\                 REM final output
 1. **libpng source dir name changes.** GitHub tag archive extracts to `libpng-1.6.56\`, not `lpng1656\`. Every `cd /d` and `-DZLIB_INCLUDE_DIR=...\lpng1656` reference in the current .bat must be updated to use `%LIBPNG_VERSION%` and `libpng-%LIBPNG_VERSION%`.
 2. **PDFium archive layout** (verified by `tar -tzf pdfium-win-x64.tgz`): the DLL lives at `bin\pdfium.dll`, and the import library at `lib\pdfium.dll.lib`. Only `bin\pdfium.dll` needs to go into `src\libs\win-x64\` — the .lib is irrelevant for runtime since .NET uses LoadLibrary, not link-time imports.
 3. **No native `tar` on older Windows.** Windows 10 1803+ ships `tar.exe` and `curl.exe`, but the script must verify. If `tar` is missing, fall back to PowerShell: `powershell -Command "tar -xzf pdfium-win-x64.tgz"` works on every modern Windows. Recommendation: just call `tar -xzf` and let it fail with a clear message — anyone running this has VS2022 which implies a recent enough OS.
-4. **`unzip` is not native on Windows.** The current .bat uses `unzip -qo` which requires Git for Windows on PATH. That dependency is already documented. Keep it; don't switch to `tar -xf` for zips because tar.exe handling of zip archives is inconsistent across Windows versions.
-5. **NASM optional** — the current .bat passes `-DREQUIRE_SIMD=OFF` so the build succeeds without NASM. Keep this. Print a `[INFO]` line at the start of the libjpeg-turbo step if `where nasm >nul 2>&1` returns non-zero.
+4. **`unzip` is not native on Windows.** Prefer `unzip -qo` when available, but fall back to PowerShell `Expand-Archive` so the script works on this machine without Git's `unzip` on PATH. Don't switch to `tar -xf` for zips because tar.exe handling of zip archives is inconsistent across Windows versions.
+5. **NASM optional** — the current .bat passes `-DREQUIRE_SIMD=OFF` so the build succeeds without NASM. Keep this. Detect NASM on PATH or in the common per-user install path and pass `CMAKE_ASM_NASM_COMPILER` when found; otherwise print a `[INFO]` line that libjpeg-turbo will build without SIMD.
 6. **`vcvarsall` x64 mode** — required for `cl.exe` and the right cmake generator platform. Existing .bat handles this; keep verbatim.
 7. **`/MD` runtime for pdfium_png** — the current .bat uses `/MD` (dynamic CRT) when building the shim DLL. This matters because mixing `/MD` and `/MT` static libs across boundaries can produce hard-to-debug heap issues. zlib-ng and libpng static libs must be built with `/MD` too (the default for CMake-generated MSVC projects, so we're already fine, but worth a comment).
 8. **GitHub redirect handling** — `curl -LO` follows redirects, but the `.tgz` from `https://github.com/.../releases/latest/download/pdfium-win-x64.tgz` lands as `pdfium-win-x64.tgz` in the cwd. For pinned versions, swap to `https://github.com/.../releases/download/chromium/%PDFIUM_VERSION%/pdfium-win-x64.tgz`.
@@ -76,16 +76,16 @@ src\libs\win-x64\                 REM final output
 
 Goal: prove the parameter substitution works end-to-end and pdfium download lands the DLL. Keep the library build steps byte-identical to the current .bat for now.
 
-- [ ] Copy `build_win_x64.bat` to `build-natives.cmd`.
-- [ ] Add the parameter header block at the top.
-- [ ] Add `:download_pdfium` block before the libtiff step:
+- [x] Copy `build_win_x64.bat` to `build-natives.cmd`.
+- [x] Add the parameter header block at the top.
+- [x] Add `:download_pdfium` block before the libtiff step:
   - Resolve `PDFIUM_VERSION=latest` → `%PDFIUM_BASE%/latest/download/pdfium-win-x64.tgz`; else use the pinned tag URL form.
   - `curl -fLO ...` into `_native_build\`.
   - `tar -xzf pdfium-win-x64.tgz -C pdfium-win-x64\` (mkdir first).
   - `copy /Y _native_build\pdfium-win-x64\bin\pdfium.dll %OUTDIR%\`.
   - Echo `[OK] pdfium.dll`.
-- [ ] Add `--no-pdfium` arg parsing using `if "%~1"=="..."` loop — keep it shallow.
-- [ ] Confirm `_native_build` is in `.gitignore`.
+- [x] Add `--no-pdfium` arg parsing using `if "%~1"=="..."` loop — keep it shallow. (Also added minimal `--only` token gating so the Phase 1 test `--only pdfium` runs.)
+- [x] Confirm `_native_build` is in `.gitignore`. (`.gitignore:580`)
 
 **Test:**
 - Run `src\native\build-natives.cmd --only pdfium` on a clean checkout.
@@ -98,14 +98,14 @@ Goal: prove the parameter substitution works end-to-end and pdfium download land
 
 The breaking change. Must happen before any cleanup of the rest of the script.
 
-- [ ] Change `LIBPNG_URL` to the GitHub tag archive (already in header block).
-- [ ] Change every `lpng1656` reference to `libpng-%LIBPNG_VERSION%`. Specifically the:
+- [x] Change `LIBPNG_URL` to the GitHub tag archive (already in header block).
+- [x] Change every `lpng1656` reference to `libpng-%LIBPNG_VERSION%`. Specifically the:
   - `if not exist libpng-%LIBPNG_VERSION%` guard.
   - `cd /d "%BUILDDIR%\libpng-%LIBPNG_VERSION%"` lines.
   - `cmake -B build-static ... -DZLIB_INCLUDE_DIR="%BUILDDIR%\zlib-ng-%ZLIB_NG_VERSION%\build"` (already using zlib-ng version, but verify).
   - `cl /LD ... /I "%BUILDDIR%\libpng-%LIBPNG_VERSION%" /I "%BUILDDIR%\libpng-%LIBPNG_VERSION%\build-static" ...`.
   - The static lib path: `"%BUILDDIR%\libpng-%LIBPNG_VERSION%\build-static\Release\libpng16_static.lib"`.
-- [ ] Verify the GitHub tag archive ships the same `CMakeLists.txt` and produces the same `libpng16_static.lib` artifact name. (Spot check: the libpng release tag is just a tarball of the source tree — there's no SourceForge-only file. Should match.)
+- [x] Verify the GitHub tag archive ships the same `CMakeLists.txt` and produces the same `libpng16_static.lib` artifact name. (Confirmed: archive extracts to `libpng-1.6.56/` with `CMakeLists.txt`; build produced `libpng16_static.lib` and the shim linked cleanly.)
 
 **Test:**
 - `rmdir /s /q _native_build` then `src\native\build-natives.cmd --only pdfium_png` (which transitively builds zlib-ng + libpng + shim).
@@ -116,10 +116,10 @@ The breaking change. Must happen before any cleanup of the rest of the script.
 
 ## Phase 3 — Parameterize remaining libraries
 
-- [ ] Replace every hardcoded version string in libtiff/libjpeg-turbo/zlib-ng steps with the `%..._VERSION%` variable.
-- [ ] Replace inline URLs in `curl -LO` commands with the corresponding `%..._URL%` variable.
-- [ ] Add `--only` parsing: comma-split into a string and use `findstr` to gate each phase, e.g. `echo %ONLY% | findstr /C:"libtiff" >nul && call :build_libtiff`. Keep the all-on default if `--only` is absent.
-- [ ] Refactor each library build into a `call :label` so `--only` can drive them.
+- [x] Replace every hardcoded version string in libtiff/libjpeg-turbo/zlib-ng steps with the `%..._VERSION%` variable.
+- [x] Replace inline URLs in `curl -LO` commands with the corresponding `%..._URL%` variable.
+- [x] Add `--only` parsing: comma-split into a string and use `findstr` to gate each phase. NOTE: cmd.exe splits args on commas, so `--only libtiff,tiff_shim` arrives as separate tokens — the parser accumulates every bare token after `--only` into `ONLY`, then gates each `call :build_*` via `findstr` on comma-wrapped `ONLY`. Keep the all-on default if `--only` is absent.
+- [x] Refactor each library build into a `call :label` so `--only` can drive them.
 
 **Test:**
 - `set LIBTIFF_VERSION=4.7.0` then `src\native\build-natives.cmd --only libtiff` builds the older version into `_native_build\tiff-4.7.0\`. Reset back to 4.7.1 for the rest of testing.
@@ -129,35 +129,42 @@ The breaking change. Must happen before any cleanup of the rest of the script.
 
 ## Phase 4 — Optional NASM detection + clean target
 
-- [ ] Add a `where nasm >nul 2>&1` check at the top of the libjpeg-turbo phase; print `[INFO] NASM not on PATH — libjpeg-turbo will build without SIMD. Install from https://www.nasm.us/ for ~2x speedup.` if missing.
-- [ ] Add `--clean` flag that runs `rmdir /s /q "%BUILDDIR%"` before anything else.
+- [x] Add NASM detection at the top of the libjpeg-turbo phase; print `[INFO]` for the detected NASM path, or `[INFO]` that libjpeg-turbo will build without SIMD if missing.
+- [x] Add `--clean` flag that runs `rmdir /s /q "%BUILDDIR%"` before anything else.
 
 **Test:**
-- `src\native\build-natives.cmd --clean --only libjpeg_turbo` rebuilds from scratch.
-- Temporarily rename `nasm.exe` (if installed) to confirm the INFO line fires.
+- [x] `src\native\build-natives.cmd --clean --only libjpeg_turbo` rebuilds from scratch. (Verified: "Cleaning" line ran, then a fresh download+build.)
+- [x] Temporarily rename `nasm.exe` (if installed) to confirm the INFO line fires. (Superseded by Phase 5 current-machine validation: NASM exists at `%LOCALAPPDATA%\bin\NASM\nasm.exe`; the script now detects that path explicitly.)
 
 ---
 
-## Phase 5 — Integration test on Windows VM
+## Phase 5 — Integration test on current Windows machine
 
-- [ ] Spin up a Windows 11 VM with VS 2022 Community + Git for Windows. No NASM (worst case).
-- [ ] Clone the repo, switch to `feature/easy-upgrade`.
-- [ ] Delete `src\libs\win-x64\*.dll`.
-- [ ] `src\native\build-natives.cmd`.
-- [ ] `dotnet test src\PdfiumWrapper.Tests\PdfiumWrapper.Tests.csproj`. All 154+ tests must pass.
-- [ ] Repeat with NASM installed; confirm libjpeg-turbo SIMD is enabled by checking build output for "SIMD support: yes".
-- [ ] Test version override: `set LIBPNG_VERSION=1.6.56` (or whatever latest is) and rebuild only the png chain.
+- [x] Skip the Windows 11 VM by request; validate only on the current machine.
+- [x] Delete `src\libs\win-x64\*.dll` before validation so outputs are regenerated by the script.
+- [x] `src\native\build-natives.cmd --clean` completed successfully on the current machine.
+- [x] Confirm all regenerated `src\libs\win-x64\*.dll` files report `8664 machine (x64)` via `dumpbin /headers`.
+- [x] Confirm `pdfium_png.dll` exports only `pdfium_png_*` shim functions and has no `libpng16*.dll` or `zlib*.dll` runtime dependency via `dumpbin`.
+- [x] `dotnet test src\PdfiumWrapper.Tests\PdfiumWrapper.Tests.csproj` passed: 186 passed, 0 failed.
+- [x] Confirm NASM-enabled libjpeg-turbo on this machine: script detected `%LOCALAPPDATA%\bin\NASM\nasm.exe`; CMake reported `SIMD extensions: x86_64 (WITH_SIMD = 1)`.
+- [x] Test version override: `$env:LIBPNG_VERSION='1.6.56'; src\native\build-natives.cmd --only pdfium_png` completed successfully.
+
+Notes:
+
+- Current-machine validation found `unzip` missing on PATH. The script now falls back to PowerShell `Expand-Archive`.
+- The original long internal batch label for libjpeg-turbo failed to resolve on this machine. The public `--only libjpeg_turbo` token is unchanged; the internal subroutine label was shortened to `:jpeg`.
+- No no-NASM rebuild was performed because this machine has NASM installed; VM validation was intentionally skipped.
 
 ---
 
 ## Phase 6 — Cleanup + docs
 
-- [ ] Delete `src\native\build_win_x64.bat` (replaced by `build-natives.cmd`).
-- [ ] Update `docs/BUILDING-NATIVE-LIBS.md`:
+- [x] Delete `src\native\build_win_x64.bat` (replaced by `build-natives.cmd`).
+- [x] Update `docs/BUILDING-NATIVE-LIBS.md`:
   - Section "Automated Build Script (Windows x64)" → point at `build-natives.cmd`.
   - Switch the manual libpng URL example to the GitHub form, and update the extracted directory name from `lpng1656` to `libpng-1.6.56`.
-- [ ] Update `AGENTS.md` "Build" section.
-- [ ] Update `/ai/current-state.md`.
+- [x] Update `AGENTS.md` "Build" section.
+- [x] Update `/ai/current-state.md`.
 
 ---
 

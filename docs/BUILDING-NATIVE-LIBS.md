@@ -28,7 +28,7 @@ The Unix script supports `osx-arm64`, `osx-x64`, and `linux-x64`. Linux builds r
 For Windows x64, use the Windows build script:
 
 ```cmd
-src\native\build_win_x64.bat
+src\native\build-natives.cmd --clean
 ```
 
 Both scripts create `_native_build/` for downloaded sources and intermediates, then copy final artifacts into `src/libs/{rid}/`. The manual sections below are retained as reference material for troubleshooting or one-off builds.
@@ -84,7 +84,9 @@ dnf install gcc gcc-c++ cmake zlib-devel libjpeg-turbo-devel nasm
 
 - Visual Studio 2022 (or Build Tools) with C++ workload
 - CMake (bundled with Visual Studio or install separately)
-- NASM (for libjpeg-turbo SIMD support) — download from https://www.nasm.us/ and add to PATH
+- curl and tar (included with current Windows releases)
+- unzip on PATH, or PowerShell `Expand-Archive` as the script fallback
+- NASM (optional, for libjpeg-turbo SIMD support) — download from https://www.nasm.us/
 
 ---
 
@@ -502,17 +504,18 @@ copy pdfium_png.dll src\libs\win-x64\
 
 ## Automated Build Script (Windows x64)
 
-Instead of running each step manually, you can use the all-in-one build script at [`src/native/build_win_x64.bat`](../src/native/build_win_x64.bat). It downloads all source archives, builds every library in the correct order, and copies the resulting DLLs to `src/libs/win-x64/`.
+Instead of running each step manually, you can use the all-in-one build script at [`src/native/build-natives.cmd`](../src/native/build-natives.cmd). It downloads PDFium and all source archives, builds every library in the correct order, and copies the resulting DLLs to `src/libs/win-x64/`.
 
 ### Prerequisites
 
 - **Visual Studio 2022 or later** with the **"Desktop development with C++"** workload (provides MSVC, CMake, and MSBuild)
-- **Git for Windows** (provides `curl` and `unzip` used by the script)
-- **(Optional) NASM** — for libjpeg-turbo SIMD acceleration. Download from https://www.nasm.us/ and add to PATH. Without NASM the build still succeeds, but JPEG encoding/decoding will be slower.
+- **curl and tar** — included with current Windows releases
+- **unzip or PowerShell** — `unzip` is used when available; otherwise the script falls back to PowerShell `Expand-Archive`
+- **(Optional) NASM** — for libjpeg-turbo SIMD acceleration. Download from https://www.nasm.us/. Without NASM the build still succeeds, but JPEG encoding/decoding will be slower.
 
 ### Configuration
 
-Open `src/native/build_win_x64.bat` and verify the `VSDIR` variable near the top matches your Visual Studio installation path:
+Open `src/native/build-natives.cmd` and verify the `VSDIR` variable near the top matches your Visual Studio installation path:
 
 ```bat
 set VSDIR=C:\Program Files\Microsoft Visual Studio\18\Enterprise
@@ -532,7 +535,7 @@ The script calls `vcvarsall.bat` automatically, so you do **not** need to run it
 
 ```cmd
 cd path\to\PdfiumWrapper
-src\native\build_win_x64.bat
+src\native\build-natives.cmd --clean
 ```
 
 The script will:
@@ -540,6 +543,7 @@ The script will:
 1. Create a temporary `_native_build\` directory in the project root
 2. Download and extract source archives (skipped if already present from a prior run)
 3. Build each library in order:
+   - **PDFium** → `pdfium.dll`
    - **libtiff 4.7.1** → `tiff.dll`
    - **tiff_shim** → `tiff_shim.dll` (compiled against the libtiff from step 1)
    - **libjpeg-turbo 3.1.4.1** → `turbojpeg.dll`
@@ -549,6 +553,22 @@ The script will:
 4. Copy all DLLs to `src\libs\win-x64\`
 
 Each step prints `[OK]` on success. If any step fails, the script stops and prints the error code.
+
+Useful options:
+
+```cmd
+src\native\build-natives.cmd --only pdfium
+src\native\build-natives.cmd --only libtiff,tiff_shim
+src\native\build-natives.cmd --only pdfium_png
+src\native\build-natives.cmd --no-pdfium
+```
+
+Library versions can be overridden from the caller environment:
+
+```cmd
+set LIBPNG_VERSION=1.6.56
+src\native\build-natives.cmd --only pdfium_png
+```
 
 ### Cleanup
 

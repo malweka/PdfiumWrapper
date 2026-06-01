@@ -224,7 +224,7 @@ bash src/native/build-natives.sh --target linux-x64 --clean
 # Native libs must exist in src/libs/{rid}/ — see docs/BUILDING-NATIVE-LIBS.md
 ```
 
-For Windows x64 native binaries, run `src\native\build_win_x64.bat`.
+For Windows x64 native binaries, run `src\native\build-natives.cmd --clean`.
 
 The `.csproj` auto-detects the platform RID and includes native binaries with `Exists()` conditions — missing binaries don't break the build, only runtime calls that need them.
 
