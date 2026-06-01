@@ -1,5 +1,93 @@
 # Agent Instructions for PdfiumWrapper
 
+# Agent Instructions
+
+## Startup Instructions
+
+Before starting work:
+
+1. Read this file: `AGENTS.md` and `README.md`.
+2. Read `/ai/current-state.md`.
+3. Check `/ai/plans` for any active plan related to the task.
+
+
+## Project State Tracking
+
+Agents must keep `/ai/current-state.md` updated.
+
+Update `/ai/current-state.md`:
+
+- Before stopping work.
+- After completing a meaningful task.
+- When switching to a different feature or task.
+- When new blockers or open questions are discovered.
+
+The file must always include:
+
+- Current focus.
+- What was completed.
+- What is in progress.
+- The next recommended step.
+- Blockers or open questions.
+- Recently changed files.
+
+## Plan File Rules
+
+When creating a new implementation plan, save it under:
+
+```text
+/ai/plans/
+```
+
+Plan filenames must use this format:
+
+```text
+plan-<feature>.md
+```
+
+Examples:
+
+```text
+plan-authentication.md
+plan-document-upload.md
+plan-admin-dashboard.md
+plan-ef-core-migrations.md
+```
+
+Use lowercase words separated by hyphens.
+
+Do not create generic names such as:
+
+```text
+plan.md
+implementation.md
+tasks.md
+```
+
+## Working Rules
+
+When executing a plan:
+
+1. Read the related `plan-<feature>.md` file.
+2. Work through the checklist in order unless there is a good reason not to.
+3. Check off completed items.
+4. Update `/ai/current-state.md` before stopping.
+5. Add notes about any decisions, blockers, or files changed.
+
+## Diagram Instructions
+
+When creating, generating, drawing, designing, or exporting diagrams, flowcharts, architecture diagrams, ER diagrams, sequence diagrams, class diagrams, network diagrams, mockups, wireframes, or UI sketches, use the `drawio` skill.
+
+## Before Stopping Work
+
+Before ending a session, always update `/ai/current-state.md` with:
+
+1. What was completed.
+2. What is still in progress.
+3. The exact next step.
+4. Any blockers or open questions.
+5. Files recently changed.
+
 ## Project Overview
 
 PdfiumWrapper is a .NET 8 library wrapping Google's PDFium for PDF manipulation and native libtiff for TIFF export. It targets high-throughput document processing services handling thousands of files.
@@ -127,8 +215,16 @@ dotnet build src/PdfiumWrapper/PdfiumWrapper.csproj
 # Test
 dotnet test src/PdfiumWrapper.Tests/PdfiumWrapper.Tests.csproj
 
+# Build/download native libraries on macOS/Linux
+bash src/native/build-natives.sh --target host --clean
+bash src/native/build-natives.sh --target osx-arm64 --clean
+bash src/native/build-natives.sh --target osx-x64 --clean
+bash src/native/build-natives.sh --target linux-x64 --clean
+
 # Native libs must exist in src/libs/{rid}/ — see docs/BUILDING-NATIVE-LIBS.md
 ```
+
+For Windows x64 native binaries, run `src\native\build-natives.cmd --clean`.
 
 The `.csproj` auto-detects the platform RID and includes native binaries with `Exists()` conditions — missing binaries don't break the build, only runtime calls that need them.
 

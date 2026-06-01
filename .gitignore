@@ -578,3 +578,5 @@ cython_debug/
 #.idea/
 
 _native_build/
+src/native/*.zip
+src/native/*.tgz
