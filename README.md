@@ -164,6 +164,8 @@ See [Best Practices](docs/BEST-PRACTICES.md) and [High-Throughput Processing](do
 - `new PdfDocument(Stream)` and `new PdfMerger(Stream)` read the stream to its end during construction; the stream can be closed immediately afterwards.
 - Saving to a stream writes after the PDF has been serialized in memory. An exception thrown by the destination stream (for example `IOException`) now reaches the caller unchanged.
 - A document owns the forms returned by `GetForm()` and the page objects removed from its pages; disposing the document disposes them.
+- `PdfImageObject.GetBitmap()` and `GetRenderedBitmap()` return managed BGRA pixels (`RawBitmap?`) instead of a native bitmap handle. `GetRenderedBitmap` takes a `PdfPage` instead of a page handle.
+- `StreamImageBytesAsync` and `StreamJpegBytesAsync` return without waiting for the native gate; an empty document is reported when enumeration starts rather than by the call.
 
 ## License
 

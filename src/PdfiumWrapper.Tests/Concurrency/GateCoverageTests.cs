@@ -119,9 +119,8 @@ public class GateCoverageTests : IDisposable
             // Argument or state errors are fine: the member still has to reach the gate first.
         }
 
-        bool entered = PdfiumDiagnostics.GateEntryCount > before;
-
-        // Run lazy and asynchronous results to completion so nothing is left in flight.
+        // Run lazy and asynchronous results to completion: nothing is left in flight, and a member
+        // that defers its native work (an async stream) has reached the gate by then.
         try
         {
             switch (result)
@@ -140,6 +139,8 @@ public class GateCoverageTests : IDisposable
         catch (Exception)
         {
         }
+
+        bool entered = PdfiumDiagnostics.GateEntryCount > before;
 
         switch (result)
         {

@@ -62,6 +62,15 @@ Capacity:
 
 Decision gate (R13): `max_W R_inproc(W) = 1.62` docs/sec, so the usable in-process rate is `0.8 x 1.62 = 1.30` docs/sec. The rule builds the pool only if that is below `N / T` and the consumer cannot add replicas, or the consumer needs isolation from native aborts. `N`, `T` and the replica question are still open inputs, and the crash-probe table is empty. The pool was not built. The measurements do say that a burst of thousands of documents in a short window is beyond one process on this hardware and needs several processes; replicas of the consumer's service are the first route (plan 3.3), the pool the second.
 
+Review follow-up (pull request 15, 2026-10-02). Four findings, all confirmed and fixed:
+
+- Burst runner deleted whatever directory `--out` named, even with `--keep-output true`. Each run now writes into its own new child directory and removes only that.
+- Burst runner's mix used a fixed stride of 37 and collapsed to one format when the weights summed to a multiple of 37 (`png:18,jpeg:19` gave 74 PNG and no JPEG). The stride is now chosen coprime with the total. The recorded runs used a total of 100, for which the job sequence is unchanged.
+- `PdfImageObject.GetBitmap()` and `GetRenderedBitmap()` returned a caller-owned native bitmap that callers could no longer destroy once the raw imports became internal. They now return managed BGRA pixels (`RawBitmap?`); the native bitmap is leased, counted, copied outside the gate and destroyed.
+- `StreamImageBytesAsync` and `StreamJpegBytesAsync` called the synchronous page-count check and so blocked on the gate. The factory now does managed validation only; the page count is awaited when enumeration starts. The starvation scenario gained a `stream` mode.
+
+228 tests pass on win-x64 and linux-x64 after these changes.
+
 Left open:
 
 - `N`, `T`, the real document mix, and whether the consumer can run replicas. These decide Phases 5 to 7.

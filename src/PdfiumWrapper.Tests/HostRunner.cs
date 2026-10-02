@@ -29,41 +29,45 @@ internal static class HostRunner
 {
     private const string HostAssemblyName = "PdfiumWrapper.Tests.Host";
 
+    /// <summary>The scenario host. It builds next to this project.</summary>
+    public static string HostPath => SiblingAssemblyPath(HostAssemblyName);
+
     /// <summary>
-    /// The host builds next to this project; its output mirrors ours (same configuration and TFM).
+    /// The built assembly of a sibling project whose output mirrors ours (same configuration and TFM).
     /// </summary>
-    public static string HostPath
+    public static string SiblingAssemblyPath(string assemblyName)
     {
-        get
-        {
-            var baseDir = AppContext.BaseDirectory.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
-            var tfmDir = new DirectoryInfo(baseDir);
-            var configurationDir = tfmDir.Parent!;
-            var projectDir = configurationDir.Parent!.Parent!;
-            var path = Path.Combine(projectDir.Parent!.FullName, HostAssemblyName, "bin",
-                configurationDir.Name, tfmDir.Name, HostAssemblyName + ".dll");
-            Assert.True(File.Exists(path), $"Test host not found at '{path}'. Build {HostAssemblyName} first.");
-            return path;
-        }
+        var baseDir = AppContext.BaseDirectory.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        var tfmDir = new DirectoryInfo(baseDir);
+        var configurationDir = tfmDir.Parent!;
+        var projectDir = configurationDir.Parent!.Parent!;
+        var path = Path.Combine(projectDir.Parent!.FullName, assemblyName, "bin",
+            configurationDir.Name, tfmDir.Name, assemblyName + ".dll");
+        Assert.True(File.Exists(path), $"'{assemblyName}' not found at '{path}'. Build it first.");
+        return path;
     }
 
     public static string Input(string fileName)
         => Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, Bootstrapper.TestFilesDirectory, fileName));
 
     public static HostResult Run(string scenario, TimeSpan timeout, params string[] keyValues)
+        => RunAssembly(HostAssemblyName, timeout, new[] { scenario }.Concat(keyValues).ToArray());
+
+    /// <summary>Runs a sibling project's executable assembly with <c>dotnet</c> and captures its output.</summary>
+    public static HostResult RunAssembly(string assemblyName, TimeSpan timeout, params string[] arguments)
     {
+        string assemblyPath = SiblingAssemblyPath(assemblyName);
         var psi = new ProcessStartInfo("dotnet")
         {
             RedirectStandardOutput = true,
             RedirectStandardError = true,
             UseShellExecute = false,
             CreateNoWindow = true,
-            WorkingDirectory = Path.GetDirectoryName(HostPath)!,
+            WorkingDirectory = Path.GetDirectoryName(assemblyPath)!,
         };
-        psi.ArgumentList.Add(HostPath);
-        psi.ArgumentList.Add(scenario);
-        foreach (var keyValue in keyValues)
-            psi.ArgumentList.Add(keyValue);
+        psi.ArgumentList.Add(assemblyPath);
+        foreach (var argument in arguments)
+            psi.ArgumentList.Add(argument);
 
         using var process = Process.Start(psi)!;
         var stdout = process.StandardOutput.ReadToEndAsync();
@@ -72,7 +76,7 @@ internal static class HostRunner
         if (!process.WaitForExit((int)timeout.TotalMilliseconds))
         {
             process.Kill(entireProcessTree: true);
-            throw new TimeoutException($"Host scenario '{scenario}' did not finish within {timeout}.");
+            throw new TimeoutException($"'{assemblyName} {string.Join(' ', arguments)}' did not finish within {timeout}.");
         }
 
         process.WaitForExit();

@@ -293,6 +293,8 @@ foreach (var bytes in document.StreamImageBytes(ImageFormat.Png, quality: 100, d
 
 Async streaming version. Waits for the native gate without blocking a thread and uses `Task.Yield()` between pages.
 
+The call itself returns at once and never waits for the gate. It throws immediately if the document is disposed or the format cannot be streamed (`ImageFormat.Tiff`). An empty document is reported (`InvalidOperationException`) when enumeration starts, because reading the page count is native work. The same holds for `StreamJpegBytesAsync`.
+
 ```csharp
 await foreach (var bytes in document.StreamImageBytesAsync(ImageFormat.Jpeg, 85, 200))
 {
@@ -674,6 +676,23 @@ var image = page.AddImage(imageBytes, x: 100, y: 500, width: 200, height: 150);
 Images are decoded using native libraries (libjpeg-turbo and libpng):
 - PNG
 - JPEG
+
+#### Reading Pixels
+
+| Method | Description |
+|--------|-------------|
+| `GetBitmap()` | The image's own pixels, without its mask or transformation, as a `RawBitmap` (BGRA). Returns `null` if the image has no bitmap |
+| `GetRenderedBitmap(PdfPage? page = null)` | The image as it appears on the page, with mask and transformation applied, as a `RawBitmap` (BGRA). Pass the page the image is on for better color handling |
+
+Both return managed pixels. The native bitmap PDFium produces is copied and destroyed by the wrapper, so there is nothing to release. Grayscale and BGR images are expanded to BGRA with full opacity.
+
+```csharp
+RawBitmap? pixels = image.GetBitmap();
+if (pixels != null)
+    Console.WriteLine($"{pixels.Width}x{pixels.Height}, {pixels.Pixels.Length} bytes");
+```
+
+**Changed in 2.0:** these methods returned a native bitmap handle (`IntPtr`) that the caller had to destroy with `PDFium.FPDFBitmap_Destroy`. That function is no longer public, so they return managed pixels instead.
 
 ---
 

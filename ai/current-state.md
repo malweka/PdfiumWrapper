@@ -2,16 +2,33 @@
 
 ## Current focus
 
-`ai/plans/plan-pdfium-concurrency.md` Release 1 is implemented, tested and measured (2026-10-02) on branch `feature/pdfium-concurrency-plan`. All PDFium use goes through one process-wide gate (`PdfiumRuntime`); the package version is 2.0.0. Release 2 (the process pool, Phases 5 to 7) was not built: the Phase 4 decision gate needs inputs only the project owner has.
+Global installation of `ai-pr-review` is complete: copied PonaFlow's skill to `C:/Users/hamsm/.codex/skills/ai-pr-review` and verified matching SHA-256 hashes. It will be available across Codex projects on the next turn.
+
+PR #15 architecture review is complete (2026-10-02), at head `ecb22a546a403ccb05bded8d7180edf08272276a`, against merge base `9021729ca8e6cfa420a15648dfddb2e779820187`. Verdict: request changes for four reproduced findings below. Release 1 of `ai/plans/plan-pdfium-concurrency.md` is implemented on `feature/pdfium-concurrency-plan` (version 2.0.0); Release 2 remains deferred pending the owner's capacity/deployment inputs. Review only: no implementation or test sources were changed.
 
 ## Completed
+
+### Latest task: install ai-pr-review globally (2026-10-02)
+
+- Copied the complete `C:/Dev/emh/PonaFlow/.agents/skills/ai-pr-review` directory to `C:/Users/hamsm/.codex/skills/ai-pr-review`, following the skill-installer destination convention. `CODEX_HOME` was unset; the global destination did not already exist.
+- Verified the installed file count and every file's SHA-256 hash against the source. PonaFlow's source copy was preserved. No blockers; no library code changed or tests rerun for this file-copy task. Use `$ai-pr-review pr <number>` from any project on the next turn.
+
+### Latest task: review PR #15 (2026-10-02)
+
+- Applied the explicitly requested `ai-pr-review` skill from `C:/Dev/emh/PonaFlow/.agents/skills/ai-pr-review/SKILL.md`; read repository instructions, README, current state, concurrency plan, authenticated PR metadata, diff and relevant native source/callers/tests. Local HEAD matches the PR head; initial working tree was clean.
+- Ran `dotnet test src/PdfiumWrapper.Tests/PdfiumWrapper.Tests.csproj --no-restore --verbosity quiet`: 219 passed, zero failures, on win-x64. Existing NuGet vulnerability warnings for the unchanged Magick.NET test dependency remain. Built the benchmark project successfully with `--no-restore` (zero warnings/errors). Linux/macOS and performance tables were not rerun.
+- Reproduced synchronous admission in `PdfDocument.StreamImageBytesAsync`: its factory call did not return during a 300 ms gate hold, and returned after the gate was released. It calls synchronous `RequirePages()` before returning the async iterator.
+- Reproduced missing bitmap ownership in `PdfImageObject.GetBitmap`: returned a nonzero caller-owned bitmap, live-handle delta was zero, no public bitmap release method exists, and `LiveHandleCount` was zero after disposing the document/page while the bitmap remained alive. Confirmed both bitmap getter ownership contracts against the bundled PDFium header. The probe cleaned up its bitmap through reflection under the gate.
+- Reproduced destructive benchmark output handling using only a newly created temporary fixture: `BurstRunner.Run` deleted a pre-existing sentinel in its `--out` directory even with `--keep-output true`.
+- Reproduced incorrect benchmark format allocation: 74 jobs with `--mix png:18,jpeg:19` produced 74 PNGs and zero JPEGs (expected 36/38); fixed stride 37 collapses all slots when total weight is 37.
+- Probe sources, binaries, fixtures and reports were created only under `%TEMP%/pdfium-pr15-review-5912bf2272b4459bb753acaeea4d3e77/`. No PR comment, fetch, push, merge or implementation fix was performed. Only this required state record was modified in the repository.
 
 ### Latest task: implement the concurrency plan, Release 1 (2026-10-02)
 
 - Phase 0: `NativeLibraryResolver` static-constructor barrier; `PdfPageDeletionExample` in the `PDF Tests` collection plus `TestProjectHygieneTests`; `PdfiumWrapper.Tests.Host` and `HostRunner`. The `init-race` scenario aborted the pre-gate code in 8 of 8 runs.
 - Phase 1: tag `bench-baseline-pre-gate` (commit `f2478f6`); `SmallDocumentBenchmark`, burst runner, `cold-start` scenario; baselines recorded in `benchmark.md`.
 - Phase 2: `PdfiumRuntime` (reentrant gate, init, deferred release, `Shutdown`), `PdfiumDiagnostics`, `SharedState`, `SpooledInput`, `PooledFileWriter`, `BitmapLease`. Every public PDFium-touching member of the wrapper types enters the gate. Finalizers only enqueue. The 192 raw imports are `internal`. `StreamDocumentLoader` and `PdfStreamFileWriter` are deleted.
-- Phase 3: `src/PdfiumWrapper.Tests/Concurrency/` (`GateCoverageTests`, `PdfiumConcurrencyTests`, `PdfiumHostTests`) and host scenarios `init-race`, `cold-start`, `starvation`, `finalizer-drain`, `alc-shared-gate`, `shutdown`, `crash-probe`. 219 tests pass on win-x64 and linux-x64 (Docker, .NET 8 SDK image).
+- Phase 3: `src/PdfiumWrapper.Tests/Concurrency/` (`GateCoverageTests`, `PdfiumConcurrencyTests`, `PdfiumHostTests`) and host scenarios `init-race`, `cold-start`, `starvation`, `finalizer-drain`, `alc-shared-gate`, `shutdown`, `crash-probe`. 219 tests passed on win-x64 and linux-x64 (Docker, .NET 8 SDK image) at that point; 228 after the review follow-up.
 - Phase 4: `GateOverheadBenchmark`, `ConcurrentCallersBenchmark`, `StreamCallbackBenchmark`, instrumented burst runs, replica scale-out runs. Results and the decision are in `benchmark.md` and in the plan's "Implementation record".
 - Phase 8: `README.md`, `AGENTS.md`, `docs/API-REFERENCE.md`, `docs/BEST-PRACTICES.md`, `docs/HIGH-THROUGHPUT-PROCESSING.md`, `docs/TROUBLESHOOTING.md` rewritten for the gate, with measured capacity and a sizing rule.
 - The shipped code departs from the plan's section 4 reference code in several places (async admission, drain ordering, release of backing memory, spool files, forms, save API names). Each is listed with its reason in the plan's "Implementation record".
@@ -24,6 +41,12 @@ Key measurements (one machine: i7-13700F, 24 logical processors, win-x64):
 - Several processes: 3.13 docs/sec with 2, 5.75 with 4, 9.05 with 8, 11.07 with 16.
 - Async API keeps the pool free (heartbeat p99 1.3 ms against 2.5 s with the sync API on pool threads).
 - Crash probe: 25 damaged inputs per platform, no process abort.
+
+### Review follow-up on pull request 15 (2026-10-02)
+
+- Pull request: https://github.com/malweka/PdfiumWrapper/pull/15 (`feature/pdfium-concurrency-plan` into `main`).
+- Fixed four review findings: the burst runner no longer deletes the `--out` directory (run-owned child directory); its format mix is exact for any weights; `PdfImageObject.GetBitmap()` / `GetRenderedBitmap()` return managed BGRA pixels instead of an unreleasable native handle; `StreamImageBytesAsync` / `StreamJpegBytesAsync` no longer wait synchronously for the gate.
+- Added `BurstRunnerTests` (runs the benchmark executable as a child process), tests for async stream admission and validation timing, a `stream` mode in the starvation scenario, and an image-bitmap test. 228 tests pass on win-x64 and linux-x64.
 
 ### Previous task: implementation-readiness check (2026-10-02)
 
@@ -109,22 +132,25 @@ Key measurements (one machine: i7-13700F, 24 logical processors, win-x64):
 
 ## In progress
 
-- Nothing. Release 1 is complete on the branch.
+- Nothing active. The global skill installation and PR #15 review are complete; the four PR findings await an implementation request.
 
 ## Next recommended step
 
+0. Address PR #15 findings: isolate benchmark outputs in a fresh run-owned child directory; replace raw image-bitmap returns with managed pixels or tracked disposable ownership; move async streaming's native page-count validation to async admission; fix weighted format scheduling for totals sharing a factor with 37. Add regressions for these paths and rerun the full suite before merge.
 1. Project owner supplies `N` (documents per burst), `T` (window), the real document mix, and whether the consuming service can run several replicas behind its queue. With those, apply rule R13: if replicas are possible, size them from `benchmark.md` and stop; if not, build the process pool (plan Phases 5 to 7).
 2. Run the test suite on macOS (osx-x64, osx-arm64); it has only been run on win-x64 and linux-x64.
 3. Review and merge `feature/pdfium-concurrency-plan`. It is a major version (2.0.0): raw `PDFium.*` imports are no longer public.
 
 ## Blockers or open questions
 
+- PR #15 should not merge before its reproduced data-loss issue (`BurstRunner.cs:77-78`) and bitmap/async/format-scheduling defects are addressed. No fixes were authorized during the review.
 - The Release 2 decision is open for the reason above. The measurements say a burst of thousands of documents in a short window is beyond one process on the test hardware (usable rate about 1.3 docs/sec per process on the mixed corpus), so some multi-process arrangement is needed; which one is the owner's call.
 - macOS not verified.
 - Cold start with a document first is about 5 ms slower than before: initialization now loads libtiff to install its error handlers. Moving that to the first TIFF write would recover it.
 - Merge benchmark moved between -5.9% and +4.4% by document (buffered save). Peak memory during a save now includes the whole output.
 - `benchmark.db` was not updated with the new runs; the tables are in `benchmark.md` only.
 - The starvation test bound (heartbeat p99 under 100 ms) is loose against the measured 1.3 ms.
+- `PdfImageObject.SetBitmap(IntPtr, IntPtr)` and `SetImage(byte[], IntPtr)` are still public but take native handles that public callers can no longer obtain; `PdfPage.AddImage` is the usable path. Not changed.
 - `docs/DOCUMENT_PROPERTIES_IMPLEMENTATION.md` still shows pre-gate implementation snippets with raw `PDFium.FPDF_*` calls. `.github/copilot-instructions.md` points at `AGENT.md`; the file is `AGENTS.md`.
 - Other raw import signatures were not audited. The gate-coverage test exercised every public member once and found one wrong signature; imports not reachable from the public API are unchecked.
 - Benchmarks on this machine: run a baseline worktree from the same volume and kind of directory as the repository. A worktree under `%TEMP%` made file opens about 60 µs slower.
@@ -142,6 +168,11 @@ Earlier notes:Earlier notes:
 - Shell commands required escalation because the Windows sandbox shell failed with `windows sandbox: spawn setup refresh`.
 
 ## Recently changed files
+
+- Global skill installation session: `C:/Users/hamsm/.codex/skills/ai-pr-review/SKILL.md` (outside the repository), `ai/current-state.md`.
+- Current review session: `ai/current-state.md` only.
+
+Previous implementation session:
 
 - `src/PdfiumWrapper/`: new `PdfiumRuntime.cs`, `PdfiumDiagnostics.cs`, `SharedState.cs`, `SpooledInput.cs`, `PooledFileWriter.cs`, `BitmapLease.cs`; rewritten `PdfDocument.cs`, `PdfPage.cs`, `PdfMerger.cs`, `PdfForm.cs`, `PdfPageObject.cs` and subtypes, `PdfMetadata.cs`, `PdfBookmarks.cs`, `PdfAttachments.cs`, `PdfHelpers.cs`, `TiffWriter.cs`, `NativeLibraryResolver.cs`; `PDFium*.cs` imports made internal; version 2.0.0 in both `.csproj` files
 - `src/PdfiumWrapper.Tests/`: `Concurrency/*`, `HostRunner.cs`, `TestProjectHygieneTests.cs`, `Bootstrapper.cs`, `PdfMergerTests.cs`, `PdfPageEditingTests.cs`, `PdfDocumentTests.cs`

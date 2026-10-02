@@ -58,6 +58,12 @@ public class PdfiumHostTests
         Assert.Equal(asyncRun.Json.GetProperty("callers").GetInt32(), asyncRun.Json.GetProperty("completed").GetInt32());
         Assert.True(asyncRun.Json.GetProperty("heartbeatP99Ms").GetDouble() <= 100);
 
+        // Async image streaming: neither the factory call nor the enumeration may park pool threads.
+        var streamRun = RunScenario("starvation", "mode=stream", "bound=100", input);
+        Assert.True(streamRun.ExitCode == 0, streamRun.ToString());
+        Assert.Equal(streamRun.Json.GetProperty("callers").GetInt32(), streamRun.Json.GetProperty("completed").GetInt32());
+        Assert.True(streamRun.Json.GetProperty("heartbeatP99Ms").GetDouble() <= 100);
+
         // The synchronous API on pool threads blocks them while waiting for the gate. Only
         // completion is asserted; the heartbeat figures document the difference.
         var syncRun = RunScenario("starvation", "mode=sync", input);

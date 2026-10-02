@@ -121,6 +121,9 @@ public static partial class PDFium
     internal static partial int FPDFBitmap_GetStride(IntPtr bitmap);
 
     [LibraryImport(LibraryName)]
+    internal static partial int FPDFBitmap_GetFormat(IntPtr bitmap);
+
+    [LibraryImport(LibraryName)]
     internal static partial void FPDFBitmap_Destroy(IntPtr bitmap);
 
     #endregion

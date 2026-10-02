@@ -684,6 +684,12 @@ public class PdfDocument : IDisposable
         }
     }
 
+    private static void RequireStreamableFormat(ImageFormat format)
+    {
+        if (format is not (ImageFormat.Jpeg or ImageFormat.Png))
+            throw new ArgumentOutOfRangeException(nameof(format), "Use SaveAsTiff for TIFF output");
+    }
+
     private static RawBitmap ToRawBitmap(BitmapLease lease)
         => new(lease.ToArray(), lease.Width, lease.Height, lease.Stride);
 
@@ -783,6 +789,7 @@ public class PdfDocument : IDisposable
     {
         // Validate eagerly; the iterator below runs lazily.
         int pageCount = RequirePages();
+        RequireStreamableFormat(format);
 
         return StreamImageBytesCore(format, quality, dpiWidth, dpiHeight, pageCount);
     }
@@ -930,6 +937,12 @@ public class PdfDocument : IDisposable
     /// }
     /// </code>
     /// </example>
+    /// <remarks>
+    /// This call returns without waiting for the native gate. It throws at once if the document is
+    /// disposed or <paramref name="format"/> cannot be streamed. An empty document is reported
+    /// (<see cref="InvalidOperationException"/>) when enumeration starts, because reading the page
+    /// count is native work and is awaited there.
+    /// </remarks>
     public IAsyncEnumerable<byte[]> StreamImageBytesAsync(ImageFormat format, int quality = 100, int dpi = 300)
     {
         return StreamImageBytesAsync(format, quality, dpi, dpi);
@@ -938,14 +951,18 @@ public class PdfDocument : IDisposable
     /// <inheritdoc cref="StreamImageBytesAsync(ImageFormat, int, int)"/>
     public IAsyncEnumerable<byte[]> StreamImageBytesAsync(ImageFormat format, int quality, int dpiWidth, int dpiHeight)
     {
-        // Validate eagerly; the iterator below runs lazily.
-        int pageCount = RequirePages();
+        // Managed validation only: a synchronous wait for the gate here would block the caller's
+        // thread. The page count is native work and is awaited inside the iterator.
+        ThrowIfDisposed();
+        RequireStreamableFormat(format);
 
-        return StreamImageBytesCoreAsync(format, quality, dpiWidth, dpiHeight, pageCount);
+        return StreamImageBytesCoreAsync(format, quality, dpiWidth, dpiHeight);
     }
 
-    private async IAsyncEnumerable<byte[]> StreamImageBytesCoreAsync(ImageFormat format, int quality, int dpiWidth, int dpiHeight, int pageCount)
+    private async IAsyncEnumerable<byte[]> StreamImageBytesCoreAsync(ImageFormat format, int quality, int dpiWidth, int dpiHeight)
     {
+        int pageCount = await RequirePagesAsync().ConfigureAwait(false);
+
         if (format == ImageFormat.Jpeg)
         {
             using var encoder = new JpegEncoder();
@@ -1199,6 +1216,10 @@ public class PdfDocument : IDisposable
     /// Streams JPEG bytes one page at a time using <c>IAsyncEnumerable</c>.
     /// Uses native libjpeg-turbo — no SkiaSharp involved.
     /// </summary>
+    /// <remarks>
+    /// This call returns without waiting for the native gate. An empty document is reported
+    /// (<see cref="InvalidOperationException"/>) when enumeration starts.
+    /// </remarks>
     public IAsyncEnumerable<byte[]> StreamJpegBytesAsync(int quality = 90, int dpi = 300)
     {
         return StreamJpegBytesAsync(quality, dpi, dpi);
@@ -1206,9 +1227,9 @@ public class PdfDocument : IDisposable
 
     public IAsyncEnumerable<byte[]> StreamJpegBytesAsync(int quality, int dpiWidth, int dpiHeight)
     {
-        int pageCount = RequirePages();
+        ThrowIfDisposed();
 
-        return StreamImageBytesCoreAsync(ImageFormat.Jpeg, quality, dpiWidth, dpiHeight, pageCount);
+        return StreamImageBytesCoreAsync(ImageFormat.Jpeg, quality, dpiWidth, dpiHeight);
     }
 
     public void SaveAsImages(string outputDirectory, string fileNamePrefix, ImageFormat format, int quality = 100, int dpi = 300)

@@ -18,6 +18,9 @@ namespace PdfiumWrapper.Benchmarks;
 ///   [--mode sync|async|async-starved] [--prewarm true|false] [--abandon-fraction 0.05]
 ///   [--diagnostics true|false] [--keep-output true|false]
 /// </code>
+/// Each run writes into a new <c>burst-...</c> directory under <c>--out</c> and removes only that
+/// directory afterwards (or keeps it with <c>--keep-output true</c>). Whatever else is in
+/// <c>--out</c> is left alone.
 /// </remarks>
 internal static class BurstRunner
 {
@@ -44,6 +47,9 @@ internal static class BurstRunner
         public double AbandonFraction;
         public bool Diagnostics;
         public bool KeepOutput;
+
+        /// <summary>The directory this run writes into: a fresh child of <see cref="Out"/>.</summary>
+        public string RunDirectory = "";
     }
 
     public static int Run(string[] args)
@@ -74,9 +80,11 @@ internal static class BurstRunner
         var mix = ParseMix(options.Mix);
         var jobs = BuildJobs(options, inputs, mix);
 
-        if (Directory.Exists(options.Out))
-            Directory.Delete(options.Out, recursive: true);
-        Directory.CreateDirectory(options.Out);
+        // --out may point at a directory that already holds other data. Never delete it: every run
+        // writes into its own new child directory and cleans up only that.
+        bool createdParent = !Directory.Exists(options.Out);
+        options.RunDirectory = Path.Combine(options.Out, $"burst-{DateTime.UtcNow:yyyyMMdd-HHmmss}-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(options.RunDirectory);
 
         bool starved = options.Mode == "async-starved";
         if (starved)
@@ -172,6 +180,8 @@ internal static class BurstRunner
             ["callers"] = options.Callers,
             ["mode"] = options.Mode,
             ["mix"] = options.Mix,
+            ["jobsByFormat"] = jobs.GroupBy(j => j.Format).ToDictionary(g => g.Key, g => (object?)g.Count()),
+            ["outputDirectory"] = options.KeepOutput ? options.RunDirectory : null,
             ["dpi"] = options.Dpi,
             ["prewarm"] = options.Prewarm,
             ["abandonFraction"] = options.AbandonFraction,
@@ -213,7 +223,13 @@ internal static class BurstRunner
         File.WriteAllText(options.Report, JsonSerializer.Serialize(report, new JsonSerializerOptions { WriteIndented = true }));
 
         if (!options.KeepOutput)
-            Directory.Delete(options.Out, recursive: true);
+        {
+            Directory.Delete(options.RunDirectory, recursive: true);
+
+            // Remove the parent only if this run created it and nothing else has appeared in it.
+            if (createdParent && !Directory.EnumerateFileSystemEntries(options.Out).Any())
+                Directory.Delete(options.Out);
+        }
 
         Console.WriteLine(
             $"burst n={options.N} callers={options.Callers} mode={options.Mode}: {totalSeconds:F2}s, " +
@@ -242,7 +258,7 @@ internal static class BurstRunner
 
             using var doc = new PdfDocument(job.Input);
             pages = doc.PageCount;
-            string prefix = Path.Combine(options.Out, $"job-{job.Id:D6}");
+            string prefix = Path.Combine(options.RunDirectory, $"job-{job.Id:D6}");
 
             switch (job.Format)
             {
@@ -293,7 +309,7 @@ internal static class BurstRunner
 
             using var doc = new PdfDocument(job.Input);
             pages = doc.PageCount;
-            string prefix = Path.Combine(options.Out, $"job-{job.Id:D6}");
+            string prefix = Path.Combine(options.RunDirectory, $"job-{job.Id:D6}");
 
             switch (job.Format)
             {
@@ -353,13 +369,15 @@ internal static class BurstRunner
     private static Job[] BuildJobs(Options options, string[] inputs, (string format, int weight)[] mix)
     {
         int totalWeight = mix.Sum(m => m.weight);
+        int stride = InterleavingStride(totalWeight);
         int abandonEvery = options.AbandonFraction > 0 ? Math.Max(1, (int)Math.Round(1 / options.AbandonFraction)) : 0;
         var jobs = new Job[options.N];
 
         for (int i = 0; i < jobs.Length; i++)
         {
-            // 37 is coprime with any practical total weight, so formats interleave instead of running in blocks.
-            int slot = (int)((long)i * 37 % totalWeight);
+            // The stride shares no factor with the total weight, so every block of totalWeight
+            // consecutive jobs visits each slot exactly once: exact proportions, interleaved.
+            int slot = (int)((long)i * stride % totalWeight);
             string format = mix[^1].format;
             foreach (var (name, weight) in mix)
             {
@@ -374,6 +392,39 @@ internal static class BurstRunner
         }
 
         return jobs;
+    }
+
+    /// <summary>
+    /// The smallest stride from 37 upwards that is coprime with <paramref name="totalWeight"/> and
+    /// does not step through the slots one by one (which would run each format in a single block).
+    /// A stride that shares a factor with the total reaches only some slots: with a total of 37,
+    /// a fixed stride of 37 would put every job in slot 0.
+    /// </summary>
+    internal static int InterleavingStride(int totalWeight)
+    {
+        int firstCoprime = 0;
+        for (int stride = 37; stride < 37 + Math.Max(1, totalWeight); stride++)
+        {
+            if (Gcd(stride, totalWeight) != 1)
+                continue;
+
+            if (firstCoprime == 0)
+                firstCoprime = stride;
+
+            int step = stride % totalWeight;
+            if (step != 1 && step != totalWeight - 1)
+                return stride;
+        }
+
+        // Totals such as 1, 2, 3, 4 and 6 have no coprime step other than +1 and -1.
+        return firstCoprime;
+    }
+
+    private static int Gcd(int a, int b)
+    {
+        while (b != 0)
+            (a, b) = (b, a % b);
+        return a;
     }
 
     private static (string format, int weight)[] ParseMix(string mix)

@@ -478,6 +478,87 @@ public class PdfiumConcurrencyTests
         Assert.Equal(0, context.Posted);
     }
 
+    /// <summary>
+    /// The async stream factories are ordinary (non-async) methods. They must not take the gate
+    /// synchronously, or a caller on a pool thread is parked for as long as the gate is busy.
+    /// </summary>
+    [Fact]
+    public async Task AsyncImageStreams_ReturnWithoutWaitingForTheGate()
+    {
+        using var doc = new PdfDocument("Docs/doc-3-pages-with-comments.pdf");
+        int expectedPages = doc.PageCount;
+
+        using var holderEntered = new ManualResetEventSlim();
+        using var releaseHolder = new ManualResetEventSlim();
+        var holder = new Thread(() =>
+        {
+            using (PdfiumRuntime.Enter())
+            {
+                holderEntered.Set();
+                releaseHolder.Wait(TimeSpan.FromSeconds(60));
+            }
+        }) { IsBackground = true };
+        holder.Start();
+        Assert.True(holderEntered.Wait(TimeSpan.FromSeconds(30)));
+
+        IAsyncEnumerable<byte[]>? pngPages = null;
+        IAsyncEnumerable<byte[]>? jpegPages = null;
+        try
+        {
+            var factoryCalls = new Thread(() =>
+            {
+                pngPages = doc.StreamImageBytesAsync(ImageFormat.Png, 100, 36);
+                jpegPages = doc.StreamJpegBytesAsync(80, 36);
+            }) { IsBackground = true };
+            factoryCalls.Start();
+
+            // The gate is still held by the other thread while this is checked.
+            Assert.True(factoryCalls.Join(TimeSpan.FromSeconds(10)),
+                "an async stream factory blocked on the native gate");
+        }
+        finally
+        {
+            releaseHolder.Set();
+            holder.Join(TimeSpan.FromSeconds(30));
+        }
+
+        int png = 0, jpeg = 0;
+        await foreach (var page in pngPages!) { Assert.True(page.Length > 0); png++; }
+        await foreach (var page in jpegPages!) { Assert.True(page.Length > 0); jpeg++; }
+        Assert.Equal(expectedPages, png);
+        Assert.Equal(expectedPages, jpeg);
+    }
+
+    [Fact]
+    public async Task AsyncImageStreams_ValidateManagedStateEagerly_AndPageCountOnEnumeration()
+    {
+        using var empty = new PdfDocument();
+
+        // Format: managed validation, thrown by the call itself, for both forms.
+        Assert.Throws<ArgumentOutOfRangeException>(() => empty.StreamImageBytesAsync(ImageFormat.Tiff));
+        using (var withPages = new PdfDocument("Docs/doc-1-page.pdf"))
+            Assert.Throws<ArgumentOutOfRangeException>(() => withPages.StreamImageBytes(ImageFormat.Tiff));
+
+        // Page count: native work, so it is reported when enumeration starts.
+        var pages = empty.StreamImageBytesAsync(ImageFormat.Png);
+        await Assert.ThrowsAsync<InvalidOperationException>(async () =>
+        {
+            await foreach (var _ in pages) { }
+        });
+
+        var jpegPages = empty.StreamJpegBytesAsync();
+        await Assert.ThrowsAsync<InvalidOperationException>(async () =>
+        {
+            await foreach (var _ in jpegPages) { }
+        });
+
+        // Disposal is still reported by the call itself.
+        var disposed = new PdfDocument("Docs/doc-1-page.pdf");
+        disposed.Dispose();
+        Assert.Throws<ObjectDisposedException>(() => disposed.StreamImageBytesAsync(ImageFormat.Png));
+        Assert.Throws<ObjectDisposedException>(() => disposed.StreamJpegBytesAsync());
+    }
+
     /// <summary>A context whose owner never pumps: anything posted to it is never run.</summary>
     private sealed class NeverPumpingContext : SynchronizationContext
     {

@@ -85,6 +85,50 @@ public class PdfPageEditingTests : IDisposable
         Assert.Throws<ObjectDisposedException>(() => rectangle.GetBounds());
     }
 
+    [Fact]
+    public void ImageObject_GetBitmap_ReturnsManagedBgraPixels_AndLeavesNoNativeBitmapBehind()
+    {
+        // Arrange: a PNG of known size
+        byte[] png;
+        RawBitmap source;
+        using (var sourceDoc = new PdfDocument(ContractPdfPath))
+        {
+            source = sourceDoc.RenderPages(20)[0];
+            png = sourceDoc.StreamImageBytes(ImageFormat.Png, 100, 20).First();
+        }
+
+        long liveBaseline = PdfiumRuntime.LiveHandleCount;
+        var doc = new PdfDocument();
+        var page = doc.AddPage();
+        var image = page.AddImage(png, 50, 50, 200, 260);
+        page.GenerateContent();
+        long liveBefore = PdfiumRuntime.LiveHandleCount;
+
+        // Act
+        RawBitmap? bitmap = image.GetBitmap();
+        RawBitmap? rendered = image.GetRenderedBitmap(page);
+        RawBitmap? renderedWithoutPage = image.GetRenderedBitmap();
+
+        // Assert: pixels are managed, BGRA, and sized like the image
+        Assert.NotNull(bitmap);
+        Assert.Equal(source.Width, bitmap!.Width);
+        Assert.Equal(source.Height, bitmap.Height);
+        Assert.Equal(bitmap.Width * 4, bitmap.Stride);
+        Assert.Equal(bitmap.Stride * bitmap.Height, bitmap.Pixels.Length);
+        Assert.Contains(bitmap.Pixels, b => b != 0);
+
+        Assert.NotNull(rendered);
+        Assert.Equal(rendered!.Stride * rendered.Height, rendered.Pixels.Length);
+        Assert.NotNull(renderedWithoutPage);
+
+        // Nothing native is left for the caller to release, and the accounting agrees
+        Assert.Equal(liveBefore, PdfiumRuntime.LiveHandleCount);
+
+        doc.Dispose();
+        Assert.Equal(liveBaseline, PdfiumRuntime.LiveHandleCount);
+        Assert.Throws<ObjectDisposedException>(() => image.GetBitmap());
+    }
+
     #endregion
 
     #region AddPage Tests

@@ -10,13 +10,14 @@ internal static partial class Scenarios
 {
     /// <summary>
     /// Many async conversions on a thread pool pinned to the processor count, with a heartbeat that
-    /// measures how long a trivial work item waits for a pool thread. In <c>mode=sync</c> the same
+    /// measures how long a trivial work item waits for a pool thread. <c>mode=stream</c> uses the async
+    /// image stream instead of the async TIFF save. In <c>mode=sync</c> the same
     /// work calls the synchronous API from pool threads, for comparison.
     /// </summary>
     public static int Starvation(int callers, string input, int heartbeatBoundMs, string mode)
     {
-        if (mode is not ("async" or "sync"))
-            throw new HostArgumentException($"mode must be async or sync; got '{mode}'");
+        if (mode is not ("async" or "sync" or "stream"))
+            throw new HostArgumentException($"mode must be async, sync or stream; got '{mode}'");
 
         int pc = Environment.ProcessorCount;
         ThreadPool.GetMinThreads(out _, out int minIo);
@@ -44,19 +45,29 @@ internal static partial class Scenarios
         long t0 = Stopwatch.GetTimestamp();
         heartbeat.Start();
 
-        var tasks = documents.Select(doc => mode == "async"
-            ? Task.Run(async () =>
+        var tasks = documents.Select(doc => mode switch
+        {
+            "async" => Task.Run(async () =>
             {
                 using var tiff = new MemoryStream();
                 await doc.SaveAsTiffAsync(tiff, 100).ConfigureAwait(false);
                 return tiff.Length;
-            })
-            : Task.Run(() =>
+            }),
+            "stream" => Task.Run(async () =>
+            {
+                // The factory call itself must not wait for the gate on a pool thread.
+                long bytes = 0;
+                await foreach (var page in doc.StreamImageBytesAsync(ImageFormat.Jpeg, 80, 100).ConfigureAwait(false))
+                    bytes += page.Length;
+                return bytes;
+            }),
+            _ => Task.Run(() =>
             {
                 using var tiff = new MemoryStream();
                 doc.SaveAsTiff(tiff, 100);
                 return tiff.Length;
-            })).ToArray();
+            }),
+        }).ToArray();
 
         bool finished;
         string[] errors = Array.Empty<string>();

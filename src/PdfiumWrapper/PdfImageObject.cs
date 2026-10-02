@@ -83,23 +83,118 @@ public class PdfImageObject : PdfPageObject
     }
 
     /// <summary>
-    /// Get the bitmap from the image object
+    /// Get the image's own pixels, without its mask or transformation, as BGRA.
     /// </summary>
-    public IntPtr GetBitmap()
+    /// <remarks>
+    /// The native bitmap PDFium hands out is owned by the caller. The wrapper copies it into
+    /// managed memory and destroys it, so there is nothing for the caller to release.
+    /// Grayscale and BGR images are expanded to BGRA with full opacity.
+    /// </remarks>
+    /// <returns>The pixels, or null if the image has no bitmap.</returns>
+    public RawBitmap? GetBitmap()
     {
-        using var _ = PdfiumRuntime.Enter();
-        ThrowIfDisposed();
-        return PDFium.FPDFImageObj_GetBitmap(Handle);
+        BitmapLease? lease;
+        int format;
+        using (PdfiumRuntime.Enter())
+        {
+            ThrowIfDisposed();
+            lease = LeaseBitmap(PDFium.FPDFImageObj_GetBitmap(Handle), out format);
+        }
+
+        return CopyAndRelease(lease, format);
     }
 
     /// <summary>
-    /// Get the rendered bitmap from the image object
+    /// Get the image as it appears on the page, with its mask and transformation applied, as BGRA.
     /// </summary>
-    public IntPtr GetRenderedBitmap(IntPtr page)
+    /// <param name="page">The page the image is on. Optional; it improves color handling.</param>
+    /// <returns>The pixels, or null if the image could not be rendered.</returns>
+    public RawBitmap? GetRenderedBitmap(PdfPage? page = null)
     {
-        using var _ = PdfiumRuntime.Enter();
-        ThrowIfDisposed();
-        return PDFium.FPDFImageObj_GetRenderedBitmap(DocumentHandle, page, Handle);
+        BitmapLease? lease;
+        int format;
+        using (PdfiumRuntime.Enter())
+        {
+            ThrowIfDisposed();
+            lease = LeaseBitmap(
+                PDFium.FPDFImageObj_GetRenderedBitmap(DocumentHandle, page?.Handle ?? IntPtr.Zero, Handle),
+                out format);
+        }
+
+        return CopyAndRelease(lease, format);
+    }
+
+    /// <summary>
+    /// Takes ownership of a caller-owned native bitmap so it is counted as a live handle and
+    /// destroyed under the gate. The native gate must be held.
+    /// </summary>
+    private static BitmapLease? LeaseBitmap(IntPtr bitmap, out int format)
+    {
+        PdfiumRuntime.AssertHeld();
+
+        format = PDFium.FPDFBitmap_Unknown;
+        if (bitmap == IntPtr.Zero)
+            return null;
+
+        format = PDFium.FPDFBitmap_GetFormat(bitmap);
+        return new BitmapLease(bitmap, PDFium.FPDFBitmap_GetBuffer(bitmap),
+            PDFium.FPDFBitmap_GetWidth(bitmap), PDFium.FPDFBitmap_GetHeight(bitmap),
+            PDFium.FPDFBitmap_GetStride(bitmap));
+    }
+
+    /// <summary>Copies the pixels out with the gate free, then destroys the native bitmap.</summary>
+    private static RawBitmap? CopyAndRelease(BitmapLease? lease, int format)
+    {
+        if (lease == null)
+            return null;
+
+        using (lease)
+        {
+            int sourceBytesPerPixel = format switch
+            {
+                PDFium.FPDFBitmap_Gray => 1,
+                PDFium.FPDFBitmap_BGR => 3,
+                PDFium.FPDFBitmap_BGRx or PDFium.FPDFBitmap_BGRA => 4,
+                _ => throw new NotSupportedException($"Unsupported PDFium bitmap format {format}."),
+            };
+
+            int width = lease.Width;
+            int height = lease.Height;
+            int stride = width * 4;
+            var pixels = new byte[stride * height];
+
+            unsafe
+            {
+                byte* source = (byte*)lease.Buffer;
+                fixed (byte* destination = pixels)
+                {
+                    for (int y = 0; y < height; y++)
+                    {
+                        byte* from = source + (long)y * lease.Stride;
+                        byte* to = destination + (long)y * stride;
+
+                        for (int x = 0; x < width; x++, from += sourceBytesPerPixel, to += 4)
+                        {
+                            if (sourceBytesPerPixel == 1)
+                            {
+                                to[0] = to[1] = to[2] = from[0];
+                            }
+                            else
+                            {
+                                to[0] = from[0];
+                                to[1] = from[1];
+                                to[2] = from[2];
+                            }
+
+                            // Only BGRA carries alpha; the other formats are opaque.
+                            to[3] = format == PDFium.FPDFBitmap_BGRA ? from[3] : (byte)255;
+                        }
+                    }
+                }
+            }
+
+            return new RawBitmap(pixels, width, height, stride);
+        }
     }
 
     private static (byte[] pixels, int width, int height) DecodeToBgra(byte[] imageBytes)

@@ -171,6 +171,8 @@ Rules for any code you add or change:
 - A method named `XxxCore` assumes the gate is held and calls `PdfiumRuntime.AssertHeld()`. Public methods enter the gate and call the `Core` method; use `Core` methods inside loops instead of reentering per iteration.
 - Never hold a scope across `await`, `yield return`, or a call into a user delegate. Collect what you need inside the scope, leave it, then continue.
 - Async methods use `using (await PdfiumRuntime.EnterAsync()) { ... }` with no `await` inside the block. Do not call synchronous gated methods (`Dispose()`, `GetPage()`) from async paths where they would block on the gate; use the async helpers (`DisposeAsync` on `BitmapLease`, `GetPageAsync`/`DisposePageAsync` in `PdfDocument`).
+- A non-async method that returns a `Task` or `IAsyncEnumerable` must not call `Enter()`: do managed validation there (disposed check, argument checks) and await the gate inside the async body. `StreamImageBytesAsync` checks the page count when enumeration starts for this reason.
+- Never hand a caller-owned native handle out of the public API (the raw destroy functions are internal). Copy to managed memory, or wrap it in a tracked disposable. `PdfImageObject.GetBitmap()` returns a `RawBitmap` for this reason.
 - Awaits inside the library use `ConfigureAwait(false)` (`EnterAsync()` already never resumes on a captured context). The gate is handed to an async waiter before its continuation runs; posted to a UI thread that is blocked in a synchronous call, that continuation would never run.
 - Finalizers never call PDFium, never take a lock and never wait on the gate. They only call `PdfiumRuntime.EnqueueRelease(kind, handle)` in ascending `NativeHandleKind` order (page objects, forms, pages, document, then pinned buffers and native memory). A document's finalizer enqueues its pages, forms and detached page objects itself so none can be closed after the document.
 - No user I/O inside the gate. Read caller streams before entering (`SpooledInput`); serialize saves into a pooled buffer inside the gate (`PooledFileWriter`) and write to the caller's stream after leaving it.
@@ -278,6 +280,6 @@ The `.csproj` auto-detects the platform RID and includes native binaries with `E
 - Update relevant documentation when adding or changing public API
 - Follow existing patterns for disposal, error handling, and P/Invoke signatures
 - Follow the gate rules under "Thread Safety and the Native Gate" for every member that touches PDFium
-- Run the test suite after changes: all 219+ tests should pass (win-x64 and linux-x64)
+- Run the test suite after changes: all 228+ tests should pass (win-x64 and linux-x64)
 - Coordinate system: PDF uses bottom-left origin (see `docs/PDF-EDITING.md`)
 - Standard page sizes in points: US Letter = 612x792, A4 = 595x842
