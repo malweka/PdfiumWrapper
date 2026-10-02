@@ -16,39 +16,46 @@ This guide covers thread safety, ASP.NET Core integration, performance optimizat
 
 ## Thread Safety
 
-### The Core Problem
+### How It Works
 
-PDFium, the underlying native library, is **not thread-safe**. This means:
+PDFium, the underlying native library, allows **one native call per process at a time**, across all documents. Its fonts, caches and reference counts are shared between documents, so two threads working on two different documents still collide inside PDFium.
 
-- Do not access the same `PdfDocument` instance from multiple threads
-- Do not access the same `PdfPage` instance from multiple threads  
-- Do not access the same `PdfForm` instance from multiple threads
-- Loading the same PDF file simultaneously from multiple threads can cause issues
+PdfiumWrapper 2.0 enforces this rule itself. Every public operation enters one process-wide gate (`PdfiumRuntime`) before it calls PDFium. You do not need your own lock around the library.
+
+What this means in practice:
+
+- **Different objects on different threads are safe.** Each thread can load, render, extract, fill and save its own documents and mergers. Loading the same file from several threads is fine.
+- **Native work takes turns.** Loading, rendering, text extraction, form access, page import and saving are serialized across the whole process.
+- **Encoding and output overlap.** Pixel conversion, PNG/JPEG/TIFF encoding and file or stream writes run outside the gate, so one caller's encoding runs while another caller renders. That share of the work is what parallel callers gain; native rendering is not multiplied by adding threads.
+- **One object is still single-threaded.** Do not use the same `PdfDocument`, `PdfPage`, `PdfForm`, `PdfMerger` or page object from two threads at once.
+- Copying files to temporary locations, loading into byte arrays, or keeping "one document per thread" never fixed PDFium's shared state, and none of it is needed for safety.
 
 ### Safe Patterns
 
-#### Pattern 1: One Document Per Thread
+#### Pattern 1: Parallel Over Different Files, Bounded
 
-Each thread should have its own `PdfDocument` instance:
+Each worker has its own `PdfDocument`. Bound the degree of parallelism: every caller in flight holds a rendered page in memory, and callers beyond the point where encoding keeps the cores busy only wait for the gate. See [High-Throughput Processing](HIGH-THROUGHPUT-PROCESSING.md#measured-capacity-and-sizing) for sizing.
 
 ```csharp
-// ✅ SAFE: Each thread has its own document
-await Parallel.ForEachAsync(pdfFiles, async (file, ct) =>
+// ✅ SAFE: each worker has its own document
+await Parallel.ForEachAsync(pdfFiles, new ParallelOptions { MaxDegreeOfParallelism = 4 }, async (file, ct) =>
 {
     using var document = new PdfDocument(file);
-    // Process document...
+    await document.SaveAsTiffAsync(Path.ChangeExtension(file, ".tiff"), 200);
 });
 ```
 
-#### Pattern 2: Sequential Processing with Async
+#### Pattern 2: Async Methods
 
-Use async methods for UI responsiveness, but process sequentially:
+The async methods (`SaveAsTiffAsync`, `RenderPagesAsync`, `StreamImageBytesAsync`, `SaveAsJpegsAsync`, `SaveAsImagesAsync`, `ProcessAllPagesAsync`) wait for the gate without blocking a thread. They process pages sequentially and yield between pages.
 
 ```csharp
-// ✅ SAFE: Sequential processing, UI stays responsive
+// ✅ SAFE: sequential processing, no thread blocked while waiting for the gate
 using var document = new PdfDocument("large.pdf");
 var bitmaps = await document.RenderPagesAsync(dpi: 300);
 ```
+
+Synchronous methods, including constructors, block the calling thread while they wait. In a busy async service prefer the async methods: with 192 concurrent conversions on a thread pool pinned to 24 threads, a heartbeat work item waited 1.6 ms (p99) when the conversions used the async API and about 2.5 s when they called the synchronous API from pool threads.
 
 #### Pattern 3: Document Per Request (ASP.NET Core)
 
@@ -61,23 +68,27 @@ public async Task<IActionResult> ConvertPdf(IFormFile file)
 {
     using var stream = file.OpenReadStream();
     using var document = new PdfDocument(stream);
-    
-    var image = document.StreamImageBytes(ImageFormat.Png, 100, 150).First();
-    return File(image, "image/png");
+
+    await foreach (var image in document.StreamImageBytesAsync(ImageFormat.Png, 100, 150))
+    {
+        return File(image, "image/png"); // first page
+    }
+
+    return NoContent();
 }
 ```
 
 ### Unsafe Patterns to Avoid
 
 ```csharp
-// ❌ UNSAFE: Sharing document across threads
+// ❌ UNSAFE: One document used by several threads at once
 public class PdfService
 {
-    private PdfDocument _sharedDocument; // NEVER DO THIS
+    private PdfDocument _sharedDocument; // shared by concurrent requests
     
     public void ProcessPage(int pageIndex)
     {
-        // Multiple threads accessing _sharedDocument = corruption/crashes
+        // Two threads inside the same PdfDocument at once is not supported
         using var page = _sharedDocument.GetPage(pageIndex);
     }
 }
@@ -88,22 +99,15 @@ public class PdfService
 using var document = new PdfDocument("file.pdf");
 Parallel.For(0, document.PageCount, i =>
 {
-    using var page = document.GetPage(i); // CRASHES or corrupts data
+    using var page = document.GetPage(i); // one document, many threads
 });
 ```
 
-```csharp
-// ❌ UNSAFE: Loading same file from multiple threads simultaneously
-var tasks = Enumerable.Range(0, 10).Select(_ => Task.Run(() =>
-{
-    using var doc = new PdfDocument("same-file.pdf"); // Can cause issues
-}));
-await Task.WhenAll(tasks);
-```
+Splitting one document's pages across threads would not be faster even if it were supported: page rendering is native work and is serialized.
 
-### If You Need Concurrent Access
+### Sharing One Object Across Threads
 
-Use a semaphore or lock to serialize access:
+The library's gate protects PDFium. It does not make a single wrapper object safe for concurrent use. If one object must be shared, for example a long-lived document that serves page requests, serialize access to that object yourself:
 
 ```csharp
 public class ThreadSafePdfService : IDisposable
@@ -287,7 +291,8 @@ public class PdfProcessingService : BackgroundService
     
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        // Process jobs sequentially to avoid PDFium threading issues
+        // One job at a time keeps memory use predictable. Running several consumers is also
+        // safe: the library serializes native work, and only encoding and output overlap.
         await foreach (var job in _jobChannel.Reader.ReadAllAsync(stoppingToken))
         {
             try
@@ -305,16 +310,22 @@ public class PdfProcessingService : BackgroundService
     {
         using var document = new PdfDocument(job.PdfPath);
         
-        // Process sequentially
-        for (int i = 0; i < document.PageCount && !ct.IsCancellationRequested; i++)
+        // The async methods wait for the native gate without blocking a thread
+        int pageNumber = 0;
+        await foreach (var bytes in document.StreamImageBytesAsync(ImageFormat.Jpeg, 90, 200))
         {
-            using var page = document.GetPage(i);
-            // Process page...
-            await Task.Yield(); // Allow cancellation checks
+            ct.ThrowIfCancellationRequested();
+            await File.WriteAllBytesAsync($"{job.Id}_{++pageNumber:D3}.jpg", bytes, ct);
         }
     }
 }
 ```
+
+### Prefer Async Methods and Bound Concurrency
+
+- In request handlers and background services, call the async methods. Synchronous methods block the calling thread while they wait for the native gate, and many blocked pool threads starve the rest of the application.
+- Constructors are synchronous. Opening a document is short, but under heavy contention it also waits its turn.
+- Limit how many conversions run at once (a bounded channel, `SemaphoreSlim`, or `MaxDegreeOfParallelism`). The limit bounds memory: each conversion in flight holds a rendered page. It is not needed for safety.
 
 ### Rate Limiting and Resource Protection
 
@@ -525,9 +536,17 @@ document.SaveAsPngs("output", dpi: 150);
 
 ## Memory Management
 
+### Where the Memory Goes
+
+Most memory used while processing PDFs is native: PDFium's document and font data, and rendered bitmaps. A US Letter page rendered as BGRA at 300 DPI is about 32 MiB. Native memory is released by `Dispose()`, not by the garbage collector.
+
+- `RenderPages` returns every page as a managed `byte[]` at once. For large documents use `StreamImageBytes` / `StreamImageBytesAsync`, `SaveAsTiff`, or the `SaveAs...` methods, which hold one page at a time.
+- `Save`, `SaveToStream`, `PdfMerger.Save` and `PdfMerger.ToBytes` serialize the whole PDF into a pooled in-memory buffer before writing it, so peak memory includes the full output size.
+- `new PdfDocument(stream)` and `new PdfMerger(stream)` read the stream to its end during construction. Up to 64 MB is held in memory; larger inputs go to a temporary file that is deleted on dispose.
+
 ### Monitor Memory Usage
 
-For server applications, monitor memory:
+`GC.GetTotalMemory` reports managed memory only. It does not include PDFium's native memory or rendered bitmaps, so it is not a PDF memory monitor. Use the process working set:
 
 ```csharp
 public class PdfProcessingMetrics
@@ -536,7 +555,8 @@ public class PdfProcessingMetrics
     
     public async Task ProcessWithMetrics(Func<Task> operation)
     {
-        var before = GC.GetTotalMemory(false);
+        using var process = Process.GetCurrentProcess();
+        long before = process.WorkingSet64;
         var stopwatch = Stopwatch.StartNew();
         
         try
@@ -546,10 +566,11 @@ public class PdfProcessingMetrics
         finally
         {
             stopwatch.Stop();
-            var after = GC.GetTotalMemory(false);
+            process.Refresh();
+            long after = process.WorkingSet64;
             
             _logger.LogInformation(
-                "PDF operation completed in {ElapsedMs}ms. Memory: {Before}MB -> {After}MB",
+                "PDF operation completed in {ElapsedMs}ms. Working set: {Before}MB -> {After}MB",
                 stopwatch.ElapsedMilliseconds,
                 before / 1024 / 1024,
                 after / 1024 / 1024);
@@ -558,27 +579,15 @@ public class PdfProcessingMetrics
 }
 ```
 
-### Force Garbage Collection for Large Operations
+### Do Not Force Garbage Collection
 
-After processing large documents:
+Calling `GC.Collect()` after each document or batch does not release PDF memory: disposing the document already did that. A forced blocking collection only pauses the process. Dispose every document, page, form and merger and let the runtime schedule collections.
 
-```csharp
-public void ProcessLargePdf(string path)
-{
-    using (var document = new PdfDocument(path))
-    {
-        // Process...
-    }
-    
-    // After disposing, suggest GC for large operations
-    GC.Collect();
-    GC.WaitForPendingFinalizers();
-}
-```
+If an object is dropped without `Dispose()`, its finalizer does not call PDFium. It queues the native handles, and the next PdfiumWrapper operation on any thread closes them. `PdfiumRuntime.ReleasePending()` closes them on demand. Relying on this delays the release of native memory, so treat it as a safety net.
 
 ### Limit Concurrent Operations
 
-Use semaphores to limit concurrent PDF operations:
+Use a semaphore to limit how many PDF operations are in flight. The limit bounds memory (each operation holds a rendered page); the library is safe without it:
 
 ```csharp
 public class PdfProcessingPool
@@ -674,6 +683,29 @@ public void ValidatePdfInput(IFormFile file)
 }
 ```
 
+### Save Errors
+
+`SaveToStream` and `PdfMerger.Save(stream)` serialize the PDF in memory and then write to your stream. A failure inside PDFium throws `InvalidOperationException`. A failure in the destination stream throws whatever the stream throws, unchanged:
+
+```csharp
+try
+{
+    document.SaveToStream(output);
+}
+catch (IOException ex)
+{
+    // The destination failed (disk full, connection closed, ...)
+}
+catch (InvalidOperationException ex)
+{
+    // PDFium could not serialize the document
+}
+```
+
+### Malformed Input
+
+A damaged PDF normally fails with `InvalidOperationException` when it is opened. A native abort inside PDFium cannot be caught and ends the process. If the service must survive hostile input, run conversions in a separate process. See [Troubleshooting](TROUBLESHOOTING.md#process-aborts-on-a-damaged-pdf).
+
 ---
 
 ## Common Pitfalls
@@ -728,24 +760,24 @@ using var page = document.GetPage(0); // First page
 merger.AppendPages(source, "1,2,3"); // First three pages (1-based)
 ```
 
-### Pitfall 4: Loading Same File Multiple Times Concurrently
+### Pitfall 4: Using a Form or Page After Its Document Is Disposed
+
+A document owns its pages, the forms returned by `GetForm()`, and the page objects removed from its pages with `RemoveObject`. Disposing the document disposes all of them. `GetForm()` returns a new form on each call.
 
 ```csharp
-// ❌ UNSAFE: Can cause file locking or corruption
-var tasks = new[]
+// ❌ ObjectDisposedException: the form died with its document
+PdfForm? form;
+using (var document = new PdfDocument("form.pdf"))
 {
-    Task.Run(() => { using var d = new PdfDocument("same.pdf"); }),
-    Task.Run(() => { using var d = new PdfDocument("same.pdf"); }),
-};
-await Task.WhenAll(tasks);
+    form = document.GetForm();
+}
+form?.SetFormFieldValue("Name", "John");
 
-// ✅ SAFE: Load to memory first, then process
-var pdfBytes = await File.ReadAllBytesAsync("file.pdf");
-var tasks = new[]
-{
-    Task.Run(() => { using var d = new PdfDocument(pdfBytes); }),
-    Task.Run(() => { using var d = new PdfDocument(pdfBytes); }),
-};
+// ✅ CORRECT: use the form while the document is alive
+using var document = new PdfDocument("form.pdf");
+using var form = document.GetForm();
+form?.SetFormFieldValue("Name", "John");
+document.Save("filled_form.pdf");
 ```
 
 ### Pitfall 5: Ignoring Save After Modifications

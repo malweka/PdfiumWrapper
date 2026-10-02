@@ -216,9 +216,14 @@ public static class PdfiumRuntime
         // A null task is the reentrant case: the caller already holds the gate.
         public bool IsCompleted => _wait is null || _wait.IsCompleted;
 
-        public void OnCompleted(Action continuation) => _wait!.GetAwaiter().OnCompleted(continuation);
+        // Never resume on a captured SynchronizationContext. The semaphore is handed to the waiter
+        // before its continuation runs; if that continuation were posted to a UI thread that is
+        // itself blocked in a synchronous Enter(), neither could ever proceed.
+        public void OnCompleted(Action continuation)
+            => _wait!.ConfigureAwait(false).GetAwaiter().OnCompleted(continuation);
 
-        public void UnsafeOnCompleted(Action continuation) => _wait!.GetAwaiter().UnsafeOnCompleted(continuation);
+        public void UnsafeOnCompleted(Action continuation)
+            => _wait!.ConfigureAwait(false).GetAwaiter().UnsafeOnCompleted(continuation);
 
         public Scope GetResult()
         {

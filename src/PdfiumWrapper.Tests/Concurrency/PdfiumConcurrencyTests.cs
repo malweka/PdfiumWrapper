@@ -413,6 +413,86 @@ public class PdfiumConcurrencyTests
     }
 
     /// <summary>
+    /// The gate is handed to an async waiter before its continuation runs. If that continuation
+    /// were posted to the caller's SynchronizationContext, a UI thread that then makes a synchronous
+    /// call would wait forever for a gate "held" by work queued behind itself.
+    /// </summary>
+    [Fact]
+    public void AsyncAdmission_DoesNotResumeOnTheCallersSynchronizationContext()
+    {
+        using var first = new PdfDocument("Docs/doc-1-page.pdf");
+        using var second = new PdfDocument("Docs/doc-1-page.pdf");
+
+        using var holderEntered = new ManualResetEventSlim();
+        using var releaseHolder = new ManualResetEventSlim();
+        var holder = new Thread(() =>
+        {
+            using (PdfiumRuntime.Enter())
+            {
+                holderEntered.Set();
+                releaseHolder.Wait(TimeSpan.FromSeconds(30));
+            }
+        }) { IsBackground = true };
+        holder.Start();
+        Assert.True(holderEntered.Wait(TimeSpan.FromSeconds(30)));
+
+        var context = new NeverPumpingContext();
+        Exception? error = null;
+        int pages = 0;
+        long tiffLength = 0;
+
+        var uiThread = new Thread(() =>
+        {
+            try
+            {
+                SynchronizationContext.SetSynchronizationContext(context);
+
+                // Queues behind the holder and returns an incomplete task.
+                var tiff = new MemoryStream();
+                var pending = first.SaveAsTiffAsync(tiff, 72);
+                Assert.False(pending.IsCompleted);
+
+                // Let the async waiter be granted the gate while this thread is not pumping,
+                // then make a synchronous call from the same thread.
+                releaseHolder.Set();
+                Thread.Sleep(300);
+                pages = second.PageCount;
+
+                Assert.True(pending.Wait(TimeSpan.FromSeconds(30)), "the async save never completed");
+                tiffLength = tiff.Length;
+            }
+            catch (Exception ex)
+            {
+                error = ex;
+            }
+        }) { IsBackground = true };
+
+        uiThread.Start();
+        bool finished = uiThread.Join(TimeSpan.FromSeconds(60));
+        releaseHolder.Set();
+
+        Assert.True(finished, "a synchronous call deadlocked behind an async waiter's posted continuation");
+        Assert.Null(error);
+        Assert.Equal(1, pages);
+        Assert.True(tiffLength > 0);
+        Assert.Equal(0, context.Posted);
+    }
+
+    /// <summary>A context whose owner never pumps: anything posted to it is never run.</summary>
+    private sealed class NeverPumpingContext : SynchronizationContext
+    {
+        private int _posted;
+
+        public int Posted => Volatile.Read(ref _posted);
+
+        public override void Post(SendOrPostCallback d, object? state) => Interlocked.Increment(ref _posted);
+
+        public override void Send(SendOrPostCallback d, object? state) => Interlocked.Increment(ref _posted);
+
+        public override SynchronizationContext CreateCopy() => this;
+    }
+
+    /// <summary>
     /// Proves the detector the other tests rely on would catch a bypass: two native intervals
     /// opened at once, without the gate, are seen as two.
     /// </summary>

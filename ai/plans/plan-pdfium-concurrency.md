@@ -1,8 +1,73 @@
 # PDFium Concurrency and Burst Throughput Plan
 
-Status: proposed implementation, revised after review on 2026-09-30. No implementation or concurrency measurements completed.
+Status: Release 1 (Phases 0 to 4 and 8) implemented and measured on 2026-10-02. Release 2 (Phases 5 to 7, the process pool) was not built: the Phase 4 decision gate did not call for it. See "Implementation record" below for what was done, where the code departs from the reference design in section 4, and the measured results.
 
 This document is written so that an agent can implement it without further design decisions. Section 3 contains the binding design rules. Section 4 contains reference code for every new component. Phases 0 to 8 are the ordered checklist. Where this document and existing code disagree, this document wins; where this document is silent, follow existing patterns in `AGENTS.md`.
+
+## Implementation record (2026-10-02)
+
+### Departures from the reference design in section 4
+
+Section 4 is kept as written for history. The shipped code differs in these places, each for a defect found while checking the reference code against the real code or while testing:
+
+| Area | Reference design | Shipped | Why |
+|---|---|---|---|
+| Async admission (4.1) | `EnterAsync` is an `async` method that records the owner thread after `await WaitAsync` | `EnterAsync` returns a custom awaitable; ownership is claimed in the awaiter's `GetResult()` | `GetResult()` runs on the thread that resumes the caller. The async-method version records the thread that completed the wait; if the task completes before the caller attaches its continuation, the caller resumes on a different thread, a nested `Enter()` self-deadlocks, and the recorded thread can later reenter without holding the semaphore. |
+| Async admission and `SynchronizationContext` | not addressed | the awaiter never resumes on a captured context, and `PdfDocument`'s internal awaits use `ConfigureAwait(false)` | The semaphore is handed to an async waiter before its continuation runs. Posted to a UI thread that is blocked in a synchronous `Enter()`, it would never run. Covered by `AsyncAdmission_DoesNotResumeOnTheCallersSynchronizationContext`. |
+| Drain (4.1) | walk kinds 0 to 4, dequeue until each queue is empty | snapshot queue counts in reverse kind order, drain only those counts | The finalizer thread enqueues while the drain runs. With live queues, a document enqueued during the drain is closed before its pages, which arrived after the page queue was passed. With the batched `finalizer-drain` scenario the live-queue drain aborted the process with an access violation in 5 of 5 runs; the snapshot drain passed 8 of 8. |
+| Deferred release kinds (4.1, 4.4) | five kinds | seven: `PinnedBuffer` and `NativeMemory` added, plus a temp-file queue | The finalizer in 4.4 unpinned the document's source bytes immediately although `FPDF_CloseDocument` runs later in the drain. Source bytes, form-info memory and spool files are now released after the document closes. |
+| Forms (4.4) | one `_form` field | the document tracks a set of forms; `FPDF_FORMFILLINFO` lives in native memory | `GetForm()` returns a new caller-owned form per call. PDFium keeps a pointer to the info structure; the old code passed `ref` to a field of a movable managed object and pinned only a boxed copy. |
+| Detached page objects | finalizer enqueues the handle | the document also tracks objects removed from its pages | So they are destroyed before the document closes, by `Dispose` or by the document's finalizer. |
+| Spooling (4.5) | `using var spool` in the constructor; temp file deleted in the finalizer | the document owns the spool file; deleted after close, or queued for deletion by the finalizer; deletion never throws | PDFium opens files without `FILE_SHARE_DELETE` on Windows, so the file cannot be deleted while the document is open, and a throwing delete on the finalizer thread would end the process. |
+| `SpooledInput` (4.5) | zero-copy only when the `MemoryStream` segment covers the whole array; position ignored | honors segment offset and stream position, advances the stream to its end, buffers non-seekable streams up to the threshold before spilling | Matches what the constructors did before. |
+| Save API (4.5) | `Save(Stream, SaveFlags)`, `SaveAsync(Stream)` | existing `Save(string, uint)`, `SaveToStream(Stream, uint)`, `PdfMerger.Save`/`ToBytes` kept | The names in 4.5 did not exist. The synchronous API is preserved. |
+| Operation pattern (4.3) | argument validation, then `Enter()`, then disposed check | `Enter()`, disposed check, then argument validation | Existing tests require `ObjectDisposedException` to win over `ArgumentNullException` on a disposed object. |
+| Bootstrap lock (4.1) | an object stored in `AppContext` | `lock (AppDomain.CurrentDomain)` | Two load contexts racing on first use could each read back a different lock object. |
+| `Scope` (4.1) | unused `_outer` field | `_active` flag; `default(Scope).Dispose()` is a no-op | |
+| `Exit()` (4.1) | `Debug.Assert` on the owner | throws `InvalidOperationException` in all builds | A scope disposed on the wrong thread would silently corrupt the gate. |
+| Gate wait detection | elapsed time greater than zero | `Wait(0)` first, then a blocking wait | Exact count of acquisitions that had to wait. |
+| Diagnostics (4.7) | counters and events | also records each deferred release (kind, handle), wait and hold tick totals | Needed to check release order per object graph and to report wait/hold shares. |
+| Phase 0 `init-race` test | asserts exit 0 before the gate exists | the scenario was added in Phase 0; the assertion became a test in Phase 3 | Before the gate the scenario aborts with an access violation (8 of 8 runs), which is the defect being fixed. |
+| Phase 1 tag | tag, then add the small-document benchmark | benchmark classes and runner added first, then the tag | So the tag can rerun every baseline measurement. |
+| `ConcurrentCallersBenchmark` (Phase 4) | caller `i` converts `_inputs[i % n]` to `Stream.Null` | every caller converts the whole corpus; TIFF goes to a `MemoryStream` | Equal work per caller makes pages/sec comparable across caller counts; libtiff needs a seekable stream. |
+| Shutdown tests | in the test project | host scenario `shutdown` | Handles leaked by other tests make `LiveHandleCount == 0` unreliable in the shared test process. |
+
+Also fixed, found by the gate-coverage test: `FPDFPageObj_GetMatrix` was declared with six `out double` parameters; the native function takes one `FS_MATRIX*`. `PdfPageObject.GetMatrix()` corrupted the stack.
+
+### Results and decision
+
+Full tables are in `benchmark.md` ("Concurrency Benchmarks"). Machine: Intel Core i7-13700F, 24 logical processors, 31.7 GB, NVMe SSD, Windows 11, .NET runtime 8.0.31, PDFium 150.0.7869.0.
+
+Correctness:
+
+- 219 tests pass on win-x64 and on linux-x64 (.NET 8 SDK container). macOS was not run; it is an open platform check.
+- Before the gate, the `init-race` scenario aborted with an access violation in 8 of 8 runs and a merger-first cold start in 3 of 3. Both pass now, with one native initialization.
+- Concurrent callers (2, 4, 8, 16 threads; async tasks) match a sequential oracle page for page; the independent detector saw at most one native call in flight, always inside a gate hold.
+- Crash probe: 25 damaged inputs on each platform, none aborted the process.
+
+Cost of the gate:
+
+- One uncontended entry and exit: 28 ns.
+- One-page load/count/close: median +0.3%, P95 +0.6%. Load/render/close: median +0.5%, P95 +0.4%. Limits were 5% and 10%.
+- Existing suite: conversion within 1.1%; merge between -5.9% and +4.4% (buffered save).
+- Cold start, document first: about 5 ms slower (libtiff is loaded at initialization).
+- Sequential batch of 200 jobs: 154.3 s gated, 153.5 s before.
+
+Capacity:
+
+- One process, mixed corpus at 200 DPI: 1.30 docs/sec with one caller, 1.62 docs/sec (20.1 pages/sec) from 4 callers up to 24. The gate is held 99.8% of the time at 8 callers. In-process parallelism is worth 1.25x on this mix (1.11x TIFF, 1.09x JPEG, 1.45x PNG).
+- Async admission keeps the thread pool free: heartbeat p99 1.3 ms against 2.5 s when the synchronous API is called from pool threads (192 concurrent conversions, pool pinned to 24 threads). Throughput is the same.
+- Stream type does not change gate hold time. Abandoning 5% of documents to the finalizer costs nothing measurable.
+- Several processes: 3.13 docs/sec with 2, 5.75 with 4, 9.05 with 8, 11.07 with 16.
+
+Decision gate (R13): `max_W R_inproc(W) = 1.62` docs/sec, so the usable in-process rate is `0.8 x 1.62 = 1.30` docs/sec. The rule builds the pool only if that is below `N / T` and the consumer cannot add replicas, or the consumer needs isolation from native aborts. `N`, `T` and the replica question are still open inputs, and the crash-probe table is empty. The pool was not built. The measurements do say that a burst of thousands of documents in a short window is beyond one process on this hardware and needs several processes; replicas of the consumer's service are the first route (plan 3.3), the pool the second.
+
+Left open:
+
+- `N`, `T`, the real document mix, and whether the consumer can run replicas. These decide Phases 5 to 7.
+- macOS test run.
+- The starvation bound (heartbeat p99 under 100 ms) is far above the measured 1.3 ms and could be tightened.
+- `benchmark.db` was not updated; the tables are in `benchmark.md` only.
 
 ---
 
@@ -602,21 +667,21 @@ internal static HostResult RunHost(string scenario, TimeSpan timeout, params str
 
 ## Phase 0 — Immediate fixes that do not wait on design
 
-- [ ] Correct `docs/HIGH-THROUGHPUT-PROCESSING.md` (sections at `:49`, `:262` to `:460`, `:728`, summary table `:820`), `docs/BEST-PRACTICES.md:30` and `:53`, `README.md:152`, `AGENTS.md` Thread Safety, `docs/API-REFERENCE.md:44`, `docs/TROUBLESHOOTING.md:415`. Replace with: PDFium allows one native call per process at a time across all documents; until Release 1 ships, callers must serialize all PdfiumWrapper use in a process (one `SemaphoreSlim(1,1)` around every operation); file copies, byte arrays, and one document per thread do not help. Remove forced-GC batch advice and the `GC.GetTotalMemory` native-memory claim.
-- [ ] Add `[Collection("PDF Tests")]` to `PdfPageDeletionExample`. Add `TestProjectHygieneTests.AllPdfiumTestClassesShareTheCollection`: reflect over the test assembly, select classes whose methods reference `PdfiumWrapper` types or whose source files `using PdfiumWrapper`, and assert each has `CollectionAttribute("PDF Tests")`.
-- [ ] Replace `NativeLibraryResolver.EnsureRegistered()` with the static-constructor barrier from 4.2.
-- [ ] Create `PdfiumWrapper.Tests.Host` with the `init-race` scenario: barrier, N threads, each thread's first native use chosen round-robin from `new PdfDocument(file)`, `new PdfMerger()`, `new PdfMerger(file)`, `TiffWriter` on a rendered page. Report exceptions and `initCount`. Test asserts exit 0 and no exceptions. (`initCount == 1` is asserted after Phase 2 adds diagnostics.)
-- [ ] Run `dotnet test`; all existing tests pass.
+- [x] Correct `docs/HIGH-THROUGHPUT-PROCESSING.md` (sections at `:49`, `:262` to `:460`, `:728`, summary table `:820`), `docs/BEST-PRACTICES.md:30` and `:53`, `README.md:152`, `AGENTS.md` Thread Safety, `docs/API-REFERENCE.md:44`, `docs/TROUBLESHOOTING.md:415`. Replace with: PDFium allows one native call per process at a time across all documents; until Release 1 ships, callers must serialize all PdfiumWrapper use in a process (one `SemaphoreSlim(1,1)` around every operation); file copies, byte arrays, and one document per thread do not help. Remove forced-GC batch advice and the `GC.GetTotalMemory` native-memory claim.
+- [x] Add `[Collection("PDF Tests")]` to `PdfPageDeletionExample`. Add `TestProjectHygieneTests.AllPdfiumTestClassesShareTheCollection`: reflect over the test assembly, select classes whose methods reference `PdfiumWrapper` types or whose source files `using PdfiumWrapper`, and assert each has `CollectionAttribute("PDF Tests")`.
+- [x] Replace `NativeLibraryResolver.EnsureRegistered()` with the static-constructor barrier from 4.2.
+- [x] Create `PdfiumWrapper.Tests.Host` with the `init-race` scenario: barrier, N threads, each thread's first native use chosen round-robin from `new PdfDocument(file)`, `new PdfMerger()`, `new PdfMerger(file)`, `TiffWriter` on a rendered page. Report exceptions and `initCount`. Test asserts exit 0 and no exceptions. (`initCount == 1` is asserted after Phase 2 adds diagnostics.)
+- [x] Run `dotnet test`; all existing tests pass.
 
 Exit: public guidance no longer recommends unsafe parallelism; PDF tests cannot run in parallel by accident; first-use registration cannot race.
 
 ## Phase 1 — Sequential baseline (trimmed)
 
-- [ ] Record machine: OS/RID, CPU model and count, RAM, storage type, .NET SDK/runtime, PDFium version and DLL SHA-256. Deployment targets stay open inputs.
-- [ ] Tag the repository `bench-baseline-pre-gate`. Run the existing BenchmarkDotNet suite in Release and commit the CSV to `benchmark.md` per `plan-performance-benchmark.md`.
-- [ ] Add `SmallDocumentBenchmark.cs`: `[Benchmark] LoadCountClose()` = open `doc-1-page.pdf`, read `PageCount`, dispose; `[Benchmark] LoadRender72Close()` = same plus one 72 DPI `RenderToBytes`. This is where gate overhead is proportionally largest and is the Phase 4 regression reference.
-- [ ] Add the `cold-start` host scenario: report milliseconds from process start to first completed 72 DPI render for `first=document`, `first=merger`, `first=tiff`. Record three runs each.
-- [ ] Add the burst runner skeleton (Phase 4 spec) with `--n`, `--t`, `--callers 1`, `--mix`, `--input`, `--out`, `--report`. Run `--callers 1` for the sequential batch baseline. Required rate is `N / T_seconds`; engineering target includes 25% headroom. Do not state an achievable rate until measured.
+- [x] Record machine: OS/RID, CPU model and count, RAM, storage type, .NET SDK/runtime, PDFium version and DLL SHA-256. Deployment targets stay open inputs.
+- [x] Tag the repository `bench-baseline-pre-gate`. Run the existing BenchmarkDotNet suite in Release and commit the CSV to `benchmark.md` per `plan-performance-benchmark.md`.
+- [x] Add `SmallDocumentBenchmark.cs`: `[Benchmark] LoadCountClose()` = open `doc-1-page.pdf`, read `PageCount`, dispose; `[Benchmark] LoadRender72Close()` = same plus one 72 DPI `RenderToBytes`. This is where gate overhead is proportionally largest and is the Phase 4 regression reference.
+- [x] Add the `cold-start` host scenario: report milliseconds from process start to first completed 72 DPI render for `first=document`, `first=merger`, `first=tiff`. Record three runs each.
+- [x] Add the burst runner skeleton (Phase 4 spec) with `--n`, `--t`, `--callers 1`, `--mix`, `--input`, `--out`, `--report`. Run `--callers 1` for the sequential batch baseline. Required rate is `N / T_seconds`; engineering target includes 25% headroom. Do not state an achievable rate until measured.
 
 Exit: reproducible sequential, small-document, cold-start, and single-caller batch baselines exist and are recorded in `benchmark.md`.
 
@@ -624,18 +689,18 @@ Exit: reproducible sequential, small-document, cold-start, and single-caller bat
 
 Work in this order; run the suite after each step.
 
-- [ ] Add `PdfiumRuntime.cs`, `NativeHandleKind`, and `PdfiumDiagnostics.cs` per 4.1 and 4.7. Remove the `PdfDocument` static constructor. Move `TiffWriter` handler installation to `EnsureHandlersInstalled()` called from `OnAcquired`.
-- [ ] Change all 192 `LibraryImport` declarations from `public` to `internal` (R9). Bump `Version` to `2.0.0` in `PdfiumWrapper.csproj` and `PdfiumWrapper.runtime.csproj`. Fix compile errors in tests that used raw imports by routing them through wrapper APIs or `InternalsVisibleTo`.
-- [ ] Gate every public PDFium-touching member of `PdfDocument`, `PdfPage`, `PdfForm`, `PdfMerger`, `PdfMetadata`, `PdfBookmarks`, `PdfBookmark`, `PdfAttachments`, `PdfAttachment`, `PdfPageObject`, `PdfTextObject`, `PdfImageObject`, `PdfPathObject`, `PdfShadingObject`, `PdfFormObject` per 4.3. Introduce `Core` variants where loops would otherwise reenter per iteration. Put `ThrowIfDisposed()` inside the scope.
-- [ ] Add `GateCoverageTests.EveryPublicPdfiumMemberEntersTheGate`: for each public instance method and property getter on the types above (excluding `Dispose`, `Equals`, `GetHashCode`, `ToString`, and members marked `[NoNativeCall]`), invoke it on a live fixture with reasonable arguments via reflection and assert `gateEntries` increased. Add `[NoNativeCall]` (internal attribute) to the few members that are pure managed (e.g. `RawBitmap` accessors) so the test can skip them deliberately rather than silently.
-- [ ] Convert async methods to `EnterAsync` per page/operation per 4.3. Verify by code search that no `await` or `yield return` occurs lexically inside a `using (… Enter…)` block; add a unit test that scans the source files for that pattern as a guard.
-- [ ] Replace the four finalizers per 4.4. Make `PdfDocument` hold a reference to its `PdfForm` (if `GetForm()` creates one) so the finalizer can enqueue the form handle first. Make `PdfPage._page` and `PdfForm._formHandle` `internal` fields for the owner's finalizer.
-- [ ] Add `HandleOpened()`/`HandleClosed()` at every native open/close site.
-- [ ] Add `SpooledInput` and switch `PdfDocument(Stream)` and `PdfMerger(Stream)` to it; delete `StreamDocumentLoader`. Add `PooledFileWriter` and switch `Save(Stream)`/`SaveAsync(Stream)` and the `PdfMerger` stream save to it; delete `PdfStreamFileWriter`.
-- [ ] Add `BitmapLease` and `RenderToBitmapLease(Core)`; convert every render-then-encode path per 4.6; delete `RenderToBitmapHandle`.
-- [ ] Enforce R11: add `Debug.Assert(PdfiumRuntime.IsHeldByCurrentThread)` at each `lock (_pagesLock)`, `lock (_attachedObjectsLock)`, `lock (_disposeLock)`, `lock (_streamLock)` site.
-- [ ] Add `PdfiumRuntime.Shutdown()` tests: throws with a live document; succeeds after disposal; a new document works after shutdown.
-- [ ] Update XML docs on affected public members: "Thread safety: operations on different objects may run concurrently; the wrapper serializes native work. Do not use one object from two threads at once."
+- [x] Add `PdfiumRuntime.cs`, `NativeHandleKind`, and `PdfiumDiagnostics.cs` per 4.1 and 4.7. Remove the `PdfDocument` static constructor. Move `TiffWriter` handler installation to `EnsureHandlersInstalled()` called from `OnAcquired`.
+- [x] Change all 192 `LibraryImport` declarations from `public` to `internal` (R9). Bump `Version` to `2.0.0` in `PdfiumWrapper.csproj` and `PdfiumWrapper.runtime.csproj`. Fix compile errors in tests that used raw imports by routing them through wrapper APIs or `InternalsVisibleTo`.
+- [x] Gate every public PDFium-touching member of `PdfDocument`, `PdfPage`, `PdfForm`, `PdfMerger`, `PdfMetadata`, `PdfBookmarks`, `PdfBookmark`, `PdfAttachments`, `PdfAttachment`, `PdfPageObject`, `PdfTextObject`, `PdfImageObject`, `PdfPathObject`, `PdfShadingObject`, `PdfFormObject` per 4.3. Introduce `Core` variants where loops would otherwise reenter per iteration. Put `ThrowIfDisposed()` inside the scope.
+- [x] Add `GateCoverageTests.EveryPublicPdfiumMemberEntersTheGate`: for each public instance method and property getter on the types above (excluding `Dispose`, `Equals`, `GetHashCode`, `ToString`, and members marked `[NoNativeCall]`), invoke it on a live fixture with reasonable arguments via reflection and assert `gateEntries` increased. Add `[NoNativeCall]` (internal attribute) to the few members that are pure managed (e.g. `RawBitmap` accessors) so the test can skip them deliberately rather than silently.
+- [x] Convert async methods to `EnterAsync` per page/operation per 4.3. Verify by code search that no `await` or `yield return` occurs lexically inside a `using (… Enter…)` block; add a unit test that scans the source files for that pattern as a guard.
+- [x] Replace the four finalizers per 4.4. Make `PdfDocument` hold a reference to its `PdfForm` (if `GetForm()` creates one) so the finalizer can enqueue the form handle first. Make `PdfPage._page` and `PdfForm._formHandle` `internal` fields for the owner's finalizer.
+- [x] Add `HandleOpened()`/`HandleClosed()` at every native open/close site.
+- [x] Add `SpooledInput` and switch `PdfDocument(Stream)` and `PdfMerger(Stream)` to it; delete `StreamDocumentLoader`. Add `PooledFileWriter` and switch `Save(Stream)`/`SaveAsync(Stream)` and the `PdfMerger` stream save to it; delete `PdfStreamFileWriter`.
+- [x] Add `BitmapLease` and `RenderToBitmapLease(Core)`; convert every render-then-encode path per 4.6; delete `RenderToBitmapHandle`.
+- [x] Enforce R11: add `Debug.Assert(PdfiumRuntime.IsHeldByCurrentThread)` at each `lock (_pagesLock)`, `lock (_attachedObjectsLock)`, `lock (_disposeLock)`, `lock (_streamLock)` site.
+- [x] Add `PdfiumRuntime.Shutdown()` tests: throws with a live document; succeeds after disposal; a new document works after shutdown.
+- [x] Update XML docs on affected public members: "Thread safety: operations on different objects may run concurrently; the wrapper serializes native work. Do not use one object from two threads at once."
 
 Exit: every public operation enters the same gate, finalizers never touch PDFium, user I/O never runs inside the gate, encoding runs outside the gate, no public import bypass remains, all existing tests pass.
 
@@ -643,7 +708,7 @@ Exit: every public operation enters the same gate, finalizers never touch PDFium
 
 All in `src/PdfiumWrapper.Tests/Concurrency/`. Every test has a bounded timeout. Tests that change process-global state run in the host.
 
-- [ ] **Serialization and correctness** (`PdfiumConcurrencyTests.cs`):
+- [x] **Serialization and correctness** (`PdfiumConcurrencyTests.cs`):
 
 ```csharp
 [Theory, InlineData(2), InlineData(4), InlineData(8), InlineData(16)]
@@ -685,25 +750,25 @@ public void ConcurrentCallers_AreSerialized_AndMatchSequentialOracle(int callers
 
   Variants: text extraction compared to oracle strings; metadata/bookmarks; form field read/write on `fw2.pdf` copies; merge of two inputs then reopen and count pages; same file for all callers; `PdfMerger` first in a fresh host.
 
-- [ ] **Encode overlap**: 4 threads, `SaveAsTiff` to `MemoryStream` at 200 DPI. From `Snapshot().Events`, assert there exists a native `Render` interval of thread A and a gate-free window of thread B (gap between B's hold intervals while B is still running) that overlap in time. Assert every `FPDFBitmap_Destroy` happens inside a hold interval (checked by making `BitmapLease.Dispose` record a `Close` native interval).
+- [x] **Encode overlap**: 4 threads, `SaveAsTiff` to `MemoryStream` at 200 DPI. From `Snapshot().Events`, assert there exists a native `Render` interval of thread A and a gate-free window of thread B (gap between B's hold intervals while B is still running) that overlap in time. Assert every `FPDFBitmap_Destroy` happens inside a hold interval (checked by making `BitmapLease.Dispose` record a `Close` native interval).
 
-- [ ] **Thread-pool starvation** (host scenario `starvation`): `ThreadPool.SetMinThreads(pc, pc); ThreadPool.SetMaxThreads(pc, pc)` where `pc = Environment.ProcessorCount` (the runtime rejects smaller maxima). Start `8 * pc` concurrent `SaveAsTiffAsync(MemoryStream)` tasks. Concurrently run a heartbeat: every 50 ms, `Stopwatch` around `await Task.Run(() => { })`, record milliseconds. After all tasks complete, report heartbeat p50/p99 and total time. Test asserts exit 0, all tasks completed, and p99 under the bound (initially 100 ms; tune after first run and record the value). Run a second time with `mode=sync` where the tasks call the sync `SaveAsTiff` inside `Task.Run`, report the same numbers, and assert only completion; the two reports go into `benchmark.md` as the documented difference.
+- [x] **Thread-pool starvation** (host scenario `starvation`): `ThreadPool.SetMinThreads(pc, pc); ThreadPool.SetMaxThreads(pc, pc)` where `pc = Environment.ProcessorCount` (the runtime rejects smaller maxima). Start `8 * pc` concurrent `SaveAsTiffAsync(MemoryStream)` tasks. Concurrently run a heartbeat: every 50 ms, `Stopwatch` around `await Task.Run(() => { })`, record milliseconds. After all tasks complete, report heartbeat p50/p99 and total time. Test asserts exit 0, all tasks completed, and p99 under the bound (initially 100 ms; tune after first run and record the value). Run a second time with `mode=sync` where the tasks call the sync `SaveAsTiff` inside `Task.Run`, report the same numbers, and assert only completion; the two reports go into `benchmark.md` as the documented difference.
 
-- [ ] **Callback isolation**: `ThrottledStream` wraps a `MemoryStream` with `Thread.Sleep(50)` per `Read`/`Write` and records `(start, end)` of each call. Thread A: `new PdfMerger(throttled)` then `Save(throttledOut)`. Thread B: 50 sequential `RenderToBytes` at 72 DPI on `doc-1-page.pdf`, recording per-call latency. Assert: no throttled-stream call interval overlaps any gate-hold interval; B's p95 latency is below 3x B's solo p95 (measured in the same test before starting A).
+- [x] **Callback isolation**: `ThrottledStream` wraps a `MemoryStream` with `Thread.Sleep(50)` per `Read`/`Write` and records `(start, end)` of each call. Thread A: `new PdfMerger(throttled)` then `Save(throttledOut)`. Thread B: 50 sequential `RenderToBytes` at 72 DPI on `doc-1-page.pdf`, recording per-call latency. Assert: no throttled-stream call interval overlaps any gate-hold interval; B's p95 latency is below 3x B's solo p95 (measured in the same test before starting A).
 
-- [ ] **Deferred release** (host scenario `finalizer-drain`): `workers` threads run steady render jobs. Main thread creates `graphs` documents with two open pages each and a detached page object, drops all references, then `GC.Collect(); GC.WaitForPendingFinalizers(); GC.Collect();`, then runs one `PdfiumRuntime.ReleasePending()`. Report `enqueued`, `drained`, `PendingCount`, `LiveHandleCount`, and whether any event with the finalizer thread's id is a `GateWait` or `GateHold`. Test asserts drained == enqueued, `PendingCount == 0`, `LiveHandleCount == 0` after workers finish and dispose, and zero finalizer-thread gate events. Also assert from the event order that for each graph the page `Close` events precede the document `Close` event.
+- [x] **Deferred release** (host scenario `finalizer-drain`): `workers` threads run steady render jobs. Main thread creates `graphs` documents with two open pages each and a detached page object, drops all references, then `GC.Collect(); GC.WaitForPendingFinalizers(); GC.Collect();`, then runs one `PdfiumRuntime.ReleasePending()`. Report `enqueued`, `drained`, `PendingCount`, `LiveHandleCount`, and whether any event with the finalizer thread's id is a `GateWait` or `GateHold`. Test asserts drained == enqueued, `PendingCount == 0`, `LiveHandleCount == 0` after workers finish and dispose, and zero finalizer-thread gate events. Also assert from the event order that for each graph the page `Close` events precede the document `Close` event.
 
-- [ ] **Shared gate across load contexts** (host scenario `alc-shared-gate`): load `PdfiumWrapper.dll` into `new AssemblyLoadContext("second")` via `LoadFromAssemblyPath`. Through reflection on the second copy, construct a `PdfDocument` and call `RenderPages(72)` on 4 threads while 4 threads use the primary copy. Report `ReferenceEquals(AppContext.GetData("PdfiumWrapper.NativeGate"), gateSeenByCopy2)` (copy 2 exposes it via `PdfiumRuntime` reflection), and `MaxActiveNative` from the shared counters. Assert true and 1.
+- [x] **Shared gate across load contexts** (host scenario `alc-shared-gate`): load `PdfiumWrapper.dll` into `new AssemblyLoadContext("second")` via `LoadFromAssemblyPath`. Through reflection on the second copy, construct a `PdfDocument` and call `RenderPages(72)` on 4 threads while 4 threads use the primary copy. Report `ReferenceEquals(AppContext.GetData("PdfiumWrapper.NativeGate"), gateSeenByCopy2)` (copy 2 exposes it via `PdfiumRuntime` reflection), and `MaxActiveNative` from the shared counters. Assert true and 1.
 
-- [ ] **Initialization race**: Phase 0 scenario plus `initCount == 1`.
+- [x] **Initialization race**: Phase 0 scenario plus `initCount == 1`.
 
-- [ ] **Failure paths**: thread A loops over invalid file, wrong password, disposed document use, and a `Save` to a stream whose `Write` throws; thread B renders. Assert A gets the specific exception types, B completes, and after A finishes `PdfiumRuntime.Enter()` succeeds immediately (gate was released on every failure).
+- [x] **Failure paths**: thread A loops over invalid file, wrong password, disposed document use, and a `Save` to a stream whose `Write` throws; thread B renders. Assert A gets the specific exception types, B completes, and after A finishes `PdfiumRuntime.Enter()` succeeds immediately (gate was released on every failure).
 
-- [ ] **Crash characterization** (host scenario `crash-probe`): test code generates malformed inputs from fixtures (truncate at 25/50/75%, flip 1% of bytes with a fixed seed, zero the xref) into `TestOutput/malformed/`. For each, run the host and record exit code. Test asserts only that the parent survived and writes the table to `TestOutput/crash-probe.md`. Inputs that abort the host are listed in `docs/TROUBLESHOOTING.md` as process-fatal in Release 1 and feed the R13 decision.
+- [x] **Crash characterization** (host scenario `crash-probe`): test code generates malformed inputs from fixtures (truncate at 25/50/75%, flip 1% of bytes with a fixed seed, zero the xref) into `TestOutput/malformed/`. For each, run the host and record exit code. Test asserts only that the parent survived and writes the table to `TestOutput/crash-probe.md`. Inputs that abort the host are listed in `docs/TROUBLESHOOTING.md` as process-fatal in Release 1 and feed the R13 decision.
 
-- [ ] **Detector validation**: `PdfiumDiagnostics.NativeInterval` is called from a test on two threads simultaneously without entering the gate; assert `MaxActiveNative == 2`. This proves the detector would catch a real bypass.
+- [x] **Detector validation**: `PdfiumDiagnostics.NativeInterval` is called from a test on two threads simultaneously without entering the gate; assert `MaxActiveNative == 2`. This proves the detector would catch a real bypass.
 
-- [ ] Rename `MultipleDocuments_ShouldWorkConcurrently` (`PdfDocumentTests.cs:1300`) to `MultipleDocuments_CanCoexistSequentially`; keep its assertions.
+- [x] Rename `MultipleDocuments_ShouldWorkConcurrently` (`PdfDocumentTests.cs:1300`) to `MultipleDocuments_CanCoexistSequentially`; keep its assertions.
 
 Exit: all pitfall tests pass on win-x64 and linux-x64; concurrent callers produce oracle-equal output; stress and cleanup runs finish without crashes or deadlocks.
 
@@ -711,9 +776,9 @@ Exit: all pitfall tests pass on win-x64 and linux-x64; concurrent callers produc
 
 New classes in `src/PdfiumWrapper.Benchmarks`, registered in `Program.cs` after the existing four. Diagnostics off for timing runs; one separate instrumented run reports wait/hold shares.
 
-- [ ] `GateOverheadBenchmark.cs`: the two `SmallDocumentBenchmark` operations. Compare against the `bench-baseline-pre-gate` tag run. Acceptance: median within 5%, p95 within 10%. Report absolute nanoseconds per `Enter()` from a micro-benchmark `[Benchmark] EnterExit()` that does `using var _ = PdfiumRuntime.Enter();` on an initialized runtime.
+- [x] `GateOverheadBenchmark.cs`: the two `SmallDocumentBenchmark` operations. Compare against the `bench-baseline-pre-gate` tag run. Acceptance: median within 5%, p95 within 10%. Report absolute nanoseconds per `Enter()` from a micro-benchmark `[Benchmark] EnterExit()` that does `using var _ = PdfiumRuntime.Enter();` on an initialized runtime.
 
-- [ ] `ConcurrentCallersBenchmark.cs`:
+- [x] `ConcurrentCallersBenchmark.cs`:
 
 ```csharp
 [MemoryDiagnoser]
@@ -748,7 +813,7 @@ public class ConcurrentCallersBenchmark
 
   Derived metrics written to `benchmark.md`: pages/sec = `Callers * pagesPerDoc / meanSeconds`; speedup = pages/sec at W over pages/sec at 1; from the instrumented run, gate-wait share and hold share of wall time.
 
-- [ ] Burst runner (`Program.cs` branch when `args[0] == "burst"`; otherwise existing BenchmarkDotNet behavior):
+- [x] Burst runner (`Program.cs` branch when `args[0] == "burst"`; otherwise existing BenchmarkDotNet behavior):
 
 ```text
 dotnet run -c Release --project src/PdfiumWrapper.Benchmarks -- burst \
@@ -759,14 +824,16 @@ dotnet run -c Release --project src/PdfiumWrapper.Benchmarks -- burst \
 
   Report JSON fields: `n`, `t`, `callers`, `mode`, `totalSeconds`, `lastJobCompletedAt`, `metDeadline`, `jobs.success`, `jobs.expectedFailure`, `jobs.unexpectedFailure`, `latencyMs.{p50,p95,p99,max}` for queue, processing, and end-to-end, `pagesPerSec`, `docsPerSec`, `peakWorkingSetMB`, `steadyWorkingSetMB`, `cpuSeconds`, `outputBytes`, `queueDepthSamples[]`, `gateWaitShare` (instrumented run only), `heartbeatP99Ms` (async-starved mode), `pendingDrainedPerOp` (abandon mode).
 
-- [ ] `AsyncAdmissionBenchmark`: burst runner `--mode async` and `--mode async-starved` (constrained pool as in the starvation test) at callers 8, 16, 32; compare with `--mode sync`. Record heartbeat p99 and throughput.
-- [ ] `StreamCallbackBenchmark.cs`: `Save` to file, to `MemoryStream`, and to a 5 ms-per-write throttled stream; `PdfMerger` load from the same three. Instrumented run reports gate hold per operation; acceptance: hold time independent of the stream type within noise.
-- [ ] `FinalizerDrainBenchmark`: burst runner `--abandon-fraction 0.05` versus `0`; report throughput delta and `pendingDrainedPerOp`.
-- [ ] **Decision gate (R13).** Record `R_inproc(W)` for `W` in 1..ProcessorCount from `ConcurrentCallersBenchmark` on the mixed corpus. Build Release 2 only if `0.8 * max_W R_inproc(W) < N / T` and the consumer cannot add replicas, or the consumer requires isolation from native aborts (crash-probe table non-empty and consumer confirms the requirement). Otherwise write the measured single-lane and in-process capacities into `docs/HIGH-THROUGHPUT-PROCESSING.md` as sizing guidance and skip to Phase 8.
+- [x] `AsyncAdmissionBenchmark`: burst runner `--mode async` and `--mode async-starved` (constrained pool as in the starvation test) at callers 8, 16, 32; compare with `--mode sync`. Record heartbeat p99 and throughput.
+- [x] `StreamCallbackBenchmark.cs`: `Save` to file, to `MemoryStream`, and to a 5 ms-per-write throttled stream; `PdfMerger` load from the same three. Instrumented run reports gate hold per operation; acceptance: hold time independent of the stream type within noise.
+- [x] `FinalizerDrainBenchmark`: burst runner `--abandon-fraction 0.05` versus `0`; report throughput delta and `pendingDrainedPerOp`.
+- [x] **Decision gate (R13).** Record `R_inproc(W)` for `W` in 1..ProcessorCount from `ConcurrentCallersBenchmark` on the mixed corpus. Build Release 2 only if `0.8 * max_W R_inproc(W) < N / T` and the consumer cannot add replicas, or the consumer requires isolation from native aborts (crash-probe table non-empty and consumer confirms the requirement). Otherwise write the measured single-lane and in-process capacities into `docs/HIGH-THROUGHPUT-PROCESSING.md` as sizing guidance and skip to Phase 8.
 
 Exit: regression criteria verified, in-process scaling measured and recorded, documented go/no-go for the process pool.
 
 ## Phase 5 — Persistent process workers (Release 2, conditional)
+
+> Not built (2026-10-02). The Phase 4 decision gate did not call for it: `N`, `T` and whether the consumer can run replicas were not supplied, and the crash probe found no process-fatal input. Phases 5 to 7 remain as specified for when the decision is reopened. See "Results and decision" in the implementation record.
 
 - [ ] Add `src/PdfiumWrapper.Worker` (executable, `PackAsTool=false`, published per RID with its natives) and `src/PdfiumWrapper.Processing` (coordinator library). Neither is referenced by the core package.
 - [ ] Protocol: length-prefixed (4-byte little-endian) UTF-8 JSON frames over redirected stdin/stdout, max frame 1 MiB; stderr drained concurrently to the coordinator log. `Hello {protocolVersion, pdfiumVersion, rid}`, `Job {id, kind, inputRef, outputRef, options, deadlineUtc}`, `Progress {id, pagesDone}`, `Result {id, status, outputRef, pages, error, timings}`, `Shutdown`. `inputRef`/`outputRef` are file paths or spool ids only. No delegates, handles, or shell commands.
@@ -800,10 +867,10 @@ Provisional criteria, to confirm after Phase 1 inputs: at least 2x end-to-end th
 
 ## Phase 8 — Documentation and release qualification
 
-- [ ] Update `README.md`, `AGENTS.md`, XML remarks, `docs/API-REFERENCE.md`, `docs/BEST-PRACTICES.md`, `docs/HIGH-THROUGHPUT-PROCESSING.md`, `docs/TROUBLESHOOTING.md`: gate semantics; what concurrent submission does and does not provide; finalizer behavior and `ReleasePending()`; stream spooling and the threshold; encode overlap; measured single-lane and in-process capacity tables; replica scale-out guidance; the pool, if built.
-- [ ] Document the 2.0 break: raw `PDFium` imports are internal; `PdfiumRuntime.Enter()`, `ReleasePending()`, `Shutdown()`, `IsHeldByCurrentThread`.
-- [ ] Pin and report PDFium version and DLL checksums in `benchmark.md` and release notes.
-- [ ] Run the full suite plus Phase 3 tests on all supported RIDs; recheck native resolution. Record results and open platform limits in `/docs` and `ai/current-state.md`.
+- [x] Update `README.md`, `AGENTS.md`, XML remarks, `docs/API-REFERENCE.md`, `docs/BEST-PRACTICES.md`, `docs/HIGH-THROUGHPUT-PROCESSING.md`, `docs/TROUBLESHOOTING.md`: gate semantics; what concurrent submission does and does not provide; finalizer behavior and `ReleasePending()`; stream spooling and the threshold; encode overlap; measured single-lane and in-process capacity tables; replica scale-out guidance; the pool, if built.
+- [x] Document the 2.0 break: raw `PDFium` imports are internal; `PdfiumRuntime.Enter()`, `ReleasePending()`, `Shutdown()`, `IsHeldByCurrentThread`.
+- [x] Pin and report PDFium version and DLL checksums in `benchmark.md` and release notes. Recorded in `benchmark.md`; the repository has no release-notes file, so the 2.0 break is described in `README.md` ("Upgrading to 2.0").
+- [x] Run the full suite plus Phase 3 tests on all supported RIDs; recheck native resolution. Record results and open platform limits in `/docs` and `ai/current-state.md`. Done for win-x64 and linux-x64 (219 tests each). **Not run on osx-x64 or osx-arm64**: no macOS machine was available; recorded as an open platform check.
 
 ## First implementation step
 

@@ -564,14 +564,14 @@ public class PdfDocument : IDisposable
         for (int i = 0; i < pageCount; i++)
         {
             await Task.Yield();
-            var page = await GetPageAsync(i);
+            var page = await GetPageAsync(i).ConfigureAwait(false);
             try
             {
                 results[i] = processor(page);
             }
             finally
             {
-                await DisposePageAsync(page);
+                await DisposePageAsync(page).ConfigureAwait(false);
             }
         }
         return results;
@@ -595,14 +595,14 @@ public class PdfDocument : IDisposable
         for (int i = 0; i < pageCount; i++)
         {
             await Task.Yield();
-            var page = await GetPageAsync(i);
+            var page = await GetPageAsync(i).ConfigureAwait(false);
             try
             {
                 action(page);
             }
             finally
             {
-                await DisposePageAsync(page);
+                await DisposePageAsync(page).ConfigureAwait(false);
             }
         }
     }
@@ -746,13 +746,14 @@ public class PdfDocument : IDisposable
 
     public async Task<RawBitmap[]> RenderPagesAsync(int dpiWidth, int dpiHeight)
     {
-        int pageCount = await RequirePagesAsync();
+        int pageCount = await RequirePagesAsync().ConfigureAwait(false);
 
         var results = new RawBitmap[pageCount];
         for (int i = 0; i < pageCount; i++)
         {
             await Task.Yield();
-            await using var lease = await RenderPageLeaseAsync(i, dpiWidth, dpiHeight, ImageRenderFlags);
+            var lease = await RenderPageLeaseAsync(i, dpiWidth, dpiHeight, ImageRenderFlags).ConfigureAwait(false);
+            await using var leaseScope = lease.ConfigureAwait(false);
             results[i] = ToRawBitmap(lease);
         }
         return results;
@@ -952,7 +953,8 @@ public class PdfDocument : IDisposable
             {
                 await Task.Yield();
                 byte[] bytes;
-                await using (var lease = await RenderPageLeaseAsync(i, dpiWidth, dpiHeight, ImageRenderFlags))
+                var lease = await RenderPageLeaseAsync(i, dpiWidth, dpiHeight, ImageRenderFlags).ConfigureAwait(false);
+                await using (lease.ConfigureAwait(false))
                 {
                     bytes = EncodeJpeg(encoder, lease, quality);
                 }
@@ -965,7 +967,8 @@ public class PdfDocument : IDisposable
             {
                 await Task.Yield();
                 byte[] bytes;
-                await using (var lease = await RenderPageLeaseAsync(i, dpiWidth, dpiHeight, ImageRenderFlags))
+                var lease = await RenderPageLeaseAsync(i, dpiWidth, dpiHeight, ImageRenderFlags).ConfigureAwait(false);
+                await using (lease.ConfigureAwait(false))
                 {
                     bytes = EncodePng(lease);
                 }
@@ -1074,10 +1077,10 @@ public class PdfDocument : IDisposable
     public async Task SaveAsTiffAsync(string outputPath, int dpiWidth, int dpiHeight,
         TiffColorMode colorMode = TiffColorMode.Bilevel, byte threshold = 128)
     {
-        int pageCount = await RequirePagesAsync();
+        int pageCount = await RequirePagesAsync().ConfigureAwait(false);
 
         using var writer = new TiffWriter(outputPath);
-        await WriteAllPagesToTiffAsync(writer, pageCount, dpiWidth, dpiHeight, colorMode, threshold);
+        await WriteAllPagesToTiffAsync(writer, pageCount, dpiWidth, dpiHeight, colorMode, threshold).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -1095,10 +1098,10 @@ public class PdfDocument : IDisposable
     public async Task SaveAsTiffAsync(Stream output, int dpiWidth, int dpiHeight,
         TiffColorMode colorMode = TiffColorMode.Bilevel, byte threshold = 128)
     {
-        int pageCount = await RequirePagesAsync();
+        int pageCount = await RequirePagesAsync().ConfigureAwait(false);
 
         using var writer = new TiffWriter(output);
-        await WriteAllPagesToTiffAsync(writer, pageCount, dpiWidth, dpiHeight, colorMode, threshold);
+        await WriteAllPagesToTiffAsync(writer, pageCount, dpiWidth, dpiHeight, colorMode, threshold).ConfigureAwait(false);
     }
 
     private void WriteAllPagesToTiff(TiffWriter writer, int pageCount, int dpiWidth, int dpiHeight,
@@ -1118,7 +1121,8 @@ public class PdfDocument : IDisposable
         for (int i = 0; i < pageCount; i++)
         {
             await Task.Yield();
-            await using var lease = await RenderPageLeaseAsync(i, dpiWidth, dpiHeight, TiffRenderFlags);
+            var lease = await RenderPageLeaseAsync(i, dpiWidth, dpiHeight, TiffRenderFlags).ConfigureAwait(false);
+            await using var leaseScope = lease.ConfigureAwait(false);
             WriteTiffPage(writer, lease, dpiWidth, dpiHeight, colorMode, threshold, pageCount);
         }
     }
@@ -1158,7 +1162,7 @@ public class PdfDocument : IDisposable
 
     public async Task SaveAsJpegsAsync(string outputDirectory, string fileNamePrefix, int quality, int dpiWidth, int dpiHeight)
     {
-        int pageCount = await RequirePagesAsync();
+        int pageCount = await RequirePagesAsync().ConfigureAwait(false);
 
         if (!Directory.Exists(outputDirectory))
             Directory.CreateDirectory(outputDirectory);
@@ -1168,7 +1172,8 @@ public class PdfDocument : IDisposable
         for (int i = 0; i < pageCount; i++)
         {
             await Task.Yield();
-            await using var lease = await RenderPageLeaseAsync(i, dpiWidth, dpiHeight, ImageRenderFlags);
+            var lease = await RenderPageLeaseAsync(i, dpiWidth, dpiHeight, ImageRenderFlags).ConfigureAwait(false);
+            await using var leaseScope = lease.ConfigureAwait(false);
             encoder.EncodeToFile(lease.Buffer, lease.Width, lease.Height, lease.Stride,
                 Path.Combine(outputDirectory, $"{fileNamePrefix}_{i + 1:D3}.jpg"), quality: quality);
         }
@@ -1247,7 +1252,7 @@ public class PdfDocument : IDisposable
 
     public async Task SaveAsImagesAsync(string outputDirectory, string fileNamePrefix, ImageFormat format, int quality, int dpiWidth, int dpiHeight)
     {
-        int pageCount = await RequirePagesAsync();
+        int pageCount = await RequirePagesAsync().ConfigureAwait(false);
 
         if (!Directory.Exists(outputDirectory))
             Directory.CreateDirectory(outputDirectory);
@@ -1261,7 +1266,8 @@ public class PdfDocument : IDisposable
             {
                 await Task.Yield();
                 var filePath = Path.Combine(outputDirectory, $"{fileNamePrefix}_{i + 1:D3}.{extension}");
-                await using var lease = await RenderPageLeaseAsync(i, dpiWidth, dpiHeight, ImageRenderFlags);
+                var lease = await RenderPageLeaseAsync(i, dpiWidth, dpiHeight, ImageRenderFlags).ConfigureAwait(false);
+                await using var leaseScope = lease.ConfigureAwait(false);
                 encoder.EncodeToFile(lease.Buffer, lease.Width, lease.Height, lease.Stride, filePath, quality: quality);
             }
         }
@@ -1271,7 +1277,8 @@ public class PdfDocument : IDisposable
             {
                 await Task.Yield();
                 var filePath = Path.Combine(outputDirectory, $"{fileNamePrefix}_{i + 1:D3}.{extension}");
-                await using var lease = await RenderPageLeaseAsync(i, dpiWidth, dpiHeight, ImageRenderFlags);
+                var lease = await RenderPageLeaseAsync(i, dpiWidth, dpiHeight, ImageRenderFlags).ConfigureAwait(false);
+                await using var leaseScope = lease.ConfigureAwait(false);
                 PngEncoder.EncodeToFile(lease.Buffer, lease.Width, lease.Height, lease.Stride, filePath);
             }
         }

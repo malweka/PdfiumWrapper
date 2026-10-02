@@ -2,16 +2,32 @@
 
 ## Current focus
 
-Implementation-readiness check of `ai/plans/plan-pdfium-concurrency.md` against the code (2026-10-02). The plan is implementable, but section 4 reference code has defects that must be corrected during Phase 2 (listed under Blockers or open questions). No library code, tests, or benchmarks were changed or run. The plan file itself was not edited.
+`ai/plans/plan-pdfium-concurrency.md` Release 1 is implemented, tested and measured (2026-10-02) on branch `feature/pdfium-concurrency-plan`. All PDFium use goes through one process-wide gate (`PdfiumRuntime`); the package version is 2.0.0. Release 2 (the process pool, Phases 5 to 7) was not built: the Phase 4 decision gate needs inputs only the project owner has.
 
 ## Completed
 
-### Latest task: implementation-readiness check (2026-10-02)
+### Latest task: implement the concurrency plan, Release 1 (2026-10-02)
 
-- Confirmed against code: 192 PDFium `LibraryImport`s (17 + 32 + 32 + 71 + 6 + 34); finalizers at `PdfDocument.cs:1340`, `PdfPage.cs:467`, `PdfMerger.cs:456`, `PdfPageObject.cs:141`; init only in `PdfDocument` static constructor (`:27`); resolver compare-exchange (`NativeLibraryResolver.cs:15`); `TiffWriter.cs:221`; `InternalsVisibleTo` exists for `PdfiumWrapper.Tests` only; no test or benchmark uses raw `PDFium.*` imports.
-- Confirmed environment: .NET SDK 10.0.401, no git tags yet, Docker Desktop present (linux-x64 test runs possible locally), PR CI runs tests on `ubuntu-latest` only.
-- Found reference-code defects and plan/code mismatches; see Blockers or open questions.
+- Phase 0: `NativeLibraryResolver` static-constructor barrier; `PdfPageDeletionExample` in the `PDF Tests` collection plus `TestProjectHygieneTests`; `PdfiumWrapper.Tests.Host` and `HostRunner`. The `init-race` scenario aborted the pre-gate code in 8 of 8 runs.
+- Phase 1: tag `bench-baseline-pre-gate` (commit `f2478f6`); `SmallDocumentBenchmark`, burst runner, `cold-start` scenario; baselines recorded in `benchmark.md`.
+- Phase 2: `PdfiumRuntime` (reentrant gate, init, deferred release, `Shutdown`), `PdfiumDiagnostics`, `SharedState`, `SpooledInput`, `PooledFileWriter`, `BitmapLease`. Every public PDFium-touching member of the wrapper types enters the gate. Finalizers only enqueue. The 192 raw imports are `internal`. `StreamDocumentLoader` and `PdfStreamFileWriter` are deleted.
+- Phase 3: `src/PdfiumWrapper.Tests/Concurrency/` (`GateCoverageTests`, `PdfiumConcurrencyTests`, `PdfiumHostTests`) and host scenarios `init-race`, `cold-start`, `starvation`, `finalizer-drain`, `alc-shared-gate`, `shutdown`, `crash-probe`. 219 tests pass on win-x64 and linux-x64 (Docker, .NET 8 SDK image).
+- Phase 4: `GateOverheadBenchmark`, `ConcurrentCallersBenchmark`, `StreamCallbackBenchmark`, instrumented burst runs, replica scale-out runs. Results and the decision are in `benchmark.md` and in the plan's "Implementation record".
+- Phase 8: `README.md`, `AGENTS.md`, `docs/API-REFERENCE.md`, `docs/BEST-PRACTICES.md`, `docs/HIGH-THROUGHPUT-PROCESSING.md`, `docs/TROUBLESHOOTING.md` rewritten for the gate, with measured capacity and a sizing rule.
+- The shipped code departs from the plan's section 4 reference code in several places (async admission, drain ordering, release of backing memory, spool files, forms, save API names). Each is listed with its reason in the plan's "Implementation record".
+- Found and fixed along the way: `FPDFPageObj_GetMatrix` had the wrong native signature (`PdfPageObject.GetMatrix()` corrupted the stack); `FPDF_FORMFILLINFO` was passed from a movable managed object.
 
+Key measurements (one machine: i7-13700F, 24 logical processors, win-x64):
+
+- Gate cost: 28 ns per uncontended entry; one-page load/render within 0.5% of the pre-gate code; sequential batch unchanged (154.3 s against 153.5 s).
+- One process: 1.30 docs/sec sequential, 1.62 docs/sec (20.1 pages/sec) with 4 or more callers on the mixed corpus at 200 DPI. The gate is held 99.8% of the time; rendering dominates and is serialized. In-process parallelism is worth 1.25x.
+- Several processes: 3.13 docs/sec with 2, 5.75 with 4, 9.05 with 8, 11.07 with 16.
+- Async API keeps the pool free (heartbeat p99 1.3 ms against 2.5 s with the sync API on pool threads).
+- Crash probe: 25 damaged inputs per platform, no process abort.
+
+### Previous task: implementation-readiness check (2026-10-02)
+
+- Confirmed the plan's evidence against the code and found defects in its reference code. All of them were corrected during implementation; see the plan's "Implementation record".
 ### Latest task: plan review and rewrite (2026-09-30)
 
 - Reviewed the previous plan against the code. Confirmed: four finalizers call PDFium directly; init only in the `PdfDocument` static constructor; `NativeLibraryResolver` compare-exchange race; `StreamDocumentLoader` lazy user-stream reads; `PdfStreamFileWriter` writes inside `FPDF_SaveAsCopy`; `PdfPageDeletionExample` lacks the xUnit collection attribute; `docs/HIGH-THROUGHPUT-PROCESSING.md` still recommends `Parallel.ForEachAsync` across documents.
@@ -93,28 +109,28 @@ Implementation-readiness check of `ai/plans/plan-pdfium-concurrency.md` against 
 
 ## In progress
 
-- No implementation work is currently in progress. Audits and the requested plan are complete; implementation/test checkboxes remain open.
+- Nothing. Release 1 is complete on the branch.
 
 ## Next recommended step
 
-When implementation is requested, read `ai/plans/plan-pdfium-concurrency.md` sections 3 and 4 first, then execute Phase 0 (doc correction, `[Collection]` on `PdfPageDeletionExample`, `NativeLibraryResolver` static-constructor barrier, `PdfiumWrapper.Tests.Host` with `init-race`). Tag `bench-baseline-pre-gate` and run Phase 1 before touching `PdfiumRuntime`. Rule R9 is approved; Phase 2 may proceed directly after Phase 1.
+1. Project owner supplies `N` (documents per burst), `T` (window), the real document mix, and whether the consuming service can run several replicas behind its queue. With those, apply rule R13: if replicas are possible, size them from `benchmark.md` and stop; if not, build the process pool (plan Phases 5 to 7).
+2. Run the test suite on macOS (osx-x64, osx-arm64); it has only been run on win-x64 and linux-x64.
+3. Review and merge `feature/pdfium-concurrency-plan`. It is a major version (2.0.0): raw `PDFium.*` imports are no longer public.
 
 ## Blockers or open questions
 
-Findings from the 2026-10-02 readiness check (corrections to apply in Phase 2; not yet written into the plan):
+- The Release 2 decision is open for the reason above. The measurements say a burst of thousands of documents in a short window is beyond one process on the test hardware (usable rate about 1.3 docs/sec per process on the mixed corpus), so some multi-process arrangement is needed; which one is the owner's call.
+- macOS not verified.
+- Cold start with a document first is about 5 ms slower than before: initialization now loads libtiff to install its error handlers. Moving that to the first TIFF write would recover it.
+- Merge benchmark moved between -5.9% and +4.4% by document (buffered save). Peak memory during a save now includes the whole output.
+- `benchmark.db` was not updated with the new runs; the tables are in `benchmark.md` only.
+- The starvation test bound (heartbeat p99 under 100 ms) is loose against the measured 1.3 ms.
+- `docs/DOCUMENT_PROPERTIES_IMPLEMENTATION.md` still shows pre-gate implementation snippets with raw `PDFium.FPDF_*` calls. `.github/copilot-instructions.md` points at `AGENT.md`; the file is `AGENTS.md`.
+- Other raw import signatures were not audited. The gate-coverage test exercised every public member once and found one wrong signature; imports not reachable from the public API are unchecked.
+- Benchmarks on this machine: run a baseline worktree from the same volume and kind of directory as the repository. A worktree under `%TEMP%` made file opens about 60 µs slower.
 
-- **`EnterAsync` records the wrong owner thread (plan 4.1).** `OnAcquired` runs inside the async method on the thread that completed `WaitAsync`. If the returned `ValueTask` completes before the caller registers its continuation, the caller resumes on a different thread while `s_owner` names a now-free pool thread. Result: nested `Enter()` self-deadlocks, and that pool thread can later "reenter" without holding the semaphore. Fix: claim ownership on the consuming thread (custom awaiter whose `GetResult()` sets owner, runs init and drain).
-- **Drain can close a document before its pages (plan 4.1/4.4).** The drain walks kinds 0 to 4 while the finalizer thread enqueues page then document; a page enqueued after the drain passed kind 3 is skipped while its document is picked up in kind 4. Fix: snapshot queue counts in reverse kind order (4 to 0) before draining, and drain only those counts.
-- **Backing memory released before the deferred close (plan 4.4/4.5).** The `PdfDocument` finalizer calls `ReleasePinnedMemoryDocument()` immediately, but `FPDF_CloseDocument` runs later in the drain. Same for `PdfForm`: `FPDFDOC_InitFormFillEnvironment` is passed `ref _formInfo` (an object field; the pinned `GCHandle` at `PdfForm.cs:42` pins a boxed copy), so a deferred `ExitFormFillEnvironment` would run after the `PdfForm` is collected. Fix: keep-alive handles released by the drain after the document close; allocate `FPDF_FORMFILLINFO` in native memory.
-- **Spool temp file cannot be deleted while open on Windows.** PDFium opens with `FILE_SHARE_READ | FILE_SHARE_WRITE` only (`cfx_fileaccess_windows.cpp:32`). Plan 4.5 also shows `using var spool` in the constructor, which contradicts "deleted on document dispose or finalizer". Needs a deferred-delete path that never throws on the finalizer thread.
-- **Plan/code mismatches.** No `_form` field: `GetForm()` (`PdfDocument.cs:1256`) returns a new caller-owned `PdfForm` per call and `PdfForm` has no finalizer, so the document must track a set of forms. Plan names `Save(Stream, SaveFlags)`/`SaveAsync(Stream)`; actual API is `Save(string, uint)` and `SaveToStream(Stream, uint)`, no async save. `SaveAsTiffAsync` has a `threshold` parameter and no `CancellationToken`. `PdfMerger` holds no source documents. `SpooledInput` ignores `MemoryStream.Position`/segment offset and does not advance the stream to its end, both of which current constructors do.
-- **Existing tests that will need rewriting.** `PdfMergerTests.cs:173` and `:256` assert on `StreamDocumentLoader` through reflection.
-- **Smaller gaps to settle while implementing.** `InternalsVisibleTo` for `PdfiumWrapper.Tests.Host` and `PdfiumWrapper.Benchmarks`; `LiveHandleCount` accounting when a page object is attached to or removed from a page; `BootstrapLock` can hand two load contexts different lock objects on first use; `Shutdown()` tests belong in the host because leaked handles from other tests make `LiveHandleCount == 0` unreliable in the shared test process; tag `bench-baseline-pre-gate` after adding the Phase 1 benchmark classes so the baseline can be rerun.
-- **Needed from the owner.** Go-ahead to commit and tag locally (Phase 1 requires both); `N` and `T` before the Phase 4 decision gate.
+Earlier notes:Earlier notes:
 
-Earlier notes:
-
-- No blocker to the requested plan. The current wrapper still does not enforce PDFium's threading contract; no remedy has been implemented yet.
 - The starvation test bound (heartbeat p99 under 100 ms) and the callback-isolation bound (3x solo p95) are initial guesses to be tuned after the first run and recorded in `benchmark.md`.
 - Exact burst size/window, operation mix, target hardware/output storage, and durable-admission integration remain open. These refine acceptance targets and sizing, not the established native coordination requirement.
 - Worker count and achievable documents/pages per second require workload measurements; no performance guarantee was established.
@@ -127,6 +143,14 @@ Earlier notes:
 
 ## Recently changed files
 
+- `src/PdfiumWrapper/`: new `PdfiumRuntime.cs`, `PdfiumDiagnostics.cs`, `SharedState.cs`, `SpooledInput.cs`, `PooledFileWriter.cs`, `BitmapLease.cs`; rewritten `PdfDocument.cs`, `PdfPage.cs`, `PdfMerger.cs`, `PdfForm.cs`, `PdfPageObject.cs` and subtypes, `PdfMetadata.cs`, `PdfBookmarks.cs`, `PdfAttachments.cs`, `PdfHelpers.cs`, `TiffWriter.cs`, `NativeLibraryResolver.cs`; `PDFium*.cs` imports made internal; version 2.0.0 in both `.csproj` files
+- `src/PdfiumWrapper.Tests/`: `Concurrency/*`, `HostRunner.cs`, `TestProjectHygieneTests.cs`, `Bootstrapper.cs`, `PdfMergerTests.cs`, `PdfPageEditingTests.cs`, `PdfDocumentTests.cs`
+- `src/PdfiumWrapper.Tests.Host/` (new project)
+- `src/PdfiumWrapper.Benchmarks/`: `BurstRunner.cs`, `BurstDiagnostics.cs`, `SmallDocumentBenchmark.cs`, `GateOverheadBenchmark.cs`, `ConcurrentCallersBenchmark.cs`, `StreamCallbackBenchmark.cs`, `Program.cs`, `BenchmarkBase.cs`
+- `README.md`, `AGENTS.md`, `benchmark.md`, `docs/API-REFERENCE.md`, `docs/BEST-PRACTICES.md`, `docs/HIGH-THROUGHPUT-PROCESSING.md`, `docs/TROUBLESHOOTING.md`
+- `ai/plans/plan-pdfium-concurrency.md`, `ai/current-state.md`
+
+Earlier sessions:
 - `ai/current-state.md`
 - `ai/plans/plan-pdfium-concurrency.md` (rewritten 2026-09-30)
 - `_native_build/pdfium-source-7869/` (ignored upstream source checkout)

@@ -92,6 +92,7 @@ Before ending a session, always update `/ai/current-state.md` with:
 
 PdfiumWrapper is a .NET 8 library wrapping Google's PDFium for PDF manipulation and native libtiff for TIFF export. It targets high-throughput document processing services handling thousands of files.
 
+**Version:** 2.0.0 (the raw `PDFium.*` imports are `internal`; all native work goes through `PdfiumRuntime`)
 **Target framework:** `net8.0` with `AllowUnsafeBlocks=true`
 **Dependencies:** Native PDFium, libtiff + tiff_shim (TIFF), libjpeg-turbo (JPEG), pdfium_png (PNG; statically links libpng + zlib-ng)
 
@@ -100,6 +101,8 @@ PdfiumWrapper is a .NET 8 library wrapping Google's PDFium for PDF manipulation 
 ```
 High-level API (PdfDocument, PdfPage, PdfForm, PdfMerger, TiffWriter, PngEncoder, JpegEncoder/Decoder)
        |
+Native coordination (PdfiumRuntime: process-wide gate, init, deferred release; BitmapLease; SpooledInput; PooledFileWriter)
+       |
 P/Invoke layer (PDFium.cs partials, LibTiff.cs, LibTurboJpeg.cs, LibPdfiumPng.cs, NativeLibraryResolver.cs)
        |
 Native binaries (src/libs/{rid}/ — pdfium, libtiff, tiff_shim, libturbojpeg, pdfium_png)
@@ -107,7 +110,7 @@ Native binaries (src/libs/{rid}/ — pdfium, libtiff, tiff_shim, libturbojpeg, p
 
 ### Native Library Loading
 
-`NativeLibraryResolver.cs` is the single shared `DllImportResolver` for the assembly. All native interop classes register with it via `EnsureRegistered()` (idempotent, uses `Interlocked`). It resolves:
+`NativeLibraryResolver.cs` is the single shared `DllImportResolver` for the assembly. Registration happens in its static constructor, so no thread can reach a P/Invoke before the resolver is in place. Native interop classes and `PdfiumRuntime` call `EnsureRegistered()`, which only forces that static constructor. It resolves:
 - `pdfium` — PDF rendering engine
 - `tiff` — libtiff for TIFF I/O
 - `tiff_shim` — non-variadic wrappers for `TIFFSetField`
@@ -115,6 +118,8 @@ Native binaries (src/libs/{rid}/ — pdfium, libtiff, tiff_shim, libturbojpeg, p
 - `pdfium_png` — C shim wrapping libpng + zlib-ng for PNG encoding/decoding
 
 Resolution order: `libs/{rid}/{file}` -> `runtimes/{rid}/native/{file}` -> system fallback.
+
+`PdfiumRuntime` owns native initialization: the first gate entry calls `FPDF_InitLibrary` and installs libtiff's error handlers. Any wrapper type can be the first one used in a process. `FPDF_DestroyLibrary` is reachable only through `PdfiumRuntime.Shutdown()`.
 
 ### Why tiff_shim Exists
 
@@ -124,23 +129,25 @@ Resolution order: `libs/{rid}/{file}` -> `runtimes/{rid}/native/{file}` -> syste
 
 All image output uses native libraries directly — no managed image dependencies.
 
+Every pipeline renders inside the native gate and returns a `BitmapLease` (bitmap handle, buffer pointer, size, stride). Conversion, encoding and output read the lease's buffer with the gate free; disposing the lease reenters the gate to destroy the bitmap.
+
 **TIFF:**
 ```
-PdfPage.RenderToBitmapHandle() → native BGRA buffer (IntPtr)
-    → PixelConverter (unsafe pointer math, no managed copy)
-        → TiffWriter (pinned write, zero per-row allocation)
+PdfPage.RenderToBitmapLease() → BitmapLease (native BGRA buffer, IntPtr)      [inside the gate]
+    → PixelConverter (unsafe pointer math, no managed copy)                    [outside the gate]
+        → TiffWriter (pinned write, zero per-row allocation)                   [outside the gate]
 ```
 `PixelConverter.cs` reads directly from the native IntPtr. `TiffWriter.cs` pins the output array once and writes all scanlines via pointer offsets. Stream-based TIFF output uses `TIFFClientOpen` with GCHandle-pinned callback delegates.
 
 **JPEG:**
 ```
-RenderPageToRawBitmap() → BGRA byte[] → JpegEncoder (libjpeg-turbo, accepts BGRA natively)
+BitmapLease (native BGRA buffer) → JpegEncoder (libjpeg-turbo, accepts BGRA natively)
 ```
 `JpegEncoder` wraps a `tjInitCompress` handle. Not thread-safe per instance. `JpegDecoder` handles decoding for `PdfImageObject.SetImage()`.
 
 **PNG:**
 ```
-RenderPageToRawBitmap() → BGRA byte[] → PngEncoder (pdfium_png shim, uses png_set_bgr() internally)
+BitmapLease (native BGRA buffer) → PngEncoder (pdfium_png shim, uses png_set_bgr() internally)
 ```
 `PngEncoder` is stateless/static. The C shim (`src/native/pdfium_png.c`) handles setjmp/longjmp error recovery, BGRA↔RGBA conversion via `png_set_bgr()`, and memory I/O. Both libpng and zlib-ng (SIMD-accelerated) are statically linked into the shim binary.
 
@@ -154,13 +161,32 @@ libpng uses `setjmp`/`longjmp` for error handling, which corrupts .NET's managed
 
 ## Critical Rules
 
-### Thread Safety
+### Thread Safety and the Native Gate
 
-PDFium is NOT thread-safe. Never share `PdfDocument`, `PdfPage`, or `PdfForm` across threads. Async methods use `Task.Yield()` for responsiveness, not parallelism. Safe pattern: one `PdfDocument` per thread/request.
+PDFium allows one native call per process at a time, across all documents (shared font caches, non-atomic reference counts). The wrapper enforces this with one process-wide reentrant gate, `PdfiumRuntime`. Different objects may be used from different threads; one `PdfDocument`, `PdfPage`, `PdfForm`, `PdfMerger` or page object must not be used from two threads at once. Async methods wait for the gate without blocking a thread and process pages sequentially.
+
+Rules for any code you add or change:
+
+- Every public member that touches PDFium starts with `using var _ = PdfiumRuntime.Enter();`, then the disposed check, then argument validation and the native calls. The disposed check, every native call and `FPDF_GetLastError()` all happen inside that one scope.
+- A method named `XxxCore` assumes the gate is held and calls `PdfiumRuntime.AssertHeld()`. Public methods enter the gate and call the `Core` method; use `Core` methods inside loops instead of reentering per iteration.
+- Never hold a scope across `await`, `yield return`, or a call into a user delegate. Collect what you need inside the scope, leave it, then continue.
+- Async methods use `using (await PdfiumRuntime.EnterAsync()) { ... }` with no `await` inside the block. Do not call synchronous gated methods (`Dispose()`, `GetPage()`) from async paths where they would block on the gate; use the async helpers (`DisposeAsync` on `BitmapLease`, `GetPageAsync`/`DisposePageAsync` in `PdfDocument`).
+- Awaits inside the library use `ConfigureAwait(false)` (`EnterAsync()` already never resumes on a captured context). The gate is handed to an async waiter before its continuation runs; posted to a UI thread that is blocked in a synchronous call, that continuation would never run.
+- Finalizers never call PDFium, never take a lock and never wait on the gate. They only call `PdfiumRuntime.EnqueueRelease(kind, handle)` in ascending `NativeHandleKind` order (page objects, forms, pages, document, then pinned buffers and native memory). A document's finalizer enqueues its pages, forms and detached page objects itself so none can be closed after the document.
+- No user I/O inside the gate. Read caller streams before entering (`SpooledInput`); serialize saves into a pooled buffer inside the gate (`PooledFileWriter`) and write to the caller's stream after leaving it.
+- Render inside the gate, encode outside it: return a `BitmapLease` from the gated scope and convert/encode/write from its buffer with the gate free.
+- Call `PdfiumRuntime.HandleOpened()` / `HandleClosed()` wherever a long-lived native handle is opened or closed (documents, pages, form environments, detached page objects, bitmap leases).
+- Lock order: the gate is outermost. The per-object locks (`_pagesLock`, `_attachedObjectsLock`, `_disposeLock`) are taken only inside a gated scope.
+- Shared runtime state lives in `AppContext` data as BCL types (`SharedState.GetOrCreate`) so copies of the assembly in different `AssemblyLoadContext`s share one gate.
+- A public member that is pure managed code is marked `[NoNativeCall]` (the attribute also applies to a whole type).
+
+`GateCoverageTests` enforces the first and last rules by reflection over the public surface, and scans the library source for `await` / `yield return` inside a gated scope.
 
 ### Resource Management
 
-All PDF and TIFF objects implement `IDisposable`. Always use `using`. Pages from `GetPage()` must be disposed by the caller. `ProcessAllPages()` handles disposal automatically.
+All PDF and TIFF objects implement `IDisposable`. Always use `using`. Pages from `GetPage()` must be disposed by the caller. `ProcessAllPages()` handles disposal automatically and does not hold the gate while the caller's delegate runs.
+
+A document owns its pages, the forms returned by `GetForm()` (a new form per call), and page objects removed from its pages with `RemoveObject`; disposing the document disposes them. An object dropped without `Dispose()` has its handles queued by its finalizer and closed by the next gated operation or `PdfiumRuntime.ReleasePending()`.
 
 ### Page Editing Workflow
 
@@ -170,7 +196,10 @@ After adding/modifying page objects, `page.GenerateContent()` MUST be called bef
 
 - Use `LibraryImport` (source-generated) for all non-variadic native functions
 - Use `DllImport` only when `LibraryImport` cannot handle the signature (currently: none — the shim eliminated this need)
-- Check `IntPtr.Zero` after native calls and throw `InvalidOperationException` with `PDFium.FPDF_GetLastError()`
+- PDFium imports are `internal static partial` (never `public`: a public raw import bypasses the gate). The `PDFium` class stays public for constants and structs only
+- Check `IntPtr.Zero` after native calls and throw `InvalidOperationException` with `PDFium.FPDF_GetLastError()`, read in the same gated scope as the failing call
+- Check each signature against the PDFium header. A struct pointer parameter (for example `FS_MATRIX*`) is one `ref`/`out` struct, not separate scalar parameters
+- Memory that PDFium keeps a pointer to after the call returns (for example `FPDF_FORMFILLINFO`) must be native memory or pinned for the whole lifetime, and released only after the owning native object is closed
 - The `PDFium` class is split into partial files by domain: `PDFium.cs` (core), `PDFium.Edit.cs`, `PDFium.FormFill.cs`, `PDFium.Metadata.cs`, `PDFium.Annot.cs`, `PDFium.Ppo.cs`
 
 ## Key APIs
@@ -188,10 +217,20 @@ After adding/modifying page objects, `page.GenerateContent()` MUST be called bef
 - `PdfMerger` — combine PDFs, extract pages
 - `PdfMetadata`, `PdfBookmarks`, `PdfAttachments` — lazy-loaded via properties
 
+**Runtime:**
+- `PdfiumRuntime.Enter()` — enter the gate (public; returns a disposable `Scope`, reentrant per thread)
+- `PdfiumRuntime.ReleasePending()` — close handles queued by finalizers
+- `PdfiumRuntime.Shutdown()` — destroy the native library; throws while handles are alive
+- `PdfiumRuntime.IsHeldByCurrentThread`, `PdfiumRuntime.LiveHandleCount`
+- `PdfiumRuntime.EnterAsync()`, `AssertHeld()`, `EnqueueRelease()`, `HandleOpened()` / `HandleClosed()` — internal
+- `PdfiumDiagnostics` — internal counters and intervals, enabled by the `PdfiumWrapper.Diagnostics` `AppContext` switch before first use
+
 ## Performance Considerations
 
-- `RenderToBitmapHandle()` returns a native pointer — avoids the managed `byte[]` allocation in `RenderToBytes()`
-- `RenderPageToRawBitmap()` uses `Marshal.Copy` for a single native-to-managed copy
+- Native work is serialized process-wide; only conversion, encoding and output overlap between callers. More throughput than one process gives comes from more processes, not more threads
+- `RenderToBitmapLease()` exposes the native pixel buffer — encoders read it directly, avoiding the managed `byte[]` copy that `RenderToBytes()` makes
+- `RenderPages()` copies each lease into a managed `byte[]` with a single `Marshal.Copy`, outside the gate
+- Stream inputs are spooled before the gate (in memory up to 64 MB, then a temp file; `PdfiumWrapper.SpoolThreshold` overrides); PDF saves are buffered in a pooled array and written after the gate is released
 - `PixelConverter` uses pre-scaled threshold comparison to avoid per-pixel division in bilevel conversion
 - PNG encoding uses zlib-ng (SIMD: NEON/AVX2) + `PNG_FILTER_SUB` for ~40% faster than SkiaSharp
 - JPEG encoding uses libjpeg-turbo (SIMD) for ~2x faster than SkiaSharp
@@ -200,10 +239,13 @@ After adding/modifying page objects, `page.GenerateContent()` MUST be called bef
 
 ## Testing
 
-- xUnit with `[Collection("PDF Tests")]` for isolation
+- xUnit. Every class that uses the wrapper must carry `[Collection("PDF Tests")]`; `TestProjectHygieneTests` fails the run if one does not
 - Test PDFs in `src/PdfiumWrapper.Tests/Docs/`
-- `Bootstrapper.cs` uses `[ModuleInitializer]` to set up `TestOutput/`
+- `Bootstrapper.cs` uses `[ModuleInitializer]` to set up `TestOutput/` and to enable the `PdfiumWrapper.Diagnostics` switch
 - Tests implement `IDisposable` and use `CreateTempDirectory()` for file output
+- `src/PdfiumWrapper.Tests/Concurrency/` — gate coverage (`GateCoverageTests`), concurrent callers against a sequential oracle with an independent detector (`PdfiumConcurrencyTests`), and child-process scenarios (`PdfiumHostTests`)
+- `src/PdfiumWrapper.Tests.Host` — console host for tests that change process-global state, need a fresh process, or may abort natively (init race, cold start, thread-pool starvation, deferred release, shared gate across load contexts, shutdown, crash probe). Launched through `HostRunner`
+- A new public PDFium-touching member needs no test registration: `GateCoverageTests` discovers it. If it takes an argument type the fixture does not know, add it to `GateCoverageTests.Fixture.Argument`
 - Run: `dotnet test src/PdfiumWrapper.Tests/PdfiumWrapper.Tests.csproj`
 
 ## Build
@@ -235,6 +277,7 @@ The `.csproj` auto-detects the platform RID and includes native binaries with `E
 - Don't create sample code files — write unit tests instead
 - Update relevant documentation when adding or changing public API
 - Follow existing patterns for disposal, error handling, and P/Invoke signatures
-- Run the test suite after changes: all 154+ tests should pass
+- Follow the gate rules under "Thread Safety and the Native Gate" for every member that touches PDFium
+- Run the test suite after changes: all 219+ tests should pass (win-x64 and linux-x64)
 - Coordinate system: PDF uses bottom-left origin (see `docs/PDF-EDITING.md`)
 - Standard page sizes in points: US Letter = 612x792, A4 = 595x842
