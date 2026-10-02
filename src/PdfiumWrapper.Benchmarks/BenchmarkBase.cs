@@ -50,6 +50,13 @@ public abstract class BenchmarkBase
     }
 
     protected string GetDocPath() => Path.GetFullPath(Path.Combine(DocsDirectory, Document.FileName));
+
+    /// <summary>Full paths of the benchmark corpus, in <see cref="TestDocuments"/> order.</summary>
+    public static string[] CorpusFiles()
+        => TestDocuments.Select(d => Path.GetFullPath(Path.Combine(DocsDirectory, d.FileName))).ToArray();
+
+    /// <summary>Total pages across the corpus.</summary>
+    public static int CorpusPages() => TestDocuments.Sum(d => d.Pages);
 }
 
 public class PdfTestDocument

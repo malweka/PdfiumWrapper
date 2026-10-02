@@ -7,29 +7,40 @@ namespace PdfiumWrapper;
 /// </summary>
 public class PdfAttachments
 {
-    private IntPtr _document;
+    private readonly PdfDocument _owner;
 
-    internal PdfAttachments(IntPtr document)
+    internal PdfAttachments(PdfDocument owner)
     {
-        _document = document;
+        _owner = owner;
     }
 
     /// <summary>
     /// Get the number of attachments
     /// </summary>
-    public int Count => PDFium.FPDFDoc_GetAttachmentCount(_document);
+    public int Count
+    {
+        get
+        {
+            using var _ = PdfiumRuntime.Enter();
+            _owner.ThrowIfDisposed();
+            return PDFium.FPDFDoc_GetAttachmentCount(_owner.Document);
+        }
+    }
 
     /// <summary>
     /// Get all attachments
     /// </summary>
     public List<PdfAttachment> GetAllAttachments()
     {
+        using var _ = PdfiumRuntime.Enter();
+        _owner.ThrowIfDisposed();
+
         var attachments = new List<PdfAttachment>();
-        int count = Count;
+        int count = PDFium.FPDFDoc_GetAttachmentCount(_owner.Document);
 
         for (int i = 0; i < count; i++)
         {
-            var attachment = GetAttachment(i);
+            var attachment = GetAttachmentCore(i);
             if (attachment != null)
                 attachments.Add(attachment);
         }
@@ -42,7 +53,14 @@ public class PdfAttachments
     /// </summary>
     public PdfAttachment? GetAttachment(int index)
     {
-        var attachmentHandle = PDFium.FPDFDoc_GetAttachment(_document, index);
+        using var _ = PdfiumRuntime.Enter();
+        _owner.ThrowIfDisposed();
+        return GetAttachmentCore(index);
+    }
+
+    private PdfAttachment? GetAttachmentCore(int index)
+    {
+        var attachmentHandle = PDFium.FPDFDoc_GetAttachment(_owner.Document, index);
         if (attachmentHandle == IntPtr.Zero)
             return null;
 
@@ -94,10 +112,12 @@ public class PdfAttachments
     /// </summary>
     public void ExtractAll(string outputDirectory)
     {
+        // The native read happens under the gate; the file writes run after it is released.
+        var attachments = GetAllAttachments();
+
         if (!Directory.Exists(outputDirectory))
             Directory.CreateDirectory(outputDirectory);
 
-        var attachments = GetAllAttachments();
         foreach (var attachment in attachments)
         {
             string filePath = Path.Combine(outputDirectory, attachment.Name);

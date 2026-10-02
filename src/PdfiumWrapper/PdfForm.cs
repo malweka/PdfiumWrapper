@@ -6,60 +6,66 @@ namespace PdfiumWrapper;
 /// Provides access to PDF form fields and allows reading and modifying form data.
 /// </summary>
 /// <remarks>
-/// This class is NOT thread-safe. Do not access the same PdfForm instance from multiple threads concurrently.
-/// Each PdfForm instance should be used from a single thread at a time, or external synchronization must be provided.
+/// Thread safety: operations on different objects may run concurrently; the wrapper serializes
+/// native work. Do not use one object from two threads at once.
+/// A form belongs to the document that created it and is disposed with that document.
 /// </remarks>
 public class PdfForm : IDisposable
 {
-    private IntPtr _document;
+    private readonly PdfDocument _owner;
     private int _pageCount;
-    private IntPtr _formHandle;
+
+    // Internal so the owning document's finalizer can hand these to the deferred-release queue.
+    internal IntPtr _formHandle;
+    internal IntPtr _formInfo;
+
     private bool _formInitialized;
-    private PDFium.FPDF_FORMFILLINFO _formInfo;
-    private GCHandle _formInfoHandle;
     private bool _disposed;
     private readonly object _disposeLock = new object();
 
     internal bool HasFormFields => _formInitialized;
 
-    internal PdfForm(IntPtr document, int pageCount)
+    /// <summary>The native gate must be held.</summary>
+    internal PdfForm(PdfDocument owner, int pageCount)
     {
-        _document = document;
+        PdfiumRuntime.AssertHeld();
+        _owner = owner;
         _pageCount = pageCount;
         InitializeFormEnvironment();
     }
 
     private void InitializeFormEnvironment()
     {
-        // Create a minimal form fill info structure
-        // This must remain pinned in memory for the lifetime of the form environment
-        _formInfo = new PDFium.FPDF_FORMFILLINFO
+        // PDFium keeps a pointer to this structure for the lifetime of the form environment, so it
+        // lives in native memory and is freed only after FPDFDOC_ExitFormFillEnvironment.
+        // A minimal structure: version 2, no callbacks.
+        int size = Marshal.SizeOf<PDFium.FPDF_FORMFILLINFO>();
+        _formInfo = Marshal.AllocHGlobal(size);
+        unsafe
         {
-            version = 2  // Use version 2 for better compatibility
-        };
-
-        // Pin the structure in memory so PDFium can safely access it
-        _formInfoHandle = GCHandle.Alloc(_formInfo, GCHandleType.Pinned);
+            new Span<byte>(_formInfo.ToPointer(), size).Clear();
+        }
+        Marshal.WriteInt32(_formInfo, 2);
 
         try
         {
-            _formHandle = PDFium.FPDFDOC_InitFormFillEnvironment(_document, ref _formInfo);
+            _formHandle = PDFium.FPDFDOC_InitFormFillEnvironment(_owner.Document, _formInfo);
             _formInitialized = _formHandle != IntPtr.Zero;
+            if (_formInitialized)
+                PdfiumRuntime.HandleOpened();
         }
         catch
         {
-            // If initialization fails, clean up the pinned handle
-            if (_formInfoHandle.IsAllocated)
-            {
-                _formInfoHandle.Free();
-            }
+            Marshal.FreeHGlobal(_formInfo);
+            _formInfo = IntPtr.Zero;
             throw;
         }
     }
 
     public FormField[] GetAllFormFields()
     {
-        ObjectDisposedException.ThrowIf(_disposed, typeof(PdfForm));
+        using var _ = PdfiumRuntime.Enter();
+        ThrowIfDisposed();
 
         var fields = new List<FormField>();
         for (int pageIndex = 0; pageIndex < _pageCount; pageIndex++)
@@ -72,14 +78,15 @@ public class PdfForm : IDisposable
 
     public FormField[] GetFormFieldsOnPage(int pageIndex)
     {
-        ObjectDisposedException.ThrowIf(_disposed, typeof(PdfForm));
+        using var _ = PdfiumRuntime.Enter();
+        ThrowIfDisposed();
         return GetFormFieldsOnPageInternal(pageIndex);
     }
 
     private FormField[] GetFormFieldsOnPageInternal(int pageIndex)
     {
         var fields = new List<FormField>();
-        var page = PDFium.FPDF_LoadPage(_document, pageIndex);
+        var page = PDFium.FPDF_LoadPage(_owner.Document, pageIndex);
 
         try
         {
@@ -245,7 +252,8 @@ public class PdfForm : IDisposable
 
     public string? GetFormFieldValue(string fieldName)
     {
-        ObjectDisposedException.ThrowIf(_disposed, typeof(PdfForm));
+        using var _ = PdfiumRuntime.Enter();
+        ThrowIfDisposed();
 
         var field = FindFormField(fieldName);
         if (field == null)
@@ -256,7 +264,8 @@ public class PdfForm : IDisposable
 
     public void SetFormFieldValue(string fieldName, string value)
     {
-        ObjectDisposedException.ThrowIf(_disposed, typeof(PdfForm));
+        using var _ = PdfiumRuntime.Enter();
+        ThrowIfDisposed();
 
         var fieldInfo = FindFormFieldWithAnnotation(fieldName);
         if (fieldInfo == null)
@@ -264,7 +273,8 @@ public class PdfForm : IDisposable
 
         try
         {
-            SetAnnotFieldValue(fieldInfo.Value.annot, fieldInfo.Value.field.Type, value);
+            using (PdfiumDiagnostics.NativeInterval(NativeOp.FormFill))
+                SetAnnotFieldValue(fieldInfo.Value.annot, fieldInfo.Value.field.Type, value);
         }
         finally
         {
@@ -305,7 +315,7 @@ public class PdfForm : IDisposable
                         try
                         {
                             PDFium.FPDFAnnot_GetFormFieldExportValue(_formHandle, annot, exportBuffer, exportLength);
-                            string exportValue = Marshal.PtrToStringUni(exportBuffer);
+                            string exportValue = Marshal.PtrToStringUni(exportBuffer)!;
                             PDFium.FPDFAnnot_SetStringValue(annot, "V", exportValue);
                         }
                         finally
@@ -341,7 +351,7 @@ public class PdfForm : IDisposable
 
     public bool GetFormFieldChecked(string fieldName)
     {
-        string value = GetFormFieldValue(fieldName);
+        string value = GetFormFieldValue(fieldName)!;
         return value.Equals("true", StringComparison.OrdinalIgnoreCase) ||
                value.Equals("1") ||
                value.Equals("yes", StringComparison.OrdinalIgnoreCase);
@@ -354,7 +364,8 @@ public class PdfForm : IDisposable
 
     public void SetListBoxSelections(string fieldName, string[] selectedValues)
     {
-        ObjectDisposedException.ThrowIf(_disposed, typeof(PdfForm));
+        using var _ = PdfiumRuntime.Enter();
+        ThrowIfDisposed();
 
         // For multi-select list boxes
         var fieldInfo = FindFormFieldWithAnnotation(fieldName);
@@ -368,7 +379,8 @@ public class PdfForm : IDisposable
 
             // Join multiple selections (PDFium typically uses arrays, but we'll use comma-separated for simplicity)
             string value = string.Join(",", selectedValues);
-            PDFium.FPDFAnnot_SetStringValue(fieldInfo.Value.annot, "V", value);
+            using (PdfiumDiagnostics.NativeInterval(NativeOp.FormFill))
+                PDFium.FPDFAnnot_SetStringValue(fieldInfo.Value.annot, "V", value);
         }
         finally
         {
@@ -382,7 +394,7 @@ public class PdfForm : IDisposable
         }
     }
 
-    private FormField FindFormField(string fieldName)
+    private FormField? FindFormField(string fieldName)
     {
         for (int pageIndex = 0; pageIndex < _pageCount; pageIndex++)
         {
@@ -398,7 +410,7 @@ public class PdfForm : IDisposable
     {
         for (int pageIndex = 0; pageIndex < _pageCount; pageIndex++)
         {
-            var page = PDFium.FPDF_LoadPage(_document, pageIndex);
+            var page = PDFium.FPDF_LoadPage(_owner.Document, pageIndex);
 
             if (_formInitialized)
             {
@@ -422,12 +434,12 @@ public class PdfForm : IDisposable
                         try
                         {
                             PDFium.FPDFAnnot_GetFormFieldName(_formHandle, annot, nameBuffer, nameLength);
-                            string name = Marshal.PtrToStringUni(nameBuffer);
+                            string name = Marshal.PtrToStringUni(nameBuffer)!;
 
                             if (name.Equals(fieldName, StringComparison.OrdinalIgnoreCase))
                             {
                                 var field = ExtractFormField(annot, pageIndex);
-                                return (field, annot, page);
+                                return (field!, annot, page);
                             }
                         }
                         finally
@@ -451,8 +463,30 @@ public class PdfForm : IDisposable
         return null;
     }
 
+    private void ThrowIfDisposed()
+    {
+        ObjectDisposedException.ThrowIf(_disposed, typeof(PdfForm));
+        if (_owner.IsDisposed)
+            throw new ObjectDisposedException(nameof(PdfDocument), "The owning document has been disposed.");
+    }
+
     public void Dispose()
     {
+        using var _ = PdfiumRuntime.Enter();
+        DisposeCore();
+        _owner.UnregisterForm(this);
+    }
+
+    /// <summary>The owning document is being disposed. The native gate must be held.</summary>
+    internal void DisposeFromOwner()
+    {
+        PdfiumRuntime.AssertHeld();
+        DisposeCore();
+    }
+
+    private void DisposeCore()
+    {
+        PdfiumRuntime.AssertHeld();
         lock (_disposeLock)
         {
             if (_disposed)
@@ -461,14 +495,16 @@ public class PdfForm : IDisposable
             if (_formInitialized && _formHandle != IntPtr.Zero)
             {
                 PDFium.FPDFDOC_ExitFormFillEnvironment(_formHandle);
+                PdfiumRuntime.HandleClosed();
                 _formHandle = IntPtr.Zero;
                 _formInitialized = false;
             }
 
-            // Free the pinned GCHandle
-            if (_formInfoHandle.IsAllocated)
+            // Only after the environment is gone may the structure it pointed at be freed.
+            if (_formInfo != IntPtr.Zero)
             {
-                _formInfoHandle.Free();
+                Marshal.FreeHGlobal(_formInfo);
+                _formInfo = IntPtr.Zero;
             }
 
             _disposed = true;

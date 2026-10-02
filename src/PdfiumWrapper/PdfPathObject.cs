@@ -17,6 +17,8 @@ public class PdfPathObject : PdfPageObject
     /// </summary>
     public static PdfPathObject Create(IntPtr documentHandle, float x = 0, float y = 0)
     {
+        using var _ = PdfiumRuntime.Enter();
+
         var handle = PDFium.FPDFPageObj_CreateNewPath(x, y);
         if (handle == IntPtr.Zero)
             throw new InvalidOperationException("Failed to create path object");
@@ -29,6 +31,8 @@ public class PdfPathObject : PdfPageObject
     /// </summary>
     public static PdfPathObject CreateRectangle(IntPtr documentHandle, float x, float y, float width, float height)
     {
+        using var _ = PdfiumRuntime.Enter();
+
         var handle = PDFium.FPDFPageObj_CreateNewRect(x, y, width, height);
         if (handle == IntPtr.Zero)
             throw new InvalidOperationException("Failed to create rectangle object");
@@ -41,6 +45,7 @@ public class PdfPathObject : PdfPageObject
     /// </summary>
     public PdfPathObject MoveTo(float x, float y)
     {
+        using var _ = PdfiumRuntime.Enter();
         ThrowIfDisposed();
         if (!PDFium.FPDFPath_MoveTo(Handle, x, y))
             throw new InvalidOperationException("Failed to move path");
@@ -52,6 +57,7 @@ public class PdfPathObject : PdfPageObject
     /// </summary>
     public PdfPathObject LineTo(float x, float y)
     {
+        using var _ = PdfiumRuntime.Enter();
         ThrowIfDisposed();
         if (!PDFium.FPDFPath_LineTo(Handle, x, y))
             throw new InvalidOperationException("Failed to add line to path");
@@ -63,6 +69,7 @@ public class PdfPathObject : PdfPageObject
     /// </summary>
     public PdfPathObject BezierTo(float x1, float y1, float x2, float y2, float x3, float y3)
     {
+        using var _ = PdfiumRuntime.Enter();
         ThrowIfDisposed();
         if (!PDFium.FPDFPath_BezierTo(Handle, x1, y1, x2, y2, x3, y3))
             throw new InvalidOperationException("Failed to add bezier curve to path");
@@ -74,6 +81,7 @@ public class PdfPathObject : PdfPageObject
     /// </summary>
     public PdfPathObject Close()
     {
+        using var _ = PdfiumRuntime.Enter();
         ThrowIfDisposed();
         if (!PDFium.FPDFPath_Close(Handle))
             throw new InvalidOperationException("Failed to close path");
@@ -87,6 +95,7 @@ public class PdfPathObject : PdfPageObject
     {
         set
         {
+            using var _ = PdfiumRuntime.Enter();
             ThrowIfDisposed();
             if (!PDFium.FPDFPageObj_SetFillColor(Handle, value.R, value.G, value.B, value.A))
                 throw new InvalidOperationException("Failed to set fill color");
@@ -100,6 +109,7 @@ public class PdfPathObject : PdfPageObject
     {
         set
         {
+            using var _ = PdfiumRuntime.Enter();
             ThrowIfDisposed();
             if (!PDFium.FPDFPageObj_SetStrokeColor(Handle, value.R, value.G, value.B, value.A))
                 throw new InvalidOperationException("Failed to set stroke color");
@@ -113,12 +123,14 @@ public class PdfPathObject : PdfPageObject
     {
         get
         {
+            using var _ = PdfiumRuntime.Enter();
             ThrowIfDisposed();
             PDFium.FPDFPageObj_GetStrokeWidth(Handle, out float width);
             return width;
         }
         set
         {
+            using var _ = PdfiumRuntime.Enter();
             ThrowIfDisposed();
             if (!PDFium.FPDFPageObj_SetStrokeWidth(Handle, value))
                 throw new InvalidOperationException("Failed to set stroke width");
@@ -130,6 +142,7 @@ public class PdfPathObject : PdfPageObject
     /// </summary>
     public void SetDrawMode(PdfPathFillMode fillMode, bool stroke)
     {
+        using var _ = PdfiumRuntime.Enter();
         ThrowIfDisposed();
         if (!PDFium.FPDFPath_SetDrawMode(Handle, (int)fillMode, stroke ? 1 : 0))
             throw new InvalidOperationException("Failed to set draw mode");
@@ -142,6 +155,7 @@ public class PdfPathObject : PdfPageObject
     {
         set
         {
+            using var _ = PdfiumRuntime.Enter();
             ThrowIfDisposed();
             if (!PDFium.FPDFPageObj_SetLineJoin(Handle, (int)value))
                 throw new InvalidOperationException("Failed to set line join");
@@ -155,6 +169,7 @@ public class PdfPathObject : PdfPageObject
     {
         set
         {
+            using var _ = PdfiumRuntime.Enter();
             ThrowIfDisposed();
             if (!PDFium.FPDFPageObj_SetLineCap(Handle, (int)value))
                 throw new InvalidOperationException("Failed to set line cap");
@@ -168,6 +183,7 @@ public class PdfPathObject : PdfPageObject
     {
         get
         {
+            using var _ = PdfiumRuntime.Enter();
             ThrowIfDisposed();
             return PDFium.FPDFPath_CountSegments(Handle);
         }

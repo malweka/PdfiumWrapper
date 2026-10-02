@@ -29,6 +29,108 @@ public class PdfPageEditingTests : IDisposable
         return tempDir;
     }
 
+    #region Page Object Tests
+
+    [Fact]
+    public void GetMatrix_AfterSetMatrix_ShouldReturnTheSameValues()
+    {
+        // Arrange
+        using var doc = new PdfDocument();
+        using var page = doc.AddPage();
+        var rectangle = page.AddRectangle(10, 20, 30, 40);
+
+        // Act
+        rectangle.SetMatrix(2, 0, 0, 3, 50, 60);
+        var matrix = rectangle.GetMatrix();
+
+        // Assert
+        Assert.Equal((2d, 0d, 0d, 3d, 50d, 60d), matrix);
+    }
+
+    [Fact]
+    public void RemoveObject_ThenDisposeObject_ShouldReleaseItOnce()
+    {
+        // Arrange
+        using var doc = new PdfDocument();
+        using var page = doc.AddPage();
+        var rectangle = page.AddRectangle(10, 20, 30, 40);
+        long liveBefore = PdfiumRuntime.LiveHandleCount;
+
+        // Act: the caller owns the object again after removal
+        Assert.True(page.RemoveObject(rectangle));
+        Assert.Equal(liveBefore + 1, PdfiumRuntime.LiveHandleCount);
+        _ = rectangle.GetBounds();
+        rectangle.Dispose();
+
+        // Assert
+        Assert.Equal(liveBefore, PdfiumRuntime.LiveHandleCount);
+        Assert.Throws<ObjectDisposedException>(() => rectangle.GetBounds());
+    }
+
+    [Fact]
+    public void RemoveObject_ThenDisposeDocument_ShouldReleaseTheDetachedObject()
+    {
+        // Arrange
+        long liveBefore = PdfiumRuntime.LiveHandleCount;
+        var doc = new PdfDocument();
+        var page = doc.AddPage();
+        var rectangle = page.AddRectangle(10, 20, 30, 40);
+        Assert.True(page.RemoveObject(rectangle));
+
+        // Act: the document destroys what was removed from its pages but never disposed
+        doc.Dispose();
+
+        // Assert
+        Assert.Equal(liveBefore, PdfiumRuntime.LiveHandleCount);
+        Assert.Throws<ObjectDisposedException>(() => rectangle.GetBounds());
+    }
+
+    [Fact]
+    public void ImageObject_GetBitmap_ReturnsManagedBgraPixels_AndLeavesNoNativeBitmapBehind()
+    {
+        // Arrange: a PNG of known size
+        byte[] png;
+        RawBitmap source;
+        using (var sourceDoc = new PdfDocument(ContractPdfPath))
+        {
+            source = sourceDoc.RenderPages(20)[0];
+            png = sourceDoc.StreamImageBytes(ImageFormat.Png, 100, 20).First();
+        }
+
+        long liveBaseline = PdfiumRuntime.LiveHandleCount;
+        var doc = new PdfDocument();
+        var page = doc.AddPage();
+        var image = page.AddImage(png, 50, 50, 200, 260);
+        page.GenerateContent();
+        long liveBefore = PdfiumRuntime.LiveHandleCount;
+
+        // Act
+        RawBitmap? bitmap = image.GetBitmap();
+        RawBitmap? rendered = image.GetRenderedBitmap(page);
+        RawBitmap? renderedWithoutPage = image.GetRenderedBitmap();
+
+        // Assert: pixels are managed, BGRA, and sized like the image
+        Assert.NotNull(bitmap);
+        Assert.Equal(source.Width, bitmap!.Width);
+        Assert.Equal(source.Height, bitmap.Height);
+        Assert.Equal(bitmap.Width * 4, bitmap.Stride);
+        Assert.Equal(bitmap.Stride * bitmap.Height, bitmap.Pixels.Length);
+        Assert.Contains(bitmap.Pixels, b => b != 0);
+
+        Assert.NotNull(rendered);
+        Assert.Equal(rendered!.Stride * rendered.Height, rendered.Pixels.Length);
+        Assert.NotNull(renderedWithoutPage);
+
+        // Nothing native is left for the caller to release, and the accounting agrees
+        Assert.Equal(liveBefore, PdfiumRuntime.LiveHandleCount);
+
+        doc.Dispose();
+        Assert.Equal(liveBaseline, PdfiumRuntime.LiveHandleCount);
+        Assert.Throws<ObjectDisposedException>(() => image.GetBitmap());
+    }
+
+    #endregion
+
     #region AddPage Tests
 
     [Fact]

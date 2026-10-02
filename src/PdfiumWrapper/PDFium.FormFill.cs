@@ -10,33 +10,35 @@ public static partial class PDFium
     #region Form Fill Environment
 
     [LibraryImport(LibraryName)]
-    public static partial IntPtr FPDFDOC_InitFormFillEnvironment(IntPtr document, ref FPDF_FORMFILLINFO formInfo);
+    // formInfo points at an FPDF_FORMFILLINFO that PDFium keeps for the lifetime of the environment,
+    // so it must be native memory that outlives the call (not a pinned-for-the-call managed struct).
+    internal static partial IntPtr FPDFDOC_InitFormFillEnvironment(IntPtr document, IntPtr formInfo);
 
     [LibraryImport(LibraryName)]
-    public static partial void FPDFDOC_ExitFormFillEnvironment(IntPtr hHandle);
+    internal static partial void FPDFDOC_ExitFormFillEnvironment(IntPtr hHandle);
 
     [LibraryImport(LibraryName)]
-    public static partial void FORM_OnAfterLoadPage(IntPtr page, IntPtr hHandle);
+    internal static partial void FORM_OnAfterLoadPage(IntPtr page, IntPtr hHandle);
 
     [LibraryImport(LibraryName)]
-    public static partial void FORM_OnBeforeClosePage(IntPtr page, IntPtr hHandle);
+    internal static partial void FORM_OnBeforeClosePage(IntPtr page, IntPtr hHandle);
 
     #endregion
 
     #region Form Rendering
 
     [LibraryImport(LibraryName)]
-    public static partial void FPDF_FFLDraw(IntPtr hHandle, IntPtr bitmap, IntPtr page,
+    internal static partial void FPDF_FFLDraw(IntPtr hHandle, IntPtr bitmap, IntPtr page,
         int start_x, int start_y, int size_x, int size_y, int rotate, int flags);
 
     [LibraryImport(LibraryName)]
-    public static partial void FPDF_SetFormFieldHighlightColor(IntPtr hHandle, int fieldType, uint color);
+    internal static partial void FPDF_SetFormFieldHighlightColor(IntPtr hHandle, int fieldType, uint color);
 
     [LibraryImport(LibraryName)]
-    public static partial void FPDF_SetFormFieldHighlightAlpha(IntPtr hHandle, byte alpha);
+    internal static partial void FPDF_SetFormFieldHighlightAlpha(IntPtr hHandle, byte alpha);
 
     [LibraryImport(LibraryName)]
-    public static partial void FPDF_RemoveFormFieldHighlight(IntPtr hHandle);
+    internal static partial void FPDF_RemoveFormFieldHighlight(IntPtr hHandle);
 
     #endregion
 
@@ -44,32 +46,32 @@ public static partial class PDFium
 
     [LibraryImport(LibraryName)]
     [return: MarshalAs(UnmanagedType.Bool)]
-    public static partial bool FORM_OnMouseMove(IntPtr hHandle, IntPtr page, int modifier, double page_x, double page_y);
+    internal static partial bool FORM_OnMouseMove(IntPtr hHandle, IntPtr page, int modifier, double page_x, double page_y);
 
     [LibraryImport(LibraryName)]
     [return: MarshalAs(UnmanagedType.Bool)]
-    public static partial bool FORM_OnMouseWheel(IntPtr hHandle, IntPtr page, int modifier,
+    internal static partial bool FORM_OnMouseWheel(IntPtr hHandle, IntPtr page, int modifier,
         ref FS_POINTF page_coord, int delta_x, int delta_y);
 
     [LibraryImport(LibraryName)]
     [return: MarshalAs(UnmanagedType.Bool)]
-    public static partial bool FORM_OnLButtonDown(IntPtr hHandle, IntPtr page, int modifier, double page_x, double page_y);
+    internal static partial bool FORM_OnLButtonDown(IntPtr hHandle, IntPtr page, int modifier, double page_x, double page_y);
 
     [LibraryImport(LibraryName)]
     [return: MarshalAs(UnmanagedType.Bool)]
-    public static partial bool FORM_OnLButtonUp(IntPtr hHandle, IntPtr page, int modifier, double page_x, double page_y);
+    internal static partial bool FORM_OnLButtonUp(IntPtr hHandle, IntPtr page, int modifier, double page_x, double page_y);
 
     [LibraryImport(LibraryName)]
     [return: MarshalAs(UnmanagedType.Bool)]
-    public static partial bool FORM_OnLButtonDoubleClick(IntPtr hHandle, IntPtr page, int modifier, double page_x, double page_y);
+    internal static partial bool FORM_OnLButtonDoubleClick(IntPtr hHandle, IntPtr page, int modifier, double page_x, double page_y);
 
     [LibraryImport(LibraryName)]
     [return: MarshalAs(UnmanagedType.Bool)]
-    public static partial bool FORM_OnRButtonDown(IntPtr hHandle, IntPtr page, int modifier, double page_x, double page_y);
+    internal static partial bool FORM_OnRButtonDown(IntPtr hHandle, IntPtr page, int modifier, double page_x, double page_y);
 
     [LibraryImport(LibraryName)]
     [return: MarshalAs(UnmanagedType.Bool)]
-    public static partial bool FORM_OnRButtonUp(IntPtr hHandle, IntPtr page, int modifier, double page_x, double page_y);
+    internal static partial bool FORM_OnRButtonUp(IntPtr hHandle, IntPtr page, int modifier, double page_x, double page_y);
 
     #endregion
 
@@ -77,15 +79,15 @@ public static partial class PDFium
 
     [LibraryImport(LibraryName)]
     [return: MarshalAs(UnmanagedType.Bool)]
-    public static partial bool FORM_OnKeyDown(IntPtr hHandle, IntPtr page, int nKeyCode, int modifier);
+    internal static partial bool FORM_OnKeyDown(IntPtr hHandle, IntPtr page, int nKeyCode, int modifier);
 
     [LibraryImport(LibraryName)]
     [return: MarshalAs(UnmanagedType.Bool)]
-    public static partial bool FORM_OnKeyUp(IntPtr hHandle, IntPtr page, int nKeyCode, int modifier);
+    internal static partial bool FORM_OnKeyUp(IntPtr hHandle, IntPtr page, int nKeyCode, int modifier);
 
     [LibraryImport(LibraryName)]
     [return: MarshalAs(UnmanagedType.Bool)]
-    public static partial bool FORM_OnChar(IntPtr hHandle, IntPtr page, int nChar, int modifier);
+    internal static partial bool FORM_OnChar(IntPtr hHandle, IntPtr page, int nChar, int modifier);
 
     #endregion
 
@@ -93,33 +95,33 @@ public static partial class PDFium
 
     [LibraryImport(LibraryName)]
     [return: MarshalAs(UnmanagedType.Bool)]
-    public static partial bool FORM_ForceToKillFocus(IntPtr hHandle);
+    internal static partial bool FORM_ForceToKillFocus(IntPtr hHandle);
 
     [LibraryImport(LibraryName)]
-    public static partial int FORM_GetFocusedText(IntPtr hHandle, IntPtr page, IntPtr buffer, ulong buflen);
+    internal static partial int FORM_GetFocusedText(IntPtr hHandle, IntPtr page, IntPtr buffer, ulong buflen);
 
     [LibraryImport(LibraryName)]
-    public static partial int FORM_GetSelectedText(IntPtr hHandle, IntPtr page, IntPtr buffer, ulong buflen);
+    internal static partial int FORM_GetSelectedText(IntPtr hHandle, IntPtr page, IntPtr buffer, ulong buflen);
 
     [LibraryImport(LibraryName)]
-    public static partial void FORM_ReplaceSelection(IntPtr hHandle, IntPtr page,
+    internal static partial void FORM_ReplaceSelection(IntPtr hHandle, IntPtr page,
         [MarshalAs(UnmanagedType.LPWStr)] string wsText);
 
     [LibraryImport(LibraryName)]
     [return: MarshalAs(UnmanagedType.Bool)]
-    public static partial bool FORM_CanUndo(IntPtr hHandle, IntPtr page);
+    internal static partial bool FORM_CanUndo(IntPtr hHandle, IntPtr page);
 
     [LibraryImport(LibraryName)]
     [return: MarshalAs(UnmanagedType.Bool)]
-    public static partial bool FORM_CanRedo(IntPtr hHandle, IntPtr page);
+    internal static partial bool FORM_CanRedo(IntPtr hHandle, IntPtr page);
 
     [LibraryImport(LibraryName)]
     [return: MarshalAs(UnmanagedType.Bool)]
-    public static partial bool FORM_Undo(IntPtr hHandle, IntPtr page);
+    internal static partial bool FORM_Undo(IntPtr hHandle, IntPtr page);
 
     [LibraryImport(LibraryName)]
     [return: MarshalAs(UnmanagedType.Bool)]
-    public static partial bool FORM_Redo(IntPtr hHandle, IntPtr page);
+    internal static partial bool FORM_Redo(IntPtr hHandle, IntPtr page);
 
     #endregion
 
@@ -127,30 +129,30 @@ public static partial class PDFium
 
     [LibraryImport(LibraryName)]
     [return: MarshalAs(UnmanagedType.Bool)]
-    public static partial bool FORM_OnFocus(IntPtr hHandle, IntPtr page, int modifier, double page_x, double page_y);
+    internal static partial bool FORM_OnFocus(IntPtr hHandle, IntPtr page, int modifier, double page_x, double page_y);
 
     [LibraryImport(LibraryName)]
-    public static partial int FORM_GetFocusedAnnot(IntPtr hHandle, out int page_index, out IntPtr annot);
+    internal static partial int FORM_GetFocusedAnnot(IntPtr hHandle, out int page_index, out IntPtr annot);
 
     [LibraryImport(LibraryName)]
     [return: MarshalAs(UnmanagedType.Bool)]
-    public static partial bool FORM_SetFocusedAnnot(IntPtr hHandle, IntPtr annot);
+    internal static partial bool FORM_SetFocusedAnnot(IntPtr hHandle, IntPtr annot);
 
     #endregion
 
     #region XFA Support
 
     [LibraryImport(LibraryName)]
-    public static partial int FPDF_GetFormType(IntPtr document);
+    internal static partial int FPDF_GetFormType(IntPtr document);
 
     [LibraryImport(LibraryName)]
     [return: MarshalAs(UnmanagedType.Bool)]
-    public static partial bool FORM_SetIndexSelected(IntPtr hHandle, IntPtr page, int index,
+    internal static partial bool FORM_SetIndexSelected(IntPtr hHandle, IntPtr page, int index,
         [MarshalAs(UnmanagedType.Bool)] bool selected);
 
     [LibraryImport(LibraryName)]
     [return: MarshalAs(UnmanagedType.Bool)]
-    public static partial bool FORM_IsIndexSelected(IntPtr hHandle, IntPtr page, int index);
+    internal static partial bool FORM_IsIndexSelected(IntPtr hHandle, IntPtr page, int index);
 
     #endregion
 

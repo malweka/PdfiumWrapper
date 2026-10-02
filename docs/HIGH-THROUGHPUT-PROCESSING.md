@@ -1,6 +1,6 @@
 # High-Throughput PDF Processing
 
-This guide covers efficient patterns for processing large volumes of PDF documents, including image conversion, text extraction, merging, and parallel processing strategies.
+This guide covers efficient patterns for processing large volumes of PDF documents, including image conversion, text extraction, merging, parallel processing strategies, and capacity sizing.
 
 ## Table of Contents
 
@@ -9,6 +9,7 @@ This guide covers efficient patterns for processing large volumes of PDF documen
 - [Extracting Text from PDFs](#extracting-text-from-pdfs)
 - [Merging PDF Documents](#merging-pdf-documents)
 - [Parallel Processing Strategies](#parallel-processing-strategies)
+- [Measured Capacity and Sizing](#measured-capacity-and-sizing)
 - [Memory Management for Long-Running Processes](#memory-management-for-long-running-processes)
 - [Complete Examples](#complete-examples)
 
@@ -46,7 +47,7 @@ foreach (var page in pages)
 
 ### 3. One Document Per Processing Unit
 
-PDFium is not thread-safe. Each document should be processed independently:
+PDFium allows one native call per process at a time, across all documents. PdfiumWrapper enforces that itself with one process-wide gate, so separate documents can be processed from separate threads without a lock of your own. A single document, page, form or merger must still be used by one thread at a time, so give each unit of work its own document:
 
 ```csharp
 // ✅ CORRECT: Each iteration has its own document
@@ -84,7 +85,7 @@ public void ConvertPdfToTiffStream(string pdfPath, Stream output, int dpi = 200)
     doc.SaveAsTiff(output, dpi);
 }
 
-// Async version for UI responsiveness
+// Async version: waits for the native gate without blocking a thread
 public async Task ConvertPdfToTiffAsync(string pdfPath, string outputPath, int dpi = 200)
 {
     using var doc = new PdfDocument(pdfPath);
@@ -261,33 +262,41 @@ public byte[] MergePdfsToBytes(string[] inputPaths)
 
 ## Parallel Processing Strategies
 
-### ⚠️ Important: PDFium Thread Safety
+### The Native Gate and What Parallelism Buys
 
-PDFium is **NOT thread-safe**. You cannot:
-- Share a `PdfDocument` across threads
-- Access the same PDF file from multiple threads simultaneously
+PDFium allows **one native call per process at a time**, across all documents. Its fonts, caches and reference counts are shared between documents, so separate documents do not isolate it. PdfiumWrapper serializes native work itself through one process-wide gate (`PdfiumRuntime`):
 
-However, you **CAN** process different PDF files in parallel.
+- **Inside the gate (one caller at a time):** loading, page rendering, text extraction, form access, page import, saving a PDF.
+- **Outside the gate (callers overlap):** BGRA pixel conversion, PNG/JPEG/TIFF encoding, and writing output files or streams.
 
-### Pattern 1: Parallel Processing of Different Files
+Consequences for a batch:
+
+- Processing different files from different threads is safe. No lock, file copy or byte-array load is needed. Loading the same file from several threads is also fine.
+- Parallel callers gain throughput only from the encode and output share of the work. One caller's encoding runs while another caller renders. Native rendering is not multiplied by adding threads.
+- Work that is almost entirely native (text extraction, merging, form filling) gains little or nothing from more callers in one process.
+- One `PdfDocument`, `PdfPage`, `PdfForm` or `PdfMerger` must still be used by one thread at a time. Splitting one document's pages across threads is not supported.
+- Bound the number of callers. Each caller in flight holds a rendered page (about 32 MiB for US Letter at 300 DPI), and callers beyond what the encode share can use only wait for the gate. Do not set the degree of parallelism to `Environment.ProcessorCount` blindly; see [Measured Capacity and Sizing](#measured-capacity-and-sizing).
+- Async methods wait for the gate without blocking a thread. Synchronous methods, including constructors, block the calling thread while they wait. With 192 concurrent conversions on a thread pool pinned to 24 threads, a heartbeat work item waited 1.6 ms (p99) when the conversions used the async API and about 2.5 s when they called the synchronous API from pool threads.
+
+### Pattern 1: Bounded Parallel Conversion of Different Files
 
 ```csharp
-public async Task ProcessMultiplePdfsAsync(string[] pdfPaths, string outputDirectory)
+public async Task ConvertMultiplePdfsAsync(string[] pdfPaths, string outputDirectory, int maxCallers = 4)
 {
-    // ✅ SAFE: Each file processed independently with its own document
+    // ✅ SAFE: each file has its own document; rendering takes turns, encoding overlaps
     await Parallel.ForEachAsync(pdfPaths, new ParallelOptions 
     { 
-        MaxDegreeOfParallelism = Environment.ProcessorCount 
+        MaxDegreeOfParallelism = maxCallers 
     }, 
     async (pdfPath, ct) =>
     {
         using var doc = new PdfDocument(pdfPath);
         
         var outputPath = Path.Combine(outputDirectory, 
-            Path.GetFileNameWithoutExtension(pdfPath) + "_text.txt");
+            Path.GetFileNameWithoutExtension(pdfPath) + ".tiff");
         
-        var texts = doc.ProcessAllPages(page => page.ExtractText());
-        await File.WriteAllTextAsync(outputPath, string.Join("\n\n", texts), ct);
+        // Waits for the native gate without blocking a thread-pool thread
+        await doc.SaveAsTiffAsync(outputPath, 200);
     });
 }
 ```
@@ -304,8 +313,11 @@ public class PdfProcessor
     private readonly Channel<string> _inputChannel;
     private readonly int _workerCount;
     
-    public PdfProcessor(int workerCount = 4, int boundedCapacity = 100)
+    private readonly string _outputDirectory;
+    
+    public PdfProcessor(string outputDirectory, int workerCount = 4, int boundedCapacity = 100)
     {
+        _outputDirectory = outputDirectory;
         _workerCount = workerCount;
         _inputChannel = Channel.CreateBounded<string>(new BoundedChannelOptions(boundedCapacity)
         {
@@ -337,13 +349,18 @@ public class PdfProcessor
             {
                 using var doc = new PdfDocument(pdfPath);
                 
-                // Process document...
-                var pageCount = doc.PageCount;
-                var texts = doc.ProcessAllPages(page => page.ExtractText());
+                // One encoded page in memory at a time; the gate is awaited, not blocked on
+                var baseName = Path.GetFileNameWithoutExtension(pdfPath);
+                int pageNumber = 0;
+                await foreach (var bytes in doc.StreamImageBytesAsync(ImageFormat.Jpeg, 90, 200))
+                {
+                    var outputPath = Path.Combine(_outputDirectory, $"{baseName}_{++pageNumber:D3}.jpg");
+                    await File.WriteAllBytesAsync(outputPath, bytes, ct);
+                }
                 
-                Console.WriteLine($"Processed {pdfPath}: {pageCount} pages");
+                Console.WriteLine($"Processed {pdfPath}: {pageNumber} pages");
             }
-            catch (Exception ex)
+            catch (Exception ex) when (ex is not OperationCanceledException)
             {
                 Console.WriteLine($"Error processing {pdfPath}: {ex.Message}");
             }
@@ -352,7 +369,7 @@ public class PdfProcessor
 }
 
 // Usage
-var processor = new PdfProcessor(workerCount: 4);
+var processor = new PdfProcessor("output", workerCount: 4);
 var processingTask = processor.StartProcessingAsync();
 
 foreach (var file in Directory.GetFiles("input", "*.pdf"))
@@ -364,12 +381,12 @@ processor.Complete();
 await processingTask;
 ```
 
-### Pattern 3: Batch Processing with Periodic GC
+### Pattern 3: Sequential Batch for Native-Only Work
 
-For processing thousands of documents, periodically force garbage collection:
+Text extraction, merging and form filling are almost entirely native work, so extra callers in one process mostly wait for the gate. A plain sequential loop is the simplest shape and uses the least memory:
 
 ```csharp
-public async Task ProcessLargeBatchAsync(string[] pdfPaths, int batchSize = 100)
+public void ExtractLargeBatch(string[] pdfPaths, string outputDirectory)
 {
     int processed = 0;
     
@@ -377,139 +394,153 @@ public async Task ProcessLargeBatchAsync(string[] pdfPaths, int batchSize = 100)
     {
         using var doc = new PdfDocument(path);
         
-        // Process document...
         var texts = doc.ProcessAllPages(page => page.ExtractText());
+        File.WriteAllText(
+            Path.Combine(outputDirectory, Path.GetFileNameWithoutExtension(path) + ".txt"),
+            string.Join("\n\n", texts));
         
-        processed++;
-        
-        // Periodic cleanup to prevent memory buildup
-        if (processed % batchSize == 0)
-        {
-            GC.Collect(2, GCCollectionMode.Forced, blocking: true);
-            GC.WaitForPendingFinalizers();
-            
+        if (++processed % 100 == 0)
             Console.WriteLine($"Processed {processed}/{pdfPaths.Length} documents");
-        }
     }
 }
 ```
 
-### Pattern 4: Parallel with File Copying (Avoid Concurrent File Access)
+No periodic `GC.Collect()` is needed. Disposing each document releases its native memory.
 
-If you need maximum parallelism, copy files to temporary locations first:
+For more throughput on native-only work, scale out across processes (see below).
 
-```csharp
-public async Task ProcessWithMaxParallelismAsync(string[] pdfPaths)
-{
-    await Parallel.ForEachAsync(pdfPaths, new ParallelOptions
-    {
-        MaxDegreeOfParallelism = Environment.ProcessorCount
-    },
-    async (originalPath, ct) =>
-    {
-        // Copy to temp file to avoid file locking issues
-        var tempPath = Path.Combine(Path.GetTempPath(), $"{Guid.NewGuid()}.pdf");
-        
-        try
-        {
-            await using (var source = File.OpenRead(originalPath))
-            await using (var dest = File.Create(tempPath))
-            {
-                await source.CopyToAsync(dest, ct);
-            }
-            
-            using var doc = new PdfDocument(tempPath);
-            // Process...
-        }
-        finally
-        {
-            if (File.Exists(tempPath))
-                File.Delete(tempPath);
-        }
-    });
-}
+---
+
+## Measured Capacity and Sizing
+
+These figures come from one machine (Intel Core i7-13700F, 8 performance and 8 efficiency cores, 24 logical processors, NVMe SSD, Windows 11, .NET 8.0.31, PDFium 150.0.7869.0) and the repository's five test documents (55 pages). They show the shape of the scaling. They do not size your deployment; measure on your hardware with your documents. The full record is in `benchmark.md`.
+
+**One process.** 200 jobs enqueued at once (2,480 pages), half bilevel TIFF, 30% PNG, 20% JPEG, 200 DPI, output written to disk:
+
+| Callers | Docs/sec | Pages/sec | Peak working set |
+|---|---|---|---|
+| 1 | 1.30 | 16.1 | 124 MB |
+| 2 | 1.58 | 19.6 | 145 MB |
+| 4 | 1.62 | 20.0 | 180 MB |
+| 8 | 1.62 | 20.0 | 253 MB |
+| 16 | 1.62 | 20.1 | 387 MB |
+| 24 | 1.62 | 20.1 | 493 MB |
+
+With 8 callers the gate was held 99.8% of the time. Rendering is the serialized part and it dominates, so one process tops out at about 1.25 times its sequential rate. Two to four callers reach that ceiling; more only use memory. By format, the gain from extra callers was 1.11x for bilevel TIFF, 1.09x for JPEG and 1.45x for PNG, whose encoding is the largest share.
+
+**Several processes.** The same batch split across independent processes, 2 callers each:
+
+| Processes | Docs/sec | Pages/sec | Speedup |
+|---|---|---|---|
+| 1 | 1.58 | 19.6 | 1.0x |
+| 2 | 3.13 | 38.8 | 2.0x |
+| 4 | 5.75 | 71.3 | 3.6x |
+| 8 | 9.05 | 112.3 | 5.7x |
+| 12 | 10.31 | 127.9 | 6.5x |
+| 16 | 11.07 | 137.2 | 7.0x |
+
+Processes scale close to linearly up to the number of fast cores. Each used about 142 MB on this mix.
+
+**The wrapper itself costs nothing measurable.** One uncontended gate entry takes 28 ns. A one-page load, render and close is within 0.5% of the ungated code, and a sequential batch takes the same time (154.3 s gated, 153.5 s before).
+
+**Sizing rule.** Use 2 to 4 callers per process and as many processes as the required rate needs:
+
+```text
+required rate          = N / T                       (documents in the burst / window in seconds)
+usable rate per process = 0.8 x measured docs/sec    (25% headroom)
+processes              = ceil(required rate / usable rate per process)
 ```
+
+On the machine above the usable rate is `0.8 x 1.62 = 1.30` docs/sec per process for this mix, so a burst of 1,000 such documents in 5 minutes (3.33 docs/sec) needs 3 processes, and the same burst in 2 minutes (8.33 docs/sec) is at the edge of what 8 processes delivered there.
+
+### Scaling Out
+
+One process has one PDFium and one gate. When a single process cannot meet the required rate, run more replicas of the service behind the existing queue. Each replica is a separate process with its own PDFium and its own gate, so replicas render in parallel.
+
+- Required rate = `N / T`: the number of documents in the burst divided by the completion window in seconds.
+- Measure the single-process rate on your own documents, formats, DPI and hardware. The burst runner in `src/PdfiumWrapper.Benchmarks` (`dotnet run -c Release -- burst ...`) measures completion of a whole batch, including queueing and output writes.
+- Size the replica count from the measured single-process rate with 25% headroom: `replicas = ceil(1.25 * (N / T) / measured docs per second per process)`.
+- Give each replica enough memory for its callers in flight (one rendered page per caller) plus the documents it has open.
 
 ---
 
 ## Memory Management for Long-Running Processes
 
+### Where the Memory Goes
+
+Most memory used while processing PDFs is native: PDFium's document and font data, and rendered bitmaps. A US Letter page rendered as BGRA at 300 DPI is about 32 MiB. This memory is released by `Dispose()`, not by the garbage collector.
+
+- Dispose every document, page, form and merger. If one is dropped without `Dispose()`, its finalizer does not call PDFium; it queues the native handles and the next PdfiumWrapper operation on any thread closes them (`PdfiumRuntime.ReleasePending()` does so on demand). That delays the release of native memory, so treat it as a safety net.
+- Do not force garbage collection between documents or batches. It does not release PDF memory and only pauses the process.
+- `RenderPages` returns every page as a managed `byte[]` at once. For large documents prefer `StreamImageBytes` / `StreamImageBytesAsync` or the `SaveAs...` methods, which hold one page at a time.
+- Saving a PDF (`Save`, `SaveToStream`, `PdfMerger.Save`, `PdfMerger.ToBytes`) serializes the whole output into a pooled in-memory buffer and writes it to the file or stream afterwards. Peak memory includes the full output size.
+- Bound the number of concurrent callers: each one in flight holds a rendered page.
+
 ### Monitor Memory Usage
+
+`GC.GetTotalMemory` reports managed memory only. It does not include PDFium's native memory or rendered bitmaps, so it is not a PDF memory monitor. Watch the process working set instead:
 
 ```csharp
 public class MemoryMonitor
 {
-    private readonly long _memoryThresholdBytes;
+    private readonly long _thresholdBytes;
     
-    public MemoryMonitor(long memoryThresholdMB = 1024)
+    public MemoryMonitor(long thresholdMB = 1024)
     {
-        _memoryThresholdBytes = memoryThresholdMB * 1024 * 1024;
+        _thresholdBytes = thresholdMB * 1024 * 1024;
     }
     
-    public void CheckAndCollectIfNeeded()
+    /// <summary>True when the process working set is above the threshold.</summary>
+    public bool IsAboveThreshold(out long workingSetMB)
     {
-        var currentMemory = GC.GetTotalMemory(forceFullCollection: false);
-        
-        if (currentMemory > _memoryThresholdBytes)
-        {
-            Console.WriteLine($"Memory threshold exceeded ({currentMemory / 1024 / 1024}MB). Forcing GC...");
-            GC.Collect(2, GCCollectionMode.Forced, blocking: true);
-            GC.WaitForPendingFinalizers();
-            GC.Collect(2, GCCollectionMode.Forced, blocking: true);
-            
-            var afterGC = GC.GetTotalMemory(forceFullCollection: false);
-            Console.WriteLine($"Memory after GC: {afterGC / 1024 / 1024}MB");
-        }
+        using var process = System.Diagnostics.Process.GetCurrentProcess();
+        workingSetMB = process.WorkingSet64 / 1024 / 1024;
+        return process.WorkingSet64 > _thresholdBytes;
     }
 }
 ```
 
-### Integrate Memory Monitoring with Processing
+Use the reading to apply backpressure (stop admitting new documents, lower the number of callers), not to trigger a collection:
 
 ```csharp
-public async Task ProcessWithMemoryMonitoringAsync(string[] pdfPaths)
+public async Task ProcessWithMemoryMonitoringAsync(string[] pdfPaths, string outputDirectory)
 {
-    var monitor = new MemoryMonitor(memoryThresholdMB: 512);
-    int processed = 0;
+    var monitor = new MemoryMonitor(thresholdMB: 2048);
     
     foreach (var path in pdfPaths)
     {
+        while (monitor.IsAboveThreshold(out long workingSetMB))
+        {
+            Console.WriteLine($"Working set {workingSetMB} MB is above the threshold; pausing admission");
+            await Task.Delay(TimeSpan.FromSeconds(1));
+        }
+        
         using var doc = new PdfDocument(path);
-        
-        // Render all pages to raw pixel buffers
-        var bitmaps = doc.RenderPages(dpi: 150);
-
-        // Process each raw bitmap (RawBitmap is a lightweight record, no disposal needed)
-        for (int i = 0; i < bitmaps.Length; i++)
-        {
-            // Process each bitmap — bitmaps[i].Pixels, .Width, .Height, .Stride
-        }
-        
-        processed++;
-        
-        // Check memory every 50 documents
-        if (processed % 50 == 0)
-        {
-            monitor.CheckAndCollectIfNeeded();
-        }
+        await doc.SaveAsTiffAsync(
+            Path.Combine(outputDirectory, Path.GetFileNameWithoutExtension(path) + ".tiff"), 200);
     }
 }
 ```
 
 ### Consideration: Large Input Streams
 
-When loading from `Stream`, `PdfiumWrapper` currently keeps the document independent from the source stream after construction:
+`new PdfDocument(stream)` and `new PdfMerger(stream)` read the stream from its current position to its end during construction, before any native work starts, and leave it positioned at its end. A slow stream therefore delays only its own caller, and the source stream can be closed as soon as the constructor returns.
 
-- If the stream is an exposable `MemoryStream`, the wrapper reuses and pins that backing buffer.
-- For other stream types, the wrapper reads the full PDF into a managed `byte[]` and pins it for the lifetime of the `PdfDocument`.
+- If the stream is a `MemoryStream` with an exposable buffer, the wrapper uses and pins that buffer in place, without a copy.
+- Other streams of up to 64 MB are read into a managed `byte[]` that is pinned for the lifetime of the document.
+- Larger inputs are copied to a temporary file that PDFium reads directly. The file is deleted when the document or merger is disposed.
 
-This is safe and convenient because callers can dispose the source stream immediately, but it means non-`MemoryStream` inputs still pay a full-copy cost.
+The threshold can be changed before loading:
+
+```csharp
+AppContext.SetData("PdfiumWrapper.SpoolThreshold", 16L * 1024 * 1024); // bytes
+```
 
 For very large PDFs or high-volume stream ingestion pipelines, consider these tradeoffs:
 
 - If you already have the full PDF in memory, prefer a `MemoryStream` with an exposable buffer or pass a `byte[]` directly.
-- If your stream source is very large, remember that `new PdfDocument(stream)` currently duplicates the full payload into managed memory unless the stream is an exposable `MemoryStream`.
-- A future `FPDF_LoadCustomDocument` path would be better for avoiding the full copy on large streams, but that model requires the source stream to remain alive and seekable for the full lifetime of the `PdfDocument`.
+- If the PDF is already a file, open it by path. PDFium then reads it from disk as needed and nothing is copied into managed memory.
+- Inputs under the threshold that are not an exposable `MemoryStream` are copied once into managed memory.
 
 ### Large Stream Examples
 
@@ -563,7 +594,7 @@ Why use this:
 
 #### 3. For Very Large Streams, Spool to a Temporary File
 
-If the source stream is large or non-seekable, writing it to disk first is often the better throughput tradeoff:
+The stream constructors spool inputs above the threshold to a temporary file on their own, but they read the stream synchronously. For a network stream or an HTTP upload, copying it to disk yourself keeps that I/O asynchronous, and opening by path avoids any managed copy:
 
 ```csharp
 public async Task ProcessLargePdfStreamAsync(Stream input, CancellationToken cancellationToken = default)
@@ -600,8 +631,8 @@ public async Task ProcessLargePdfStreamAsync(Stream input, CancellationToken can
 
 Why use this:
 
-- Avoids holding two full copies in managed memory
-- Better for very large files
+- The copy from the source stream is asynchronous
+- Nothing is held in managed memory, whatever the file size
 - Works well with network streams, HTTP uploads, and other forward-only sources
 
 #### 4. For ASP.NET Core Uploads
@@ -638,7 +669,8 @@ Rule of thumb:
 
 - Small payload already in memory: use `byte[]`
 - In-memory stream you control: use `MemoryStream`
-- Large or forward-only stream: spool to file, then open by path
+- Any other stream: pass it to the constructor (read up front; spooled to a temporary file above 64 MB)
+- Large or slow stream in async code: copy it to a file asynchronously, then open by path
 
 ---
 
@@ -672,13 +704,6 @@ public class PdfToImageConverter
             
             completed++;
             progress?.Report(completed * 100 / pdfPaths.Length);
-            
-            // Periodic cleanup
-            if (completed % 100 == 0)
-            {
-                GC.Collect(2, GCCollectionMode.Forced, true);
-                GC.WaitForPendingFinalizers();
-            }
         }
     }
     
@@ -725,8 +750,9 @@ public class PdfTextExtractor
     {
         var results = new List<PdfTextIndex>();
         
-        // Process files in parallel (each file gets its own thread-local document)
-        await Parallel.ForEachAsync(pdfPaths, async (path, ct) =>
+        // Safe: each file gets its own document. Text extraction is native work, which the
+        // library serializes, so the parallel loop adds little throughput here.
+        await Parallel.ForEachAsync(pdfPaths, new ParallelOptions { MaxDegreeOfParallelism = 2 }, async (path, ct) =>
         {
             var index = ExtractFromFile(path);
             lock (results)
@@ -817,11 +843,12 @@ service.MergeWithOptions(new MergeOptions(
 | Dispose all PDF objects with `using` | Critical for memory management |
 | Lower DPI for previews (72-150 DPI) | Faster processing, less memory |
 | Higher DPI for print (300 DPI) | Better quality, more memory |
-| Periodic `GC.Collect()` in long batches | Prevents memory buildup |
-| One document per thread | Required for thread safety |
-| Use `Parallel.ForEachAsync` for file parallelism | Maximizes throughput |
-| Bound parallel operations | Prevents resource exhaustion |
-| Copy files for maximum parallelism | Avoids file locking issues |
+| Do not force `GC.Collect()` in batches | Native memory is released by `Dispose()`; a forced collection only pauses the process |
+| One thread at a time per document, page, form or merger | Required; different objects on different threads are safe |
+| Parallel callers for image conversion | Encoding and output overlap; native rendering stays serialized |
+| Bound parallel operations | Each caller in flight holds a rendered page; extra callers only wait for the gate |
+| Use async methods in services | Wait for the native gate without blocking thread-pool threads |
+| More replicas for more throughput | Each process has its own PDFium and its own gate |
 
 ---
 

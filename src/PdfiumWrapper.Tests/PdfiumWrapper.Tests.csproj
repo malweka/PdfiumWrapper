@@ -1,4 +1,4 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
     <TargetFramework>net8.0</TargetFramework>
@@ -19,6 +19,10 @@
 
   <ItemGroup>
     <ProjectReference Include="..\PdfiumWrapper\PdfiumWrapper.csproj" />
+    <!-- Built first so HostRunner can launch it; its assembly is not referenced. -->
+    <ProjectReference Include="..\PdfiumWrapper.Tests.Host\PdfiumWrapper.Tests.Host.csproj" ReferenceOutputAssembly="false" Private="false" />
+    <!-- The burst runner is exercised as a child process by BurstRunnerTests. -->
+    <ProjectReference Include="..\PdfiumWrapper.Benchmarks\PdfiumWrapper.Benchmarks.csproj" ReferenceOutputAssembly="false" Private="false" />
   </ItemGroup>
 
   <ItemGroup>

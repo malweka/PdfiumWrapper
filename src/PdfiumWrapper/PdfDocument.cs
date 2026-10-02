@@ -7,9 +7,11 @@ namespace PdfiumWrapper;
 /// High-level wrapper class for easier PDF operations.
 /// </summary>
 /// <remarks>
-/// This class is NOT thread-safe. Do not access the same PdfDocument instance from multiple threads concurrently.
-/// Each PdfDocument instance should be used from a single thread at a time, or external synchronization must be provided.
-/// Async methods process pages sequentially and use Task.Yield() for responsiveness, not parallelism.
+/// Thread safety: operations on different objects may run concurrently; the wrapper serializes
+/// native work. Do not use one object from two threads at once.
+/// PDFium allows one native call per process at a time, so concurrent documents take turns for
+/// native work (loading, rendering, text, saving) while image encoding and output writes overlap.
+/// Async methods process pages sequentially and wait for the native gate without blocking a thread.
 /// </remarks>
 public class PdfDocument : IDisposable
 {
@@ -18,67 +20,80 @@ public class PdfDocument : IDisposable
     private int _activePageCount;
     private readonly object _pagesLock = new();
     private HashSet<PdfPage>? _activePages;
+    private HashSet<PdfForm>? _forms;
+    private HashSet<PdfPageObject>? _detachedObjects;
     private PdfMetadata? _metadata;
     private PdfBookmarks? _bookmarks;
     private PdfAttachments? _attachments;
     private byte[]? _documentBytes;
     private GCHandle _documentBytesHandle;
-
-    static PdfDocument()
-    {
-        PDFium.FPDF_InitLibrary();
-    }
+    private string? _spoolPath;
 
     /// <summary>
     /// Create a new empty PDF document
     /// </summary>
     public PdfDocument()
     {
+        using var _ = PdfiumRuntime.Enter();
+
         Document = PDFium.FPDF_CreateNewDocument();
         if (Document == IntPtr.Zero)
         {
             throw new InvalidOperationException($"Failed to create new PDF document. Error: {PDFium.FPDF_GetLastError()}");
         }
+
+        PdfiumRuntime.HandleOpened();
     }
 
     public PdfDocument(string filePath, string? password = null)
     {
-        Document = PDFium.FPDF_LoadDocument(filePath, password);
-        if (Document == IntPtr.Zero)
-        {
-            throw new InvalidOperationException($"Failed to load PDF document. Error: {PDFium.FPDF_GetLastError()}");
-        }
+        using var _ = PdfiumRuntime.Enter();
+        LoadFileDocument(filePath, password);
     }
 
+    /// <summary>
+    /// Load a PDF from a stream. The stream is read from its current position to its end before
+    /// any native work starts, so the document is independent of the stream afterwards.
+    /// Inputs larger than the spool threshold (64 MB by default) are copied to a temporary file
+    /// that is deleted when the document is disposed.
+    /// </summary>
     public PdfDocument(Stream pdfStream, string? password = null)
     {
         ArgumentNullException.ThrowIfNull(pdfStream);
 
-        // For large streams, FPDF_LoadCustomDocument is the better long-term option because it can avoid
-        // the full managed copy. This constructor currently preserves the simpler ownership model where the
-        // PdfDocument becomes independent from the source stream after construction.
-        if (pdfStream is MemoryStream memoryStream
-            && memoryStream.TryGetBuffer(out ArraySegment<byte> buffer))
+        // User I/O happens here, before the gate: a slow stream must not stall other callers.
+        var spool = SpooledInput.From(pdfStream);
+
+        using var _ = PdfiumRuntime.Enter();
+        if (spool.TempPath != null)
         {
-            int offset = buffer.Offset + checked((int)memoryStream.Position);
-            int length = checked((int)(memoryStream.Length - memoryStream.Position));
-            LoadPinnedMemoryDocument(buffer.Array!, offset, length, password);
-
-            // Match the previous CopyTo() behavior by consuming the stream.
-            memoryStream.Position = memoryStream.Length;
-            return;
+            _spoolPath = spool.TempPath;
+            try
+            {
+                LoadFileDocument(spool.TempPath, password);
+            }
+            catch
+            {
+                SpooledInput.TryDelete(_spoolPath);
+                _spoolPath = null;
+                throw;
+            }
         }
-
-        var bytes = pdfStream.ReadStreamToBytes();
-        LoadPinnedMemoryDocument(bytes, 0, bytes.Length, password);
+        else
+        {
+            LoadPinnedMemoryDocument(spool.Buffer!, spool.Offset, spool.Length, password);
+        }
     }
 
     public PdfDocument(byte[] data, string? password = null)
     {
         ArgumentNullException.ThrowIfNull(data);
+
+        using var _ = PdfiumRuntime.Enter();
         LoadPinnedMemoryDocument(data, 0, data.Length, password);
     }
 
+    [NoNativeCall]
     public PdfMetadata Metadata
     {
         get
@@ -86,12 +101,13 @@ public class PdfDocument : IDisposable
             ThrowIfDisposed();
             if (_metadata == null)
             {
-                _metadata = new PdfMetadata(Document);
+                _metadata = new PdfMetadata(this);
             }
             return _metadata;
         }
     }
 
+    [NoNativeCall]
     public PdfBookmarks Bookmarks
     {
         get
@@ -99,12 +115,13 @@ public class PdfDocument : IDisposable
             ThrowIfDisposed();
             if (_bookmarks == null)
             {
-                _bookmarks = new PdfBookmarks(Document);
+                _bookmarks = new PdfBookmarks(this);
             }
             return _bookmarks;
         }
     }
 
+    [NoNativeCall]
     public PdfAttachments Attachments
     {
         get
@@ -112,7 +129,7 @@ public class PdfDocument : IDisposable
             ThrowIfDisposed();
             if (_attachments == null)
             {
-                _attachments = new PdfAttachments(Document);
+                _attachments = new PdfAttachments(this);
             }
             return _attachments;
         }
@@ -122,6 +139,17 @@ public class PdfDocument : IDisposable
     {
         get
         {
+            using var _ = PdfiumRuntime.Enter();
+            return PageCountCore;
+        }
+    }
+
+    /// <summary>The native gate must be held.</summary>
+    internal int PageCountCore
+    {
+        get
+        {
+            PdfiumRuntime.AssertHeld();
             ThrowIfDisposed();
             return PDFium.FPDF_GetPageCount(Document);
         }
@@ -134,6 +162,7 @@ public class PdfDocument : IDisposable
     {
         get
         {
+            using var _ = PdfiumRuntime.Enter();
             ThrowIfDisposed();
             uint rawPermissions = PDFium.FPDF_GetDocPermissions(Document);
             return (PdfPermissions)rawPermissions;
@@ -147,6 +176,7 @@ public class PdfDocument : IDisposable
     {
         get
         {
+            using var _ = PdfiumRuntime.Enter();
             ThrowIfDisposed();
 
             // First, get the original file ID (type 0)
@@ -186,16 +216,19 @@ public class PdfDocument : IDisposable
     /// </summary>
     internal bool IsDisposed => _disposed;
 
-    private void ThrowIfDisposed()
+    internal void ThrowIfDisposed()
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
     }
+
+    #region Ownership tracking
 
     /// <summary>
     /// Called by PdfPage during construction to register an active page.
     /// </summary>
     internal void RegisterPage(PdfPage page)
     {
+        PdfiumRuntime.AssertHeld();
         ThrowIfDisposed();
 
         lock (_pagesLock)
@@ -211,10 +244,11 @@ public class PdfDocument : IDisposable
 
     /// <summary>
     /// Called by PdfPage.Dispose to signal that a page has been released.
-    /// Must be safe to call from finalizer threads.
+    /// Not called from finalizers: an unreachable page implies an unreachable document.
     /// </summary>
     internal void UnregisterPage(PdfPage page)
     {
+        PdfiumRuntime.AssertHeld();
         lock (_pagesLock)
         {
             if (_activePages != null && _activePages.Remove(page))
@@ -230,6 +264,7 @@ public class PdfDocument : IDisposable
 
     private PdfPage[] SnapshotAndClearActivePages()
     {
+        PdfiumRuntime.AssertHeld();
         lock (_pagesLock)
         {
             if (_activePages == null || _activePages.Count == 0)
@@ -252,7 +287,7 @@ public class PdfDocument : IDisposable
         {
             try
             {
-                page.DisposeFromOwner();
+                page.DisposeCore();
             }
             catch
             {
@@ -261,20 +296,65 @@ public class PdfDocument : IDisposable
         }
     }
 
+    /// <summary>A page object removed from its page: destroyed with the document unless disposed first.</summary>
+    internal void RegisterDetachedObject(PdfPageObject pageObject)
+    {
+        PdfiumRuntime.AssertHeld();
+        _detachedObjects ??= new HashSet<PdfPageObject>();
+        _detachedObjects.Add(pageObject);
+    }
+
+    internal void UnregisterDetachedObject(PdfPageObject pageObject)
+    {
+        PdfiumRuntime.AssertHeld();
+        _detachedObjects?.Remove(pageObject);
+    }
+
+    internal void UnregisterForm(PdfForm form)
+    {
+        PdfiumRuntime.AssertHeld();
+        _forms?.Remove(form);
+    }
+
+    #endregion
+
+    #region Loading
+
+    private void LoadFileDocument(string filePath, string? password)
+    {
+        PdfiumRuntime.AssertHeld();
+
+        using (PdfiumDiagnostics.NativeInterval(NativeOp.LoadDocument))
+            Document = PDFium.FPDF_LoadDocument(filePath, password);
+
+        // The error is read in the same gated scope as the failing call.
+        if (Document == IntPtr.Zero)
+        {
+            throw new InvalidOperationException($"Failed to load PDF document. Error: {PDFium.FPDF_GetLastError()}");
+        }
+
+        PdfiumRuntime.HandleOpened();
+    }
+
     private void LoadPinnedMemoryDocument(byte[] data, int offset, int length, string? password)
     {
+        PdfiumRuntime.AssertHeld();
+
         _documentBytes = data;
         _documentBytesHandle = GCHandle.Alloc(data, GCHandleType.Pinned);
 
         try
         {
             var dataPtr = IntPtr.Add(_documentBytesHandle.AddrOfPinnedObject(), offset);
-            Document = PDFium.FPDF_LoadMemDocument(dataPtr, length, password);
+            using (PdfiumDiagnostics.NativeInterval(NativeOp.LoadDocument))
+                Document = PDFium.FPDF_LoadMemDocument(dataPtr, length, password);
             if (Document == IntPtr.Zero)
             {
                 throw new InvalidOperationException(
                     $"Failed to load PDF document from memory. Error: {PDFium.FPDF_GetLastError()}");
             }
+
+            PdfiumRuntime.HandleOpened();
         }
         catch
         {
@@ -293,10 +373,20 @@ public class PdfDocument : IDisposable
         _documentBytes = null;
     }
 
+    #endregion
+
     public PdfPage GetPage(int pageIndex)
     {
+        using var _ = PdfiumRuntime.Enter();
+        return GetPageCore(pageIndex);
+    }
+
+    /// <summary>The native gate must be held.</summary>
+    internal PdfPage GetPageCore(int pageIndex)
+    {
+        PdfiumRuntime.AssertHeld();
         ThrowIfDisposed();
-        if (pageIndex < 0 || pageIndex >= PageCount)
+        if (pageIndex < 0 || pageIndex >= PDFium.FPDF_GetPageCount(Document))
             throw new ArgumentOutOfRangeException(nameof(pageIndex));
 
         return new PdfPage(this, pageIndex);
@@ -311,10 +401,11 @@ public class PdfDocument : IDisposable
     /// <returns>The newly created page</returns>
     public PdfPage AddPage(int width = 612, int height = 792, int index = -1)
     {
+        using var _ = PdfiumRuntime.Enter();
         ThrowIfDisposed();
 
         if (index == -1)
-            index = PageCount; // Append at end
+            index = PDFium.FPDF_GetPageCount(Document); // Append at end
 
         var pageHandle = PDFium.FPDFPage_New(Document, index, width, height);
         if (pageHandle == IntPtr.Zero)
@@ -332,10 +423,12 @@ public class PdfDocument : IDisposable
     /// <exception cref="ArgumentOutOfRangeException">Thrown when pageIndex is out of range</exception>
     public void DeletePage(int pageIndex)
     {
+        using var _ = PdfiumRuntime.Enter();
         ThrowIfDisposed();
 
-        if (pageIndex < 0 || pageIndex >= PageCount)
-            throw new ArgumentOutOfRangeException(nameof(pageIndex), $"Page index must be between 0 and {PageCount - 1}");
+        int pageCount = PDFium.FPDF_GetPageCount(Document);
+        if (pageIndex < 0 || pageIndex >= pageCount)
+            throw new ArgumentOutOfRangeException(nameof(pageIndex), $"Page index must be between 0 and {pageCount - 1}");
 
         PDFium.FPDFPage_Delete(Document, pageIndex);
     }
@@ -347,6 +440,7 @@ public class PdfDocument : IDisposable
     /// <exception cref="ArgumentNullException">Thrown when page is null</exception>
     public void DeletePage(PdfPage page)
     {
+        using var _ = PdfiumRuntime.Enter();
         ThrowIfDisposed();
 
         if (page == null)
@@ -360,19 +454,19 @@ public class PdfDocument : IDisposable
     /// </summary>
     /// <remarks>
     /// ⚠️ WARNING: Each PdfPage in the returned array must be disposed by the caller.
-    /// For high-throughput scenarios, prefer <see cref="ProcessAllPages{TResult}(Func{PdfPage, TResult})"/> 
+    /// For high-throughput scenarios, prefer <see cref="ProcessAllPages{TResult}(Func{PdfPage, TResult})"/>
     /// or <see cref="ProcessAllPages(Action{PdfPage})"/> which handle disposal automatically.
     /// </remarks>
     /// <returns>Array of PdfPage objects that must be disposed by the caller</returns>
     [Obsolete("Use ProcessAllPages() for automatic disposal, or ensure each page is disposed manually. This method may cause memory leaks if pages are not disposed.")]
     public PdfPage[] GetAllPages()
     {
-        ThrowIfDisposed();
+        using var _ = PdfiumRuntime.Enter();
 
-        var pages = new PdfPage[PageCount];
-        for (int i = 0; i < PageCount; i++)
+        var pages = new PdfPage[PageCountCore];
+        for (int i = 0; i < pages.Length; i++)
         {
-            pages[i] = GetPage(i);
+            pages[i] = GetPageCore(i);
         }
         return pages;
     }
@@ -380,6 +474,10 @@ public class PdfDocument : IDisposable
     /// <summary>
     /// Process all pages with automatic disposal. Safe for high-throughput scenarios.
     /// </summary>
+    /// <remarks>
+    /// The native gate is not held while <paramref name="processor"/> runs; each page member it
+    /// calls enters the gate on its own.
+    /// </remarks>
     /// <typeparam name="TResult">The type of result to return for each page</typeparam>
     /// <param name="processor">Function to process each page and return a result</param>
     /// <returns>Array of results from processing each page</returns>
@@ -387,20 +485,24 @@ public class PdfDocument : IDisposable
     /// <code>
     /// // Extract text from all pages safely
     /// var texts = doc.ProcessAllPages(page => page.ExtractText());
-    /// 
+    ///
     /// // Get all page sizes safely
     /// var sizes = doc.ProcessAllPages(page => (page.Width, page.Height));
     /// </code>
     /// </example>
     public TResult[] ProcessAllPages<TResult>(Func<PdfPage, TResult> processor)
     {
-        ThrowIfDisposed();
+        int pageCount;
+        using (PdfiumRuntime.Enter())
+        {
+            ThrowIfDisposed();
+            if (processor == null)
+                throw new ArgumentNullException(nameof(processor));
+            pageCount = PageCountCore;
+        }
 
-        if (processor == null)
-            throw new ArgumentNullException(nameof(processor));
-
-        var results = new TResult[PageCount];
-        for (int i = 0; i < PageCount; i++)
+        var results = new TResult[pageCount];
+        for (int i = 0; i < pageCount; i++)
         {
             using var page = GetPage(i);
             results[i] = processor(page);
@@ -411,6 +513,10 @@ public class PdfDocument : IDisposable
     /// <summary>
     /// Process all pages with automatic disposal. Safe for high-throughput scenarios.
     /// </summary>
+    /// <remarks>
+    /// The native gate is not held while <paramref name="action"/> runs; each page member it
+    /// calls enters the gate on its own.
+    /// </remarks>
     /// <param name="action">Action to perform on each page</param>
     /// <example>
     /// <code>
@@ -420,12 +526,16 @@ public class PdfDocument : IDisposable
     /// </example>
     public void ProcessAllPages(Action<PdfPage> action)
     {
-        ThrowIfDisposed();
+        int pageCount;
+        using (PdfiumRuntime.Enter())
+        {
+            ThrowIfDisposed();
+            if (action == null)
+                throw new ArgumentNullException(nameof(action));
+            pageCount = PageCountCore;
+        }
 
-        if (action == null)
-            throw new ArgumentNullException(nameof(action));
-
-        for (int i = 0; i < PageCount; i++)
+        for (int i = 0; i < pageCount; i++)
         {
             using var page = GetPage(i);
             action(page);
@@ -434,24 +544,35 @@ public class PdfDocument : IDisposable
 
     /// <summary>
     /// Process all pages asynchronously with automatic disposal. Safe for high-throughput scenarios.
-    /// Uses Task.Yield() for UI responsiveness while processing sequentially (PDFium is not thread-safe).
+    /// Uses Task.Yield() for UI responsiveness while processing sequentially.
     /// </summary>
     /// <typeparam name="TResult">The type of result to return for each page</typeparam>
     /// <param name="processor">Function to process each page and return a result</param>
     /// <returns>Array of results from processing each page</returns>
     public async Task<TResult[]> ProcessAllPagesAsync<TResult>(Func<PdfPage, TResult> processor)
     {
-        ThrowIfDisposed();
+        int pageCount;
+        using (await PdfiumRuntime.EnterAsync())
+        {
+            ThrowIfDisposed();
+            if (processor == null)
+                throw new ArgumentNullException(nameof(processor));
+            pageCount = PageCountCore;
+        }
 
-        if (processor == null)
-            throw new ArgumentNullException(nameof(processor));
-
-        var results = new TResult[PageCount];
-        for (int i = 0; i < PageCount; i++)
+        var results = new TResult[pageCount];
+        for (int i = 0; i < pageCount; i++)
         {
             await Task.Yield();
-            using var page = GetPage(i);
-            results[i] = processor(page);
+            var page = await GetPageAsync(i).ConfigureAwait(false);
+            try
+            {
+                results[i] = processor(page);
+            }
+            finally
+            {
+                await DisposePageAsync(page).ConfigureAwait(false);
+            }
         }
         return results;
     }
@@ -462,63 +583,184 @@ public class PdfDocument : IDisposable
     /// <param name="action">Action to perform on each page</param>
     public async Task ProcessAllPagesAsync(Action<PdfPage> action)
     {
-        ThrowIfDisposed();
+        int pageCount;
+        using (await PdfiumRuntime.EnterAsync())
+        {
+            ThrowIfDisposed();
+            if (action == null)
+                throw new ArgumentNullException(nameof(action));
+            pageCount = PageCountCore;
+        }
 
-        if (action == null)
-            throw new ArgumentNullException(nameof(action));
-
-        for (int i = 0; i < PageCount; i++)
+        for (int i = 0; i < pageCount; i++)
         {
             await Task.Yield();
-            using var page = GetPage(i);
-            action(page);
+            var page = await GetPageAsync(i).ConfigureAwait(false);
+            try
+            {
+                action(page);
+            }
+            finally
+            {
+                await DisposePageAsync(page).ConfigureAwait(false);
+            }
         }
     }
+
+    private async ValueTask<PdfPage> GetPageAsync(int pageIndex)
+    {
+        using (await PdfiumRuntime.EnterAsync())
+        {
+            return GetPageCore(pageIndex);
+        }
+    }
+
+    private static async ValueTask DisposePageAsync(PdfPage page)
+    {
+        using (await PdfiumRuntime.EnterAsync())
+        {
+            page.DisposeCore();
+        }
+    }
+
+    #region Rendering helpers
+
+    /// <summary>Checks disposal and returns the page count, failing for an empty document.</summary>
+    private int RequirePages()
+    {
+        using var _ = PdfiumRuntime.Enter();
+        return RequirePagesCore();
+    }
+
+    private async ValueTask<int> RequirePagesAsync()
+    {
+        using (await PdfiumRuntime.EnterAsync())
+        {
+            return RequirePagesCore();
+        }
+    }
+
+    private int RequirePagesCore()
+    {
+        int pageCount = PageCountCore;
+        if (pageCount == 0)
+            throw new InvalidOperationException("Document has no pages");
+        return pageCount;
+    }
+
+    /// <summary>
+    /// Loads a page, renders it at the given resolution and closes it again, all in one gated scope.
+    /// The native gate must be held.
+    /// </summary>
+    private BitmapLease RenderPageLeaseCore(int pageIndex, int dpiWidth, int dpiHeight, int flags)
+    {
+        PdfiumRuntime.AssertHeld();
+
+        var page = GetPageCore(pageIndex);
+        try
+        {
+            int widthPx = (int)Math.Round(page.WidthCore / 72.0 * dpiWidth);
+            int heightPx = (int)Math.Round(page.HeightCore / 72.0 * dpiHeight);
+            return page.RenderToBitmapLeaseCore(widthPx, heightPx, flags);
+        }
+        finally
+        {
+            page.DisposeCore();
+        }
+    }
+
+    /// <summary>Render inside the gate. The caller encodes from the lease with the gate free.</summary>
+    private BitmapLease RenderPageLease(int pageIndex, int dpiWidth, int dpiHeight, int flags)
+    {
+        using var _ = PdfiumRuntime.Enter();
+        return RenderPageLeaseCore(pageIndex, dpiWidth, dpiHeight, flags);
+    }
+
+    private async ValueTask<BitmapLease> RenderPageLeaseAsync(int pageIndex, int dpiWidth, int dpiHeight, int flags)
+    {
+        using (await PdfiumRuntime.EnterAsync())
+        {
+            return RenderPageLeaseCore(pageIndex, dpiWidth, dpiHeight, flags);
+        }
+    }
+
+    private static void RequireStreamableFormat(ImageFormat format)
+    {
+        if (format is not (ImageFormat.Jpeg or ImageFormat.Png))
+            throw new ArgumentOutOfRangeException(nameof(format), "Use SaveAsTiff for TIFF output");
+    }
+
+    private static RawBitmap ToRawBitmap(BitmapLease lease)
+        => new(lease.ToArray(), lease.Width, lease.Height, lease.Stride);
+
+    private static byte[] EncodeJpeg(JpegEncoder encoder, BitmapLease lease, int quality)
+        => encoder.Encode(lease.Buffer, lease.Width, lease.Height, lease.Stride, quality: quality);
+
+    private static byte[] EncodePng(BitmapLease lease)
+        => PngEncoder.Encode(lease.Buffer, lease.Width, lease.Height, lease.Stride);
+
+    private static void WriteTiffPage(TiffWriter writer, BitmapLease lease, int dpiWidth, int dpiHeight,
+        TiffColorMode colorMode, byte threshold, int totalPages)
+    {
+        switch (colorMode)
+        {
+            case TiffColorMode.Bilevel:
+                var bilevelData = PixelConverter.BgraToPackedBilevel(lease.Buffer, lease.Width, lease.Height, lease.Stride, threshold);
+                writer.WriteBilevelPage(bilevelData, lease.Width, lease.Height, dpiWidth, dpiHeight, totalPages);
+                break;
+
+            case TiffColorMode.Grayscale:
+                var grayData = PixelConverter.BgraToGrayscale(lease.Buffer, lease.Width, lease.Height, lease.Stride);
+                writer.WriteGrayscalePage(grayData, lease.Width, lease.Height, dpiWidth, dpiHeight, totalPages);
+                break;
+
+            default:
+                throw new ArgumentOutOfRangeException(nameof(colorMode));
+        }
+    }
+
+    private const int ImageRenderFlags = PDFium.FPDF_ANNOT;
+    private const int TiffRenderFlags = PDFium.FPDF_PRINTING | PDFium.FPDF_ANNOT;
+
+    #endregion
 
     /// <summary>
     /// Renders all pages to raw BGRA pixel buffers.
     /// </summary>
     public RawBitmap[] RenderPages(int dpi = 300)
     {
-        ThrowIfDisposed();
         return RenderPages(dpi, dpi);
     }
 
     public RawBitmap[] RenderPages(int dpiWidth, int dpiHeight)
     {
-        ThrowIfDisposed();
+        int pageCount = RequirePages();
 
-        if (PageCount == 0)
-            throw new InvalidOperationException("Document has no pages");
-
-        var results = new RawBitmap[PageCount];
-        for (int i = 0; i < PageCount; i++)
+        var results = new RawBitmap[pageCount];
+        for (int i = 0; i < pageCount; i++)
         {
-            using var page = GetPage(i);
-            results[i] = RenderPageToRawBitmap(page, dpiWidth, dpiHeight);
+            using var lease = RenderPageLease(i, dpiWidth, dpiHeight, ImageRenderFlags);
+            results[i] = ToRawBitmap(lease);
         }
         return results;
     }
 
-    public async Task<RawBitmap[]> RenderPagesAsync(int dpi = 300)
+    public Task<RawBitmap[]> RenderPagesAsync(int dpi = 300)
     {
-        ThrowIfDisposed();
-        return await RenderPagesAsync(dpi, dpi);
+        return RenderPagesAsync(dpi, dpi);
     }
 
     public async Task<RawBitmap[]> RenderPagesAsync(int dpiWidth, int dpiHeight)
     {
-        ThrowIfDisposed();
+        int pageCount = await RequirePagesAsync().ConfigureAwait(false);
 
-        if (PageCount == 0)
-            throw new InvalidOperationException("Document has no pages");
-
-        var results = new RawBitmap[PageCount];
-        for (int i = 0; i < PageCount; i++)
+        var results = new RawBitmap[pageCount];
+        for (int i = 0; i < pageCount; i++)
         {
             await Task.Yield();
-            using var page = GetPage(i);
-            results[i] = RenderPageToRawBitmap(page, dpiWidth, dpiHeight);
+            var lease = await RenderPageLeaseAsync(i, dpiWidth, dpiHeight, ImageRenderFlags).ConfigureAwait(false);
+            await using var leaseScope = lease.ConfigureAwait(false);
+            results[i] = ToRawBitmap(lease);
         }
         return results;
     }
@@ -539,38 +781,44 @@ public class PdfDocument : IDisposable
     /// </example>
     public IEnumerable<byte[]> StreamImageBytes(ImageFormat format, int quality = 100, int dpi = 300)
     {
-        ThrowIfDisposed();
         return StreamImageBytes(format, quality, dpi, dpi);
     }
 
     /// <inheritdoc cref="StreamImageBytes(ImageFormat, int, int)"/>
     public IEnumerable<byte[]> StreamImageBytes(ImageFormat format, int quality, int dpiWidth, int dpiHeight)
     {
-        ThrowIfDisposed();
+        // Validate eagerly; the iterator below runs lazily.
+        int pageCount = RequirePages();
+        RequireStreamableFormat(format);
 
-        if (PageCount == 0)
-            throw new InvalidOperationException("Document has no pages");
-
-        return StreamImageBytesCore(format, quality, dpiWidth, dpiHeight);
+        return StreamImageBytesCore(format, quality, dpiWidth, dpiHeight, pageCount);
     }
 
-    private IEnumerable<byte[]> StreamImageBytesCore(ImageFormat format, int quality, int dpiWidth, int dpiHeight)
+    private IEnumerable<byte[]> StreamImageBytesCore(ImageFormat format, int quality, int dpiWidth, int dpiHeight, int pageCount)
     {
         if (format == ImageFormat.Jpeg)
         {
             using var encoder = new JpegEncoder();
-            for (int i = 0; i < PageCount; i++)
+            for (int i = 0; i < pageCount; i++)
             {
-                using var page = GetPage(i);
-                yield return RenderPageToJpegBytes(encoder, page, dpiWidth, dpiHeight, quality);
+                byte[] bytes;
+                using (var lease = RenderPageLease(i, dpiWidth, dpiHeight, ImageRenderFlags))
+                {
+                    bytes = EncodeJpeg(encoder, lease, quality);
+                }
+                yield return bytes;
             }
         }
         else if (format == ImageFormat.Png)
         {
-            for (int i = 0; i < PageCount; i++)
+            for (int i = 0; i < pageCount; i++)
             {
-                using var page = GetPage(i);
-                yield return RenderPageToPngBytes(page, dpiWidth, dpiHeight);
+                byte[] bytes;
+                using (var lease = RenderPageLease(i, dpiWidth, dpiHeight, ImageRenderFlags))
+                {
+                    bytes = EncodePng(lease);
+                }
+                yield return bytes;
             }
         }
         else
@@ -581,9 +829,15 @@ public class PdfDocument : IDisposable
 
     public (double width, double height) GetPageSize(int pageIndex)
     {
+        using var _ = PdfiumRuntime.Enter();
+        return GetPageSizeCore(pageIndex);
+    }
+
+    private (double width, double height) GetPageSizeCore(int pageIndex)
+    {
         ThrowIfDisposed();
 
-        if (pageIndex < 0 || pageIndex >= PageCount)
+        if (pageIndex < 0 || pageIndex >= PDFium.FPDF_GetPageCount(Document))
             throw new ArgumentOutOfRangeException(nameof(pageIndex));
 
         var result = PDFium.FPDF_GetPageSizeByIndex(Document, pageIndex, out double width, out double height);
@@ -600,9 +854,15 @@ public class PdfDocument : IDisposable
     /// <returns>The page label string, or null if no label is defined</returns>
     public string? GetPageLabel(int pageIndex)
     {
+        using var _ = PdfiumRuntime.Enter();
+        return GetPageLabelCore(pageIndex);
+    }
+
+    private string? GetPageLabelCore(int pageIndex)
+    {
         ThrowIfDisposed();
 
-        if (pageIndex < 0 || pageIndex >= PageCount)
+        if (pageIndex < 0 || pageIndex >= PDFium.FPDF_GetPageCount(Document))
             throw new ArgumentOutOfRangeException(nameof(pageIndex));
 
         // Get the required buffer size
@@ -639,24 +899,24 @@ public class PdfDocument : IDisposable
     /// <returns>Array of page labels (null for pages without labels)</returns>
     public string?[] GetAllPageLabels()
     {
-        ThrowIfDisposed();
+        using var _ = PdfiumRuntime.Enter();
 
-        var labels = new string?[PageCount];
-        for (int i = 0; i < PageCount; i++)
+        var labels = new string?[PageCountCore];
+        for (int i = 0; i < labels.Length; i++)
         {
-            labels[i] = GetPageLabel(i);
+            labels[i] = GetPageLabelCore(i);
         }
         return labels;
     }
 
     public (double width, double height)[] GetAllPageSizes()
     {
-        ThrowIfDisposed();
+        using var _ = PdfiumRuntime.Enter();
 
-        var sizes = new (double, double)[PageCount];
-        for (int i = 0; i < PageCount; i++)
+        var sizes = new (double, double)[PageCountCore];
+        for (int i = 0; i < sizes.Length; i++)
         {
-            sizes[i] = GetPageSize(i);
+            sizes[i] = GetPageSizeCore(i);
         }
         return sizes;
     }
@@ -677,42 +937,59 @@ public class PdfDocument : IDisposable
     /// }
     /// </code>
     /// </example>
+    /// <remarks>
+    /// This call returns without waiting for the native gate. It throws at once if the document is
+    /// disposed or <paramref name="format"/> cannot be streamed. An empty document is reported
+    /// (<see cref="InvalidOperationException"/>) when enumeration starts, because reading the page
+    /// count is native work and is awaited there.
+    /// </remarks>
     public IAsyncEnumerable<byte[]> StreamImageBytesAsync(ImageFormat format, int quality = 100, int dpi = 300)
     {
-        ThrowIfDisposed();
         return StreamImageBytesAsync(format, quality, dpi, dpi);
     }
 
     /// <inheritdoc cref="StreamImageBytesAsync(ImageFormat, int, int)"/>
     public IAsyncEnumerable<byte[]> StreamImageBytesAsync(ImageFormat format, int quality, int dpiWidth, int dpiHeight)
     {
+        // Managed validation only: a synchronous wait for the gate here would block the caller's
+        // thread. The page count is native work and is awaited inside the iterator.
         ThrowIfDisposed();
-
-        if (PageCount == 0)
-            throw new InvalidOperationException("Document has no pages");
+        RequireStreamableFormat(format);
 
         return StreamImageBytesCoreAsync(format, quality, dpiWidth, dpiHeight);
     }
 
     private async IAsyncEnumerable<byte[]> StreamImageBytesCoreAsync(ImageFormat format, int quality, int dpiWidth, int dpiHeight)
     {
+        int pageCount = await RequirePagesAsync().ConfigureAwait(false);
+
         if (format == ImageFormat.Jpeg)
         {
             using var encoder = new JpegEncoder();
-            for (int i = 0; i < PageCount; i++)
+            for (int i = 0; i < pageCount; i++)
             {
                 await Task.Yield();
-                using var page = GetPage(i);
-                yield return RenderPageToJpegBytes(encoder, page, dpiWidth, dpiHeight, quality);
+                byte[] bytes;
+                var lease = await RenderPageLeaseAsync(i, dpiWidth, dpiHeight, ImageRenderFlags).ConfigureAwait(false);
+                await using (lease.ConfigureAwait(false))
+                {
+                    bytes = EncodeJpeg(encoder, lease, quality);
+                }
+                yield return bytes;
             }
         }
         else if (format == ImageFormat.Png)
         {
-            for (int i = 0; i < PageCount; i++)
+            for (int i = 0; i < pageCount; i++)
             {
                 await Task.Yield();
-                using var page = GetPage(i);
-                yield return RenderPageToPngBytes(page, dpiWidth, dpiHeight);
+                byte[] bytes;
+                var lease = await RenderPageLeaseAsync(i, dpiWidth, dpiHeight, ImageRenderFlags).ConfigureAwait(false);
+                await using (lease.ConfigureAwait(false))
+                {
+                    bytes = EncodePng(lease);
+                }
+                yield return bytes;
             }
         }
         else
@@ -723,26 +1000,27 @@ public class PdfDocument : IDisposable
 
     public void SaveAsImages(Stream[] outputStreams, ImageFormat format, int quality, int dpiWidth, int dpiHeight)
     {
-        ThrowIfDisposed();
+        int pageCount = PageCount;
 
-        if (outputStreams.Length != PageCount)
-            throw new ArgumentException($"Number of output streams ({outputStreams.Length}) must match page count ({PageCount})");
+        if (outputStreams.Length != pageCount)
+            throw new ArgumentException($"Number of output streams ({outputStreams.Length}) must match page count ({pageCount})");
 
         if (format == ImageFormat.Jpeg)
         {
             using var encoder = new JpegEncoder();
-            for (int i = 0; i < PageCount; i++)
+            for (int i = 0; i < pageCount; i++)
             {
-                using var page = GetPage(i);
-                RenderPageToJpegStream(encoder, page, dpiWidth, dpiHeight, quality, outputStreams[i]);
+                using var lease = RenderPageLease(i, dpiWidth, dpiHeight, ImageRenderFlags);
+                encoder.EncodeToStream(lease.Buffer, lease.Width, lease.Height, lease.Stride, outputStreams[i],
+                    quality: quality);
             }
         }
         else if (format == ImageFormat.Png)
         {
-            for (int i = 0; i < PageCount; i++)
+            for (int i = 0; i < pageCount; i++)
             {
-                using var page = GetPage(i);
-                RenderPageToPngStream(page, dpiWidth, dpiHeight, outputStreams[i]);
+                using var lease = RenderPageLease(i, dpiWidth, dpiHeight, ImageRenderFlags);
+                PngEncoder.EncodeToStream(lease.Buffer, lease.Width, lease.Height, lease.Stride, outputStreams[i]);
             }
         }
         else
@@ -763,7 +1041,6 @@ public class PdfDocument : IDisposable
     public void SaveAsTiff(string outputPath, int dpi = 200,
         TiffColorMode colorMode = TiffColorMode.Bilevel, byte threshold = 128)
     {
-        ThrowIfDisposed();
         SaveAsTiff(outputPath, dpi, dpi, colorMode, threshold);
     }
 
@@ -773,10 +1050,10 @@ public class PdfDocument : IDisposable
     public void SaveAsTiff(string outputPath, int dpiWidth, int dpiHeight,
         TiffColorMode colorMode = TiffColorMode.Bilevel, byte threshold = 128)
     {
-        ThrowIfDisposed();
+        int pageCount = RequirePages();
 
         using var writer = new TiffWriter(outputPath);
-        WriteAllPagesToTiff(writer, dpiWidth, dpiHeight, colorMode, threshold);
+        WriteAllPagesToTiff(writer, pageCount, dpiWidth, dpiHeight, colorMode, threshold);
     }
 
     /// <summary>
@@ -786,7 +1063,6 @@ public class PdfDocument : IDisposable
     public void SaveAsTiff(Stream output, int dpi = 200,
         TiffColorMode colorMode = TiffColorMode.Bilevel, byte threshold = 128)
     {
-        ThrowIfDisposed();
         SaveAsTiff(output, dpi, dpi, colorMode, threshold);
     }
 
@@ -796,10 +1072,10 @@ public class PdfDocument : IDisposable
     public void SaveAsTiff(Stream output, int dpiWidth, int dpiHeight,
         TiffColorMode colorMode = TiffColorMode.Bilevel, byte threshold = 128)
     {
-        ThrowIfDisposed();
+        int pageCount = RequirePages();
 
         using var writer = new TiffWriter(output);
-        WriteAllPagesToTiff(writer, dpiWidth, dpiHeight, colorMode, threshold);
+        WriteAllPagesToTiff(writer, pageCount, dpiWidth, dpiHeight, colorMode, threshold);
     }
 
     /// <summary>
@@ -809,7 +1085,6 @@ public class PdfDocument : IDisposable
     public Task SaveAsTiffAsync(string outputPath, int dpi = 200,
         TiffColorMode colorMode = TiffColorMode.Bilevel, byte threshold = 128)
     {
-        ThrowIfDisposed();
         return SaveAsTiffAsync(outputPath, dpi, dpi, colorMode, threshold);
     }
 
@@ -819,10 +1094,10 @@ public class PdfDocument : IDisposable
     public async Task SaveAsTiffAsync(string outputPath, int dpiWidth, int dpiHeight,
         TiffColorMode colorMode = TiffColorMode.Bilevel, byte threshold = 128)
     {
-        ThrowIfDisposed();
+        int pageCount = await RequirePagesAsync().ConfigureAwait(false);
 
         using var writer = new TiffWriter(outputPath);
-        await WriteAllPagesToTiffAsync(writer, dpiWidth, dpiHeight, colorMode, threshold);
+        await WriteAllPagesToTiffAsync(writer, pageCount, dpiWidth, dpiHeight, colorMode, threshold).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -831,7 +1106,6 @@ public class PdfDocument : IDisposable
     public Task SaveAsTiffAsync(Stream output, int dpi = 200,
         TiffColorMode colorMode = TiffColorMode.Bilevel, byte threshold = 128)
     {
-        ThrowIfDisposed();
         return SaveAsTiffAsync(output, dpi, dpi, colorMode, threshold);
     }
 
@@ -841,132 +1115,84 @@ public class PdfDocument : IDisposable
     public async Task SaveAsTiffAsync(Stream output, int dpiWidth, int dpiHeight,
         TiffColorMode colorMode = TiffColorMode.Bilevel, byte threshold = 128)
     {
-        ThrowIfDisposed();
+        int pageCount = await RequirePagesAsync().ConfigureAwait(false);
 
         using var writer = new TiffWriter(output);
-        await WriteAllPagesToTiffAsync(writer, dpiWidth, dpiHeight, colorMode, threshold);
+        await WriteAllPagesToTiffAsync(writer, pageCount, dpiWidth, dpiHeight, colorMode, threshold).ConfigureAwait(false);
     }
 
-    private void WriteAllPagesToTiff(TiffWriter writer, int dpiWidth, int dpiHeight,
+    private void WriteAllPagesToTiff(TiffWriter writer, int pageCount, int dpiWidth, int dpiHeight,
         TiffColorMode colorMode, byte threshold)
     {
-        ThrowIfDisposed();
-        if (PageCount == 0)
-            throw new InvalidOperationException("Document has no pages");
-
-        int pageCount = PageCount;
         for (int i = 0; i < pageCount; i++)
         {
-            RenderPageToTiff(writer, i, dpiWidth, dpiHeight, colorMode, threshold, pageCount);
+            // Render under the gate; convert, compress and write with the gate free.
+            using var lease = RenderPageLease(i, dpiWidth, dpiHeight, TiffRenderFlags);
+            WriteTiffPage(writer, lease, dpiWidth, dpiHeight, colorMode, threshold, pageCount);
         }
     }
 
-    private async Task WriteAllPagesToTiffAsync(TiffWriter writer, int dpiWidth, int dpiHeight,
+    private async Task WriteAllPagesToTiffAsync(TiffWriter writer, int pageCount, int dpiWidth, int dpiHeight,
         TiffColorMode colorMode, byte threshold)
     {
-        ThrowIfDisposed();
-        if (PageCount == 0)
-            throw new InvalidOperationException("Document has no pages");
-
-        int pageCount = PageCount;
         for (int i = 0; i < pageCount; i++)
         {
             await Task.Yield();
-            RenderPageToTiff(writer, i, dpiWidth, dpiHeight, colorMode, threshold, pageCount);
-        }
-    }
-
-    private void RenderPageToTiff(TiffWriter writer, int pageIndex, int dpiWidth, int dpiHeight,
-        TiffColorMode colorMode, byte threshold, int totalPages)
-    {
-        using var page = GetPage(pageIndex);
-
-        int widthPx = (int)Math.Round(page.Width / 72.0 * dpiWidth);
-        int heightPx = (int)Math.Round(page.Height / 72.0 * dpiHeight);
-
-        var bitmap = page.RenderToBitmapHandle(widthPx, heightPx, PDFium.FPDF_PRINTING | PDFium.FPDF_ANNOT);
-        try
-        {
-            var buffer = PDFium.FPDFBitmap_GetBuffer(bitmap);
-            var stride = PDFium.FPDFBitmap_GetStride(bitmap);
-
-            switch (colorMode)
-            {
-                case TiffColorMode.Bilevel:
-                    var bilevelData = PixelConverter.BgraToPackedBilevel(buffer, widthPx, heightPx, stride, threshold);
-                    writer.WriteBilevelPage(bilevelData, widthPx, heightPx, dpiWidth, dpiHeight, totalPages);
-                    break;
-
-                case TiffColorMode.Grayscale:
-                    var grayData = PixelConverter.BgraToGrayscale(buffer, widthPx, heightPx, stride);
-                    writer.WriteGrayscalePage(grayData, widthPx, heightPx, dpiWidth, dpiHeight, totalPages);
-                    break;
-
-                default:
-                    throw new ArgumentOutOfRangeException(nameof(colorMode));
-            }
-        }
-        finally
-        {
-            PDFium.FPDFBitmap_Destroy(bitmap);
+            var lease = await RenderPageLeaseAsync(i, dpiWidth, dpiHeight, TiffRenderFlags).ConfigureAwait(false);
+            await using var leaseScope = lease.ConfigureAwait(false);
+            WriteTiffPage(writer, lease, dpiWidth, dpiHeight, colorMode, threshold, pageCount);
         }
     }
 
     // Convenience methods for saving to directory
     public void SaveAsPngs(string outputDirectory, string fileNamePrefix = "page", int dpi = 300)
     {
-        ThrowIfDisposed();
         SaveAsImages(outputDirectory, fileNamePrefix, ImageFormat.Png, 100, dpi, dpi);
     }
 
     public void SaveAsJpegs(string outputDirectory, string fileNamePrefix = "page", int quality = 90, int dpi = 300)
     {
-        ThrowIfDisposed();
         SaveAsJpegs(outputDirectory, fileNamePrefix, quality, dpi, dpi);
     }
 
     public void SaveAsJpegs(string outputDirectory, string fileNamePrefix, int quality, int dpiWidth, int dpiHeight)
     {
-        ThrowIfDisposed();
-        if (PageCount == 0)
-            throw new InvalidOperationException("Document has no pages");
+        int pageCount = RequirePages();
 
         if (!Directory.Exists(outputDirectory))
             Directory.CreateDirectory(outputDirectory);
 
         using var encoder = new JpegEncoder();
 
-        for (int i = 0; i < PageCount; i++)
+        for (int i = 0; i < pageCount; i++)
         {
-            using var page = GetPage(i);
-            RenderPageToJpeg(encoder, page, dpiWidth, dpiHeight, quality,
-                Path.Combine(outputDirectory, $"{fileNamePrefix}_{i + 1:D3}.jpg"));
+            using var lease = RenderPageLease(i, dpiWidth, dpiHeight, ImageRenderFlags);
+            encoder.EncodeToFile(lease.Buffer, lease.Width, lease.Height, lease.Stride,
+                Path.Combine(outputDirectory, $"{fileNamePrefix}_{i + 1:D3}.jpg"), quality: quality);
         }
     }
 
-    public async Task SaveAsJpegsAsync(string outputDirectory, string fileNamePrefix = "page", int quality = 90, int dpi = 300)
+    public Task SaveAsJpegsAsync(string outputDirectory, string fileNamePrefix = "page", int quality = 90, int dpi = 300)
     {
-        ThrowIfDisposed();
-        await SaveAsJpegsAsync(outputDirectory, fileNamePrefix, quality, dpi, dpi);
+        return SaveAsJpegsAsync(outputDirectory, fileNamePrefix, quality, dpi, dpi);
     }
 
     public async Task SaveAsJpegsAsync(string outputDirectory, string fileNamePrefix, int quality, int dpiWidth, int dpiHeight)
     {
-        ThrowIfDisposed();
-        if (PageCount == 0)
-            throw new InvalidOperationException("Document has no pages");
+        int pageCount = await RequirePagesAsync().ConfigureAwait(false);
 
         if (!Directory.Exists(outputDirectory))
             Directory.CreateDirectory(outputDirectory);
 
         using var encoder = new JpegEncoder();
 
-        for (int i = 0; i < PageCount; i++)
+        for (int i = 0; i < pageCount; i++)
         {
             await Task.Yield();
-            using var page = GetPage(i);
-            RenderPageToJpeg(encoder, page, dpiWidth, dpiHeight, quality,
-                Path.Combine(outputDirectory, $"{fileNamePrefix}_{i + 1:D3}.jpg"));
+            var lease = await RenderPageLeaseAsync(i, dpiWidth, dpiHeight, ImageRenderFlags).ConfigureAwait(false);
+            await using var leaseScope = lease.ConfigureAwait(false);
+            encoder.EncodeToFile(lease.Buffer, lease.Width, lease.Height, lease.Stride,
+                Path.Combine(outputDirectory, $"{fileNamePrefix}_{i + 1:D3}.jpg"), quality: quality);
         }
     }
 
@@ -976,38 +1202,26 @@ public class PdfDocument : IDisposable
     /// </summary>
     public IEnumerable<byte[]> StreamJpegBytes(int quality = 90, int dpi = 300)
     {
-        ThrowIfDisposed();
         return StreamJpegBytes(quality, dpi, dpi);
     }
 
     public IEnumerable<byte[]> StreamJpegBytes(int quality, int dpiWidth, int dpiHeight)
     {
-        ThrowIfDisposed();
+        int pageCount = RequirePages();
 
-        if (PageCount == 0)
-            throw new InvalidOperationException("Document has no pages");
-
-        return StreamJpegBytesCore(quality, dpiWidth, dpiHeight);
-    }
-
-    private IEnumerable<byte[]> StreamJpegBytesCore(int quality, int dpiWidth, int dpiHeight)
-    {
-        using var encoder = new JpegEncoder();
-
-        for (int i = 0; i < PageCount; i++)
-        {
-            using var page = GetPage(i);
-            yield return RenderPageToJpegBytes(encoder, page, dpiWidth, dpiHeight, quality);
-        }
+        return StreamImageBytesCore(ImageFormat.Jpeg, quality, dpiWidth, dpiHeight, pageCount);
     }
 
     /// <summary>
     /// Streams JPEG bytes one page at a time using <c>IAsyncEnumerable</c>.
     /// Uses native libjpeg-turbo — no SkiaSharp involved.
     /// </summary>
+    /// <remarks>
+    /// This call returns without waiting for the native gate. An empty document is reported
+    /// (<see cref="InvalidOperationException"/>) when enumeration starts.
+    /// </remarks>
     public IAsyncEnumerable<byte[]> StreamJpegBytesAsync(int quality = 90, int dpi = 300)
     {
-        ThrowIfDisposed();
         return StreamJpegBytesAsync(quality, dpi, dpi);
     }
 
@@ -1015,92 +1229,17 @@ public class PdfDocument : IDisposable
     {
         ThrowIfDisposed();
 
-        if (PageCount == 0)
-            throw new InvalidOperationException("Document has no pages");
-
-        return StreamJpegBytesCoreAsync(quality, dpiWidth, dpiHeight);
-    }
-
-    private async IAsyncEnumerable<byte[]> StreamJpegBytesCoreAsync(int quality, int dpiWidth, int dpiHeight)
-    {
-        using var encoder = new JpegEncoder();
-
-        for (int i = 0; i < PageCount; i++)
-        {
-            await Task.Yield();
-            using var page = GetPage(i);
-            yield return RenderPageToJpegBytes(encoder, page, dpiWidth, dpiHeight, quality);
-        }
-    }
-
-    private void RenderPageToJpeg(JpegEncoder encoder, PdfPage page, int dpiWidth, int dpiHeight, int quality, string outputPath)
-    {
-        int widthPx = (int)Math.Round(page.Width / 72.0 * dpiWidth);
-        int heightPx = (int)Math.Round(page.Height / 72.0 * dpiHeight);
-
-        var bitmap = page.RenderToBitmapHandle(widthPx, heightPx, PDFium.FPDF_ANNOT);
-        try
-        {
-            var buffer = PDFium.FPDFBitmap_GetBuffer(bitmap);
-            var stride = PDFium.FPDFBitmap_GetStride(bitmap);
-            encoder.EncodeToFile(buffer, widthPx, heightPx, stride, outputPath,
-                quality: quality);
-        }
-        finally
-        {
-            PDFium.FPDFBitmap_Destroy(bitmap);
-        }
-    }
-
-    private void RenderPageToJpegStream(JpegEncoder encoder, PdfPage page, int dpiWidth, int dpiHeight, int quality, Stream output)
-    {
-        int widthPx = (int)Math.Round(page.Width / 72.0 * dpiWidth);
-        int heightPx = (int)Math.Round(page.Height / 72.0 * dpiHeight);
-
-        var bitmap = page.RenderToBitmapHandle(widthPx, heightPx, PDFium.FPDF_ANNOT);
-        try
-        {
-            var buffer = PDFium.FPDFBitmap_GetBuffer(bitmap);
-            var stride = PDFium.FPDFBitmap_GetStride(bitmap);
-            encoder.EncodeToStream(buffer, widthPx, heightPx, stride, output,
-                quality: quality);
-        }
-        finally
-        {
-            PDFium.FPDFBitmap_Destroy(bitmap);
-        }
-    }
-
-    private byte[] RenderPageToJpegBytes(JpegEncoder encoder, PdfPage page, int dpiWidth, int dpiHeight, int quality)
-    {
-        int widthPx = (int)Math.Round(page.Width / 72.0 * dpiWidth);
-        int heightPx = (int)Math.Round(page.Height / 72.0 * dpiHeight);
-
-        var bitmap = page.RenderToBitmapHandle(widthPx, heightPx, PDFium.FPDF_ANNOT);
-        try
-        {
-            var buffer = PDFium.FPDFBitmap_GetBuffer(bitmap);
-            var stride = PDFium.FPDFBitmap_GetStride(bitmap);
-            return encoder.Encode(buffer, widthPx, heightPx, stride, quality: quality);
-        }
-        finally
-        {
-            PDFium.FPDFBitmap_Destroy(bitmap);
-        }
+        return StreamImageBytesCoreAsync(ImageFormat.Jpeg, quality, dpiWidth, dpiHeight);
     }
 
     public void SaveAsImages(string outputDirectory, string fileNamePrefix, ImageFormat format, int quality = 100, int dpi = 300)
     {
-        ThrowIfDisposed();
         SaveAsImages(outputDirectory, fileNamePrefix, format, quality, dpi, dpi);
     }
 
     public void SaveAsImages(string outputDirectory, string fileNamePrefix, ImageFormat format, int quality, int dpiWidth, int dpiHeight)
     {
-        ThrowIfDisposed();
-
-        if (PageCount == 0)
-            throw new InvalidOperationException("Document has no pages");
+        int pageCount = RequirePages();
 
         if (!Directory.Exists(outputDirectory))
             Directory.CreateDirectory(outputDirectory);
@@ -1110,20 +1249,20 @@ public class PdfDocument : IDisposable
         if (format == ImageFormat.Jpeg)
         {
             using var encoder = new JpegEncoder();
-            for (int i = 0; i < PageCount; i++)
+            for (int i = 0; i < pageCount; i++)
             {
                 var filePath = Path.Combine(outputDirectory, $"{fileNamePrefix}_{i + 1:D3}.{extension}");
-                using var page = GetPage(i);
-                RenderPageToJpeg(encoder, page, dpiWidth, dpiHeight, quality, filePath);
+                using var lease = RenderPageLease(i, dpiWidth, dpiHeight, ImageRenderFlags);
+                encoder.EncodeToFile(lease.Buffer, lease.Width, lease.Height, lease.Stride, filePath, quality: quality);
             }
         }
         else if (format == ImageFormat.Png)
         {
-            for (int i = 0; i < PageCount; i++)
+            for (int i = 0; i < pageCount; i++)
             {
                 var filePath = Path.Combine(outputDirectory, $"{fileNamePrefix}_{i + 1:D3}.{extension}");
-                using var page = GetPage(i);
-                RenderPageToPngFile(page, dpiWidth, dpiHeight, filePath);
+                using var lease = RenderPageLease(i, dpiWidth, dpiHeight, ImageRenderFlags);
+                PngEncoder.EncodeToFile(lease.Buffer, lease.Width, lease.Height, lease.Stride, filePath);
             }
         }
         else
@@ -1134,10 +1273,7 @@ public class PdfDocument : IDisposable
 
     public async Task SaveAsImagesAsync(string outputDirectory, string fileNamePrefix, ImageFormat format, int quality, int dpiWidth, int dpiHeight)
     {
-        ThrowIfDisposed();
-
-        if (PageCount == 0)
-            throw new InvalidOperationException("Document has no pages");
+        int pageCount = await RequirePagesAsync().ConfigureAwait(false);
 
         if (!Directory.Exists(outputDirectory))
             Directory.CreateDirectory(outputDirectory);
@@ -1147,101 +1283,29 @@ public class PdfDocument : IDisposable
         if (format == ImageFormat.Jpeg)
         {
             using var encoder = new JpegEncoder();
-            for (int i = 0; i < PageCount; i++)
+            for (int i = 0; i < pageCount; i++)
             {
                 await Task.Yield();
                 var filePath = Path.Combine(outputDirectory, $"{fileNamePrefix}_{i + 1:D3}.{extension}");
-                using var page = GetPage(i);
-                RenderPageToJpeg(encoder, page, dpiWidth, dpiHeight, quality, filePath);
+                var lease = await RenderPageLeaseAsync(i, dpiWidth, dpiHeight, ImageRenderFlags).ConfigureAwait(false);
+                await using var leaseScope = lease.ConfigureAwait(false);
+                encoder.EncodeToFile(lease.Buffer, lease.Width, lease.Height, lease.Stride, filePath, quality: quality);
             }
         }
         else if (format == ImageFormat.Png)
         {
-            for (int i = 0; i < PageCount; i++)
+            for (int i = 0; i < pageCount; i++)
             {
                 await Task.Yield();
                 var filePath = Path.Combine(outputDirectory, $"{fileNamePrefix}_{i + 1:D3}.{extension}");
-                using var page = GetPage(i);
-                RenderPageToPngFile(page, dpiWidth, dpiHeight, filePath);
+                var lease = await RenderPageLeaseAsync(i, dpiWidth, dpiHeight, ImageRenderFlags).ConfigureAwait(false);
+                await using var leaseScope = lease.ConfigureAwait(false);
+                PngEncoder.EncodeToFile(lease.Buffer, lease.Width, lease.Height, lease.Stride, filePath);
             }
         }
         else
         {
             throw new ArgumentOutOfRangeException(nameof(format), "Use SaveAsTiff for TIFF output");
-        }
-    }
-
-    private void RenderPageToPngFile(PdfPage page, int dpiWidth, int dpiHeight, string outputPath)
-    {
-        int widthPx = (int)Math.Round(page.Width / 72.0 * dpiWidth);
-        int heightPx = (int)Math.Round(page.Height / 72.0 * dpiHeight);
-
-        var bitmap = page.RenderToBitmapHandle(widthPx, heightPx, PDFium.FPDF_ANNOT);
-        try
-        {
-            var buffer = PDFium.FPDFBitmap_GetBuffer(bitmap);
-            var stride = PDFium.FPDFBitmap_GetStride(bitmap);
-            PngEncoder.EncodeToFile(buffer, widthPx, heightPx, stride, outputPath);
-        }
-        finally
-        {
-            PDFium.FPDFBitmap_Destroy(bitmap);
-        }
-    }
-
-    private byte[] RenderPageToPngBytes(PdfPage page, int dpiWidth, int dpiHeight)
-    {
-        int widthPx = (int)Math.Round(page.Width / 72.0 * dpiWidth);
-        int heightPx = (int)Math.Round(page.Height / 72.0 * dpiHeight);
-
-        var bitmap = page.RenderToBitmapHandle(widthPx, heightPx, PDFium.FPDF_ANNOT);
-        try
-        {
-            var buffer = PDFium.FPDFBitmap_GetBuffer(bitmap);
-            var stride = PDFium.FPDFBitmap_GetStride(bitmap);
-            return PngEncoder.Encode(buffer, widthPx, heightPx, stride);
-        }
-        finally
-        {
-            PDFium.FPDFBitmap_Destroy(bitmap);
-        }
-    }
-
-    private void RenderPageToPngStream(PdfPage page, int dpiWidth, int dpiHeight, Stream output)
-    {
-        int widthPx = (int)Math.Round(page.Width / 72.0 * dpiWidth);
-        int heightPx = (int)Math.Round(page.Height / 72.0 * dpiHeight);
-
-        var bitmap = page.RenderToBitmapHandle(widthPx, heightPx, PDFium.FPDF_ANNOT);
-        try
-        {
-            var buffer = PDFium.FPDFBitmap_GetBuffer(bitmap);
-            var stride = PDFium.FPDFBitmap_GetStride(bitmap);
-            PngEncoder.EncodeToStream(buffer, widthPx, heightPx, stride, output);
-        }
-        finally
-        {
-            PDFium.FPDFBitmap_Destroy(bitmap);
-        }
-    }
-
-    private RawBitmap RenderPageToRawBitmap(PdfPage page, int dpiWidth, int dpiHeight)
-    {
-        int widthPx = (int)Math.Round(page.Width / 72.0 * dpiWidth);
-        int heightPx = (int)Math.Round(page.Height / 72.0 * dpiHeight);
-
-        var pdfBitmap = page.RenderToBitmapHandle(widthPx, heightPx, PDFium.FPDF_ANNOT);
-        try
-        {
-            var buffer = PDFium.FPDFBitmap_GetBuffer(pdfBitmap);
-            var stride = PDFium.FPDFBitmap_GetStride(pdfBitmap);
-            var pixels = new byte[stride * heightPx];
-            Marshal.Copy(buffer, pixels, 0, pixels.Length);
-            return new RawBitmap(pixels, widthPx, heightPx, stride);
-        }
-        finally
-        {
-            PDFium.FPDFBitmap_Destroy(pdfBitmap);
         }
     }
 
@@ -1253,13 +1317,23 @@ public class PdfDocument : IDisposable
         _ => throw new ArgumentOutOfRangeException(nameof(format))
     };
 
+    /// <summary>
+    /// Gets the document's form, or null when it has none. The form belongs to this document and
+    /// is disposed with it; it may also be disposed earlier.
+    /// </summary>
     public PdfForm? GetForm()
     {
+        using var _ = PdfiumRuntime.Enter();
         ThrowIfDisposed();
 
-        var pdfForm = new PdfForm(Document, PageCount);
-        if(pdfForm.HasFormFields)
+        var pdfForm = new PdfForm(this, PDFium.FPDF_GetPageCount(Document));
+        if (pdfForm.HasFormFields)
+        {
+            // Tracked so the form environment is always exited before the document closes.
+            _forms ??= new HashSet<PdfForm>();
+            _forms.Add(pdfForm);
             return pdfForm;
+        }
 
         pdfForm.Dispose();
         return null;
@@ -1272,32 +1346,64 @@ public class PdfDocument : IDisposable
     /// <param name="flags">Save flags (default is 0 for standard save, use PDFium.FPDF_INCREMENTAL for incremental save)</param>
     public void Save(string filePath, uint flags = 0)
     {
-        ThrowIfDisposed();
+        byte[] buffer;
+        int length;
+        using (PdfiumRuntime.Enter())
+        {
+            ThrowIfDisposed();
+            ArgumentException.ThrowIfNullOrWhiteSpace(filePath);
+            (buffer, length) = SaveCore(flags);
+        }
 
-        using var fileStream = PdfHelpers.OpenWriteFileStream(filePath);
-        SaveToStream(fileStream, flags);
+        try
+        {
+            using var fileStream = PdfHelpers.OpenWriteFileStream(filePath);
+            fileStream.Write(buffer, 0, length);
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(buffer);
+        }
     }
 
     /// <summary>
     /// Saves the PDF document to a stream
     /// </summary>
+    /// <remarks>
+    /// The document is serialized into a pooled buffer first and written to <paramref name="stream"/>
+    /// afterwards, so a slow stream does not hold up other PDF work. An exception thrown by the
+    /// stream propagates to the caller unchanged.
+    /// </remarks>
     /// <param name="stream">The stream to write the PDF to</param>
     /// <param name="flags">Save flags (default is 0 for standard save, use PDFium.FPDF_INCREMENTAL for incremental save)</param>
     public void SaveToStream(Stream stream, uint flags = 0)
     {
-        ThrowIfDisposed();
-        ArgumentNullException.ThrowIfNull(stream);
-
-        using var writer = new PdfStreamFileWriter(stream);
-        var fileWrite = writer.GetFileWriteStruct();
-
-        bool success = PDFium.FPDF_SaveAsCopy(Document, ref fileWrite, flags);
-
-        if (!success)
+        byte[] buffer;
+        int length;
+        using (PdfiumRuntime.Enter())
         {
-            var error = PDFium.FPDF_GetLastError();
-            throw new InvalidOperationException($"Failed to save PDF document. PDFium error code: {error}");
+            ThrowIfDisposed();
+            ArgumentNullException.ThrowIfNull(stream);
+            (buffer, length) = SaveCore(flags);
         }
+
+        try
+        {
+            stream.Write(buffer, 0, length);
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(buffer);
+        }
+    }
+
+    /// <summary>Serializes into a pooled buffer the caller must return. The native gate must be held.</summary>
+    private (byte[] Buffer, int Length) SaveCore(uint flags)
+    {
+        if (!PooledFileWriter.TrySave(Document, flags, out var buffer, out int length, out uint error))
+            throw new InvalidOperationException($"Failed to save PDF document. PDFium error code: {error}");
+
+        return (buffer, length);
     }
 
     /// <summary>
@@ -1305,37 +1411,124 @@ public class PdfDocument : IDisposable
     /// </summary>
     public void Dispose()
     {
-        Dispose(true);
+        using (PdfiumRuntime.Enter())
+        {
+            Dispose(true);
+        }
+
         GC.SuppressFinalize(this);
     }
 
     /// <summary>
     /// Releases the unmanaged resources and optionally releases managed resources.
     /// </summary>
-    /// <param name="disposing">true to release both managed and unmanaged resources; false to release only unmanaged resources.</param>
+    /// <param name="disposing">
+    /// true when called from <see cref="Dispose()"/>: native handles are closed now, under the native gate.
+    /// false when called from the finalizer: handles are queued and closed by the next gated operation.
+    /// </param>
     protected virtual void Dispose(bool disposing)
     {
-        if (!_disposed)
+        if (!disposing)
         {
-            _disposed = true;
-
-            DisposeActivePages();
-
-            // Always release native handle
-            if (Document != IntPtr.Zero)
-            {
-                PDFium.FPDF_CloseDocument(Document);
-                Document = IntPtr.Zero;
-            }
-
-            ReleasePinnedMemoryDocument();
-
-            _disposed = true;
+            ReleaseFromFinalizer();
+            return;
         }
+
+        if (_disposed)
+            return;
+
+        using var _ = PdfiumRuntime.Enter();
+        _disposed = true;
+
+        if (_detachedObjects != null)
+        {
+            var detached = _detachedObjects.ToArray();
+            _detachedObjects = null;
+            foreach (var pageObject in detached)
+            {
+                try
+                {
+                    pageObject.DisposeFromOwner();
+                }
+                catch
+                {
+                    // Dispose must not throw.
+                }
+            }
+        }
+
+        DisposeActivePages();
+
+        if (_forms != null)
+        {
+            var forms = _forms.ToArray();
+            _forms = null;
+            foreach (var form in forms)
+            {
+                form.DisposeFromOwner();
+            }
+        }
+
+        if (Document != IntPtr.Zero)
+        {
+            using (PdfiumDiagnostics.NativeInterval(NativeOp.Close))
+                PDFium.FPDF_CloseDocument(Document);
+            PdfiumRuntime.HandleClosed();
+            Document = IntPtr.Zero;
+        }
+
+        // Only after the document is closed: PDFium reads from these for as long as it is open.
+        ReleasePinnedMemoryDocument();
+        SpooledInput.TryDelete(_spoolPath);
+        _spoolPath = null;
     }
 
     /// <summary>
-    /// Destructor to ensure native resources are released if Dispose is not called.
+    /// Finalizer path. Never calls PDFium, never waits on the gate, takes no locks. Everything this
+    /// document owns is queued in dependency order (page objects, forms, pages, the document, then
+    /// what the document was reading from) and closed by the next gated operation on any thread.
+    /// Pages and forms are queued here rather than by their own finalizers so that none of them
+    /// can be closed after the document.
+    /// </summary>
+    private void ReleaseFromFinalizer()
+    {
+        if (_detachedObjects != null)
+        {
+            foreach (var pageObject in _detachedObjects)
+                PdfiumRuntime.EnqueueRelease(NativeHandleKind.PageObject, pageObject.TakeHandleForOwnerFinalizer());
+        }
+
+        if (_forms != null)
+        {
+            foreach (var form in _forms)
+                PdfiumRuntime.EnqueueRelease(NativeHandleKind.Form, Interlocked.Exchange(ref form._formHandle, IntPtr.Zero));
+        }
+
+        if (_activePages != null)
+        {
+            foreach (var page in _activePages)
+                PdfiumRuntime.EnqueueRelease(NativeHandleKind.Page, Interlocked.Exchange(ref page._page, IntPtr.Zero));
+        }
+
+        PdfiumRuntime.EnqueueRelease(NativeHandleKind.Document, Interlocked.Exchange(ref _document, IntPtr.Zero));
+
+        if (_documentBytesHandle.IsAllocated)
+        {
+            PdfiumRuntime.EnqueueRelease(NativeHandleKind.PinnedBuffer, GCHandle.ToIntPtr(_documentBytesHandle));
+            _documentBytesHandle = default;
+        }
+
+        if (_forms != null)
+        {
+            foreach (var form in _forms)
+                PdfiumRuntime.EnqueueRelease(NativeHandleKind.NativeMemory, Interlocked.Exchange(ref form._formInfo, IntPtr.Zero));
+        }
+
+        PdfiumRuntime.EnqueueTempFile(_spoolPath);
+    }
+
+    /// <summary>
+    /// Queues native handles for deferred release if Dispose was not called.
     /// </summary>
     ~PdfDocument()
     {

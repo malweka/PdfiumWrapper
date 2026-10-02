@@ -20,6 +20,8 @@ This document provides complete API documentation for all public classes in Pdfi
 - [PdfBookmark](#pdfbookmark)
 - [PdfAttachments](#pdfattachments)
 - [PdfAttachment](#pdfattachment)
+- [PdfiumRuntime](#pdfiumruntime)
+- [The PDFium Class in 2.0](#the-pdfium-class-in-20)
 
 ---
 
@@ -41,7 +43,11 @@ public class PdfDocument : IDisposable
 
 ### Thread Safety
 
-This class is **NOT** thread-safe. Do not access the same `PdfDocument` instance from multiple threads concurrently. Each instance should be used from a single thread at a time, or external synchronization must be provided.
+Different `PdfDocument` instances may be used from different threads at the same time. PDFium allows one native call per process at a time, so the wrapper serializes native work (loading, rendering, text, saving) across all documents through one process-wide gate (see [PdfiumRuntime](#pdfiumruntime)); image encoding and output writes run outside it and overlap.
+
+One instance must not be used from two threads at once. If an instance is shared, the caller must synchronize access to it.
+
+A document owns its pages, the forms returned by `GetForm()`, and the page objects removed from its pages with `RemoveObject`. Disposing the document disposes them.
 
 ### Constructors
 
@@ -95,8 +101,16 @@ using var stream = File.OpenRead("sample.pdf");
 using var document = new PdfDocument(stream);
 ```
 
+The stream is read from its current position to its end during construction, before any native work starts, and is left positioned at its end. The document does not use the stream afterwards, so it can be closed immediately.
+
+- A `MemoryStream` with an exposable buffer is used in place, without a copy.
+- Other inputs of up to 64 MB are held in memory.
+- Larger inputs are copied to a temporary file that is deleted when the document is disposed.
+
+The threshold can be changed with `AppContext.SetData("PdfiumWrapper.SpoolThreshold", bytes)` (a `long`) before loading.
+
 **Parameters:**
-- `pdfStream` — Stream containing PDF data
+- `pdfStream` — Readable stream containing PDF data. It does not need to be seekable.
 - `password` — Optional password for encrypted PDFs
 
 ### Properties
@@ -218,6 +232,8 @@ if (form != null)
 }
 ```
 
+Each call returns a new `PdfForm`. The form belongs to the document: dispose it when done, or let the document dispose it. A form cannot be used after its document is disposed.
+
 **Returns:** `PdfForm` instance or `null`
 
 #### RenderPages(int dpi = 300)
@@ -246,13 +262,13 @@ Renders all pages to bitmaps with different horizontal and vertical DPI.
 
 #### RenderPagesAsync(int dpi = 300)
 
-Async version that yields between pages for UI responsiveness.
+Async version. Waits for the native gate without blocking a thread and yields between pages.
 
 ```csharp
 RawBitmap[] bitmaps = await document.RenderPagesAsync(dpi: 300);
 ```
 
-**Note:** This method processes pages sequentially and uses `Task.Yield()` for responsiveness, not parallelism.
+**Note:** This applies to every async method on `PdfDocument` (`RenderPagesAsync`, `StreamImageBytesAsync`, `SaveAsTiffAsync`, `SaveAsJpegsAsync`, `SaveAsImagesAsync`, `ProcessAllPagesAsync`): pages are processed sequentially, `Task.Yield()` is used between pages, and waiting for the gate does not block a thread. The synchronous methods, including constructors, block the calling thread while they wait. Neither form renders one document's pages in parallel.
 
 #### StreamImageBytes(ImageFormat format, int quality = 100, int dpi = 300)
 
@@ -275,7 +291,9 @@ foreach (var bytes in document.StreamImageBytes(ImageFormat.Png, quality: 100, d
 
 #### StreamImageBytesAsync(ImageFormat format, int quality = 100, int dpi = 300)
 
-Async streaming version. Uses `Task.Yield()` between pages for UI responsiveness.
+Async streaming version. Waits for the native gate without blocking a thread and uses `Task.Yield()` between pages.
+
+The call itself returns at once and never waits for the gate. It throws immediately if the document is disposed or the format cannot be streamed (`ImageFormat.Tiff`). An empty document is reported (`InvalidOperationException`) when enumeration starts, because reading the page count is native work. The same holds for `StreamJpegBytesAsync`.
 
 ```csharp
 await foreach (var bytes in document.StreamImageBytesAsync(ImageFormat.Jpeg, 85, 200))
@@ -318,7 +336,7 @@ document.SaveAsTiff(stream, dpi: 200);
 
 #### SaveAsTiffAsync(...)
 
-Async versions of both file and stream overloads. Uses `Task.Yield()` between pages for responsiveness.
+Async versions of both file and stream overloads. They wait for the native gate without blocking a thread and use `Task.Yield()` between pages.
 
 ```csharp
 await document.SaveAsTiffAsync("output.tiff", dpi: 200);
@@ -378,7 +396,9 @@ document.Save("modified.pdf");
 
 **Parameters:**
 - `filePath` — Output file path
-- `flags` — Save flags (0 for standard save)
+- `flags` — Save flags (0 for standard save, `PDFium.FPDF_INCREMENTAL` for an incremental save)
+
+The document is serialized into a pooled in-memory buffer first and written to the file afterwards, so peak memory includes the full output size.
 
 #### SaveToStream(Stream stream, uint flags = 0)
 
@@ -389,6 +409,12 @@ using var memoryStream = new MemoryStream();
 document.SaveToStream(memoryStream);
 byte[] pdfBytes = memoryStream.ToArray();
 ```
+
+The document is serialized into a pooled in-memory buffer first and written to `stream` in one call afterwards. A slow stream therefore does not hold up other PDF work, and peak memory includes the full output size.
+
+**Exceptions:**
+- `InvalidOperationException` — If PDFium fails to serialize the document
+- Any exception thrown by `stream` (for example `IOException`) propagates unchanged. Before 2.0 a failing stream was reported as `InvalidOperationException`.
 
 ---
 
@@ -582,10 +608,14 @@ public abstract class PdfPageObject : IDisposable
 | Method | Description |
 |--------|-------------|
 | `GetBounds()` | Returns the bounding rectangle of the object |
-| `GetMatrix()` | Returns the transformation matrix |
-| `SetMatrix(matrix)` | Sets the transformation matrix |
+| `GetMatrix()` | Returns the transformation matrix as `(a, b, c, d, e, f)` |
+| `SetMatrix(a, b, c, d, e, f)` | Sets the transformation matrix |
 | `Transform(a, b, c, d, e, f)` | Applies a transformation |
 | `HasTransparency` | Returns whether the object has transparency |
+
+**Note:** Before 2.0, `GetMatrix()` used a wrong native signature and could crash the process. Fixed in 2.0.
+
+An object added to a page belongs to that page. An object removed with `PdfPage.RemoveObject` belongs to the caller again and is tracked by the document: dispose it, or the document disposes it when the document is disposed.
 
 ---
 
@@ -646,6 +676,23 @@ var image = page.AddImage(imageBytes, x: 100, y: 500, width: 200, height: 150);
 Images are decoded using native libraries (libjpeg-turbo and libpng):
 - PNG
 - JPEG
+
+#### Reading Pixels
+
+| Method | Description |
+|--------|-------------|
+| `GetBitmap()` | The image's own pixels, without its mask or transformation, as a `RawBitmap` (BGRA). Returns `null` if the image has no bitmap |
+| `GetRenderedBitmap(PdfPage? page = null)` | The image as it appears on the page, with mask and transformation applied, as a `RawBitmap` (BGRA). Pass the page the image is on for better color handling |
+
+Both return managed pixels. The native bitmap PDFium produces is copied and destroyed by the wrapper, so there is nothing to release. Grayscale and BGR images are expanded to BGRA with full opacity.
+
+```csharp
+RawBitmap? pixels = image.GetBitmap();
+if (pixels != null)
+    Console.WriteLine($"{pixels.Width}x{pixels.Height}, {pixels.Pixels.Length} bytes");
+```
+
+**Changed in 2.0:** these methods returned a native bitmap handle (`IntPtr`) that the caller had to destroy with `PDFium.FPDFBitmap_Destroy`. That function is no longer public, so they return managed pixels instead.
 
 ---
 
@@ -722,7 +769,9 @@ public class PdfForm : IDisposable
 
 ### Thread Safety
 
-This class is **NOT** thread-safe. Do not access the same `PdfForm` instance from multiple threads concurrently.
+One `PdfForm` instance must not be used from two threads at once. Forms of different documents may be used from different threads at the same time; the wrapper serializes the native work.
+
+A form belongs to the document that created it and is disposed with that document. Using a form after its document is disposed throws `ObjectDisposedException`.
 
 ### Methods
 
@@ -905,6 +954,12 @@ Starts with an existing PDF from byte array.
 
 Starts with an existing PDF from stream.
 
+The stream is read from its current position to its end during construction and is left positioned at its end, with the same in-memory and temporary-file rules as [`PdfDocument(Stream)`](#pdfdocumentstream-pdfstream-string-password--null). The merger does not use the stream afterwards, so it can be closed immediately. (Before 2.0 a seekable stream had to stay open for the lifetime of the merger.)
+
+### Thread Safety
+
+One `PdfMerger` instance must not be used from two threads at once. Different mergers and documents may be used from different threads at the same time; the wrapper serializes the native work.
+
 ### Properties
 
 | Property | Type | Description |
@@ -1013,6 +1068,8 @@ merger.Save("merged.pdf");
 #### Save(Stream outputStream, uint flags = 0)
 
 Saves the merged document to a stream.
+
+Both `Save` overloads serialize the document into a pooled in-memory buffer first and write to the file or stream afterwards, so peak memory includes the full output size. An exception thrown by `outputStream` (for example `IOException`) propagates unchanged; `InvalidOperationException` is thrown when PDFium fails to serialize the document.
 
 #### ToBytes(uint flags = 0)
 
@@ -1253,4 +1310,73 @@ public class PdfAttachment
 | `Name` | `string` | File name |
 | `Size` | `long` | File size in bytes |
 | `Data` | `byte[]` | File contents |
+
+---
+
+## PdfiumRuntime
+
+Process-wide coordination for the native PDFium library. PDFium allows one native call per process at a time, across all documents. Every wrapper operation enters this gate once, so callers do not need their own lock around PdfiumWrapper. Most applications never call this class directly.
+
+### Declaration
+
+```csharp
+public static class PdfiumRuntime
+```
+
+### Behavior
+
+- The first gate entry in a process initializes the native library. Any wrapper type can be the first one used.
+- Finalizers of undisposed wrapper objects never call PDFium. They queue the native handles, and the next outermost gate entry on any thread closes them.
+- Copies of the assembly loaded into different `AssemblyLoadContext`s share one gate.
+- `AppContext.SetSwitch("PdfiumWrapper.Diagnostics", true)`, set before the first use of the library, enables internal counters used by the test suite and benchmarks. It is off by default.
+
+### Members
+
+| Member | Description |
+|--------|-------------|
+| `Enter()` | Enters the gate and returns a disposable `PdfiumRuntime.Scope`. Reentrant on the same thread. Dispose the scope exactly once, on the same thread. |
+| `ReleasePending()` | Closes native handles left behind by finalized wrapper objects. This also happens on every outermost gate entry. |
+| `Shutdown()` | Destroys the native library. Throws `InvalidOperationException` if any wrapper object is alive or releases are pending. The library initializes again on next use. Intended for tests and controlled host shutdown. |
+| `IsHeldByCurrentThread` | `true` when the calling thread holds the gate. |
+| `LiveHandleCount` | Number of native handles currently owned by wrapper objects (documents, pages, form environments, detached page objects, bitmaps being encoded), including handles waiting for deferred release. |
+
+#### Enter()
+
+Groups several wrapper calls into one uninterrupted native sequence. Wrapper members called inside the scope reenter the gate without waiting.
+
+```csharp
+using (PdfiumRuntime.Enter())
+{
+    // No other thread runs PDFium work between these calls
+    document.Metadata.Title = "Report";
+    document.Metadata.Author = "Finance";
+}
+```
+
+Never hold a scope across `await`, `yield return`, or a call that may block (I/O, locks, user callbacks). While it is held, every other PdfiumWrapper caller in the process waits.
+
+#### ReleasePending()
+
+```csharp
+// After dropping objects without Dispose(), once the GC has finalized them
+PdfiumRuntime.ReleasePending();
+```
+
+#### Shutdown()
+
+```csharp
+document.Dispose();
+PdfiumRuntime.Shutdown(); // throws if anything is still alive
+```
+
+---
+
+## The PDFium Class in 2.0
+
+**Breaking change:** the raw native imports on the `PDFium` class (192 functions such as `PDFium.FPDF_LoadDocument` or `PDFium.FPDF_RenderPageBitmap`) are `internal` in 2.0. A raw call bypassed the gate and was unsafe next to any other use of the library. There is no supported raw-call path in 2.0; functionality that is needed is exposed through the wrapper types.
+
+The `PDFium` class itself stays public for its constants and structs, for example:
+
+- `PDFium.FPDF_ANNOT`, `PDFium.FPDF_PRINTING` and the other render flags for `PdfPage.RenderToBytes`
+- `PDFium.FPDF_INCREMENTAL` and the other save flags for `Save` / `SaveToStream`
 

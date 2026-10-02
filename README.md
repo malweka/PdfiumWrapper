@@ -147,9 +147,25 @@ This library includes native binaries for:
 
 Native libraries bundled: **PDFium** (PDF rendering), **libtiff** + **tiff_shim** (TIFF export), **libjpeg-turbo** (JPEG encoding/decoding), **pdfium_png** (PNG encoding/decoding, statically links libpng + zlib-ng). See [Building Native Libraries](docs/BUILDING-NATIVE-LIBS.md) for compilation instructions.
 
-## Thread Safety Warning
+## Thread Safety
 
-⚠️ **Important:** PDFium is not thread-safe. Do not access the same `PdfDocument`, `PdfForm`, or `PdfPage` instance from multiple threads concurrently. See [Best Practices](docs/BEST-PRACTICES.md) for guidance on multi-threaded scenarios.
+PDFium allows one native call per process at a time, across all documents. PdfiumWrapper 2.0 enforces this itself: every operation enters one process-wide gate (`PdfiumRuntime`), so you do not need your own lock around the library.
+
+- **Safe:** using different objects (documents, mergers) from different threads at the same time. Native work (loading, rendering, text, forms, saving) takes turns; image encoding and output writes overlap.
+- **Not supported:** using one `PdfDocument`, `PdfPage`, `PdfForm`, `PdfMerger`, or page object from two threads at once.
+- In async services, prefer the async methods (`SaveAsTiffAsync`, `StreamImageBytesAsync`, ...): they wait for the gate without blocking a thread.
+
+See [Best Practices](docs/BEST-PRACTICES.md) and [High-Throughput Processing](docs/HIGH-THROUGHPUT-PROCESSING.md) for multi-threaded scenarios and sizing.
+
+## Upgrading to 2.0
+
+- The raw native imports on the `PDFium` class (for example `PDFium.FPDF_LoadDocument`) are now `internal`. The class stays public for its constants and structs (`PDFium.FPDF_ANNOT`, `PDFium.FPDF_INCREMENTAL`, ...). There is no supported raw-call path in 2.0; use the wrapper types.
+- New `PdfiumRuntime` class: `Enter()`, `ReleasePending()`, `Shutdown()`, `IsHeldByCurrentThread`, `LiveHandleCount`. See the [API Reference](docs/API-REFERENCE.md#pdfiumruntime).
+- `new PdfDocument(Stream)` and `new PdfMerger(Stream)` read the stream to its end during construction; the stream can be closed immediately afterwards.
+- Saving to a stream writes after the PDF has been serialized in memory. An exception thrown by the destination stream (for example `IOException`) now reaches the caller unchanged.
+- A document owns the forms returned by `GetForm()` and the page objects removed from its pages; disposing the document disposes them.
+- `PdfImageObject.GetBitmap()` and `GetRenderedBitmap()` return managed BGRA pixels (`RawBitmap?`) instead of a native bitmap handle. `GetRenderedBitmap` takes a `PdfPage` instead of a page handle. `PdfImageObject.SetBitmap` and `SetImage`, which took native handles, are `internal`; add images with `PdfPage.AddImage`.
+- `StreamImageBytesAsync` and `StreamJpegBytesAsync` return without waiting for the native gate; an empty document is reported when enumeration starts rather than by the call.
 
 ## License
 

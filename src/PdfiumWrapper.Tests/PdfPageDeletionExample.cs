@@ -5,6 +5,7 @@ namespace PdfiumWrapper.Tests;
 /// <summary>
 /// Example demonstrating page deletion functionality
 /// </summary>
+[Collection("PDF Tests")]
 public class PdfPageDeletionExample
 {
     /// <summary>

@@ -9,6 +9,8 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "PdfiumWrapper.Tests", "Pdfi
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "PdfiumWrapper.Benchmarks", "PdfiumWrapper.Benchmarks\PdfiumWrapper.Benchmarks.csproj", "{63A651AC-09CE-42BC-B6F2-9557D0344562}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "PdfiumWrapper.Tests.Host", "PdfiumWrapper.Tests.Host\PdfiumWrapper.Tests.Host.csproj", "{CBC98B29-559F-462C-A79E-F64D8441313D}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -55,6 +57,18 @@ Global
 		{63A651AC-09CE-42BC-B6F2-9557D0344562}.Release|x64.Build.0 = Release|Any CPU
 		{63A651AC-09CE-42BC-B6F2-9557D0344562}.Release|x86.ActiveCfg = Release|Any CPU
 		{63A651AC-09CE-42BC-B6F2-9557D0344562}.Release|x86.Build.0 = Release|Any CPU
+		{CBC98B29-559F-462C-A79E-F64D8441313D}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{CBC98B29-559F-462C-A79E-F64D8441313D}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{CBC98B29-559F-462C-A79E-F64D8441313D}.Debug|x64.ActiveCfg = Debug|Any CPU
+		{CBC98B29-559F-462C-A79E-F64D8441313D}.Debug|x64.Build.0 = Debug|Any CPU
+		{CBC98B29-559F-462C-A79E-F64D8441313D}.Debug|x86.ActiveCfg = Debug|Any CPU
+		{CBC98B29-559F-462C-A79E-F64D8441313D}.Debug|x86.Build.0 = Debug|Any CPU
+		{CBC98B29-559F-462C-A79E-F64D8441313D}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{CBC98B29-559F-462C-A79E-F64D8441313D}.Release|Any CPU.Build.0 = Release|Any CPU
+		{CBC98B29-559F-462C-A79E-F64D8441313D}.Release|x64.ActiveCfg = Release|Any CPU
+		{CBC98B29-559F-462C-A79E-F64D8441313D}.Release|x64.Build.0 = Release|Any CPU
+		{CBC98B29-559F-462C-A79E-F64D8441313D}.Release|x86.ActiveCfg = Release|Any CPU
+		{CBC98B29-559F-462C-A79E-F64D8441313D}.Release|x86.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE

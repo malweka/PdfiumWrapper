@@ -7,11 +7,22 @@ namespace PdfiumWrapper;
 /// </summary>
 public class PdfMetadata
 {
-    private IntPtr _document;
+    private readonly PdfDocument _owner;
 
-    internal PdfMetadata(IntPtr document)
+    internal PdfMetadata(PdfDocument owner)
     {
-        _document = document;
+        _owner = owner;
+    }
+
+    /// <summary>The document handle. The native gate must be held.</summary>
+    private IntPtr Handle
+    {
+        get
+        {
+            PdfiumRuntime.AssertHeld();
+            _owner.ThrowIfDisposed();
+            return _owner.Document;
+        }
     }
 
     /// <summary>
@@ -102,7 +113,8 @@ public class PdfMetadata
     {
         get
         {
-            PDFium.FPDF_GetFileVersion(_document, out int version);
+            using var _ = PdfiumRuntime.Enter();
+            PDFium.FPDF_GetFileVersion(Handle, out int version);
             return version;
         }
     }
@@ -138,14 +150,16 @@ public class PdfMetadata
     public string 
         GetMetadataString(string tag)
     {
-        ulong length = PDFium.FPDF_GetMetaText(_document, tag, IntPtr.Zero, 0);
+        using var _ = PdfiumRuntime.Enter();
+        var document = Handle;
+        ulong length = PDFium.FPDF_GetMetaText(document, tag, IntPtr.Zero, 0);
         if (length == 0)
             return string.Empty;
 
         var buffer = Marshal.AllocHGlobal((int)length);
         try
         {
-            PDFium.FPDF_GetMetaText(_document, tag, buffer, length);
+            PDFium.FPDF_GetMetaText(document, tag, buffer, length);
             return Marshal.PtrToStringUni(buffer) ?? string.Empty;
         }
         finally
@@ -159,7 +173,8 @@ public class PdfMetadata
     /// </summary>
     public bool SetMetadataString(string tag, string value)
     {
-        return PDFium.FPDF_SetMetaText(_document, tag, value ?? string.Empty);
+        using var _ = PdfiumRuntime.Enter();
+        return PDFium.FPDF_SetMetaText(Handle, tag, value ?? string.Empty);
     }
 
     /// <summary>
@@ -186,6 +201,7 @@ public class PdfMetadata
     public void SetAllMetadata(string title = null, string author = null, string subject = null,
         string keywords = null, string creator = null, string producer = null)
     {
+        using var _ = PdfiumRuntime.Enter();
         if (title != null) Title = title;
         if (author != null) Author = author;
         if (subject != null) Subject = subject;
@@ -199,6 +215,7 @@ public class PdfMetadata
     /// </summary>
     public void ClearAllMetadata()
     {
+        using var _ = PdfiumRuntime.Enter();
         Title = string.Empty;
         Author = string.Empty;
         Subject = string.Empty;
@@ -214,6 +231,7 @@ public class PdfMetadata
     /// </summary>
     public Dictionary<string, string> GetAllMetadata()
     {
+        using var _ = PdfiumRuntime.Enter();
         return new Dictionary<string, string>
         {
             { "Title", Title },

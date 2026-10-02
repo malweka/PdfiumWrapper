@@ -312,8 +312,8 @@ This guide covers common issues and their solutions when using PdfiumWrapper.
 
 1. **Reduce DPI for large documents**
    ```csharp
-   // A 8.5x11 page at 300 DPI = ~8.4 MB per page (uncompressed)
-   // At 150 DPI = ~2.1 MB per page
+   // A US Letter page rendered as BGRA at 300 DPI is about 32 MiB (uncompressed)
+   // At 150 DPI it is about 8 MiB
    document.SaveAsPngs("output", dpi: 150);
    ```
 
@@ -340,22 +340,28 @@ This guide covers common issues and their solutions when using PdfiumWrapper.
    }
    ```
 
-4. **Force garbage collection for large batches**
+4. **Stream encoded pages instead of collecting them, and bound how many documents are processed at once**
    ```csharp
    foreach (var pdfFile in largePdfList)
    {
-       using (var doc = new PdfDocument(pdfFile))
+       using var doc = new PdfDocument(pdfFile);
+
+       int pageNumber = 0;
+       foreach (var bytes in doc.StreamImageBytes(ImageFormat.Jpeg, 90, 150))
        {
-           // Process...
-       }
-       
-       // Suggest GC after each large document
-       if (i % 10 == 0)
-       {
-           GC.Collect();
-           GC.WaitForPendingFinalizers();
+           File.WriteAllBytes($"{Path.GetFileNameWithoutExtension(pdfFile)}_{++pageNumber:D3}.jpg", bytes);
+           // Only one page's pixels and encoded bytes are alive at a time
        }
    }
+   ```
+
+   Forcing `GC.Collect()` between documents is not a fix. Rendered bitmaps and PDFium's own memory are native and are released by `Dispose()`, not by the garbage collector. `GC.GetTotalMemory` reports managed memory only, so it does not show them either; watch the process working set (`Process.WorkingSet64`) instead.
+
+5. **Large saves and large stream inputs are buffered**
+
+   `Save`, `SaveToStream`, `PdfMerger.Save` and `PdfMerger.ToBytes` serialize the whole PDF into a pooled in-memory buffer before writing it out, so peak memory includes the full output size. `new PdfDocument(stream)` and `new PdfMerger(stream)` hold inputs of up to 64 MB in memory and spool larger ones to a temporary file. The threshold can be changed before loading:
+   ```csharp
+   AppContext.SetData("PdfiumWrapper.SpoolThreshold", 16L * 1024 * 1024); // bytes
    ```
 
 ### Memory Leak
@@ -400,81 +406,117 @@ This guide covers common issues and their solutions when using PdfiumWrapper.
 
    Note: `RawBitmap` is a lightweight record and does not need disposal.
 
+4. **Relying on finalizers**
+
+   An undisposed document, page, merger or detached page object is not closed by its finalizer directly. The finalizer queues the native handles, and the next PdfiumWrapper operation on any thread closes them. In a process that stops using the library for a while, that memory stays allocated until the next operation. Dispose objects explicitly; to release queued handles on demand, call:
+   ```csharp
+   PdfiumRuntime.ReleasePending();
+   ```
+
 ---
 
 ## Threading Issues
+
+PDFium allows one native call per process at a time, across all documents. Before 2.0 the wrapper did not enforce this, so using two documents from two threads could crash or corrupt output even though each thread had its own document. Copying files, loading into byte arrays, or "one document per thread" did not fix that.
+
+PdfiumWrapper 2.0 serializes native work itself through one process-wide gate (`PdfiumRuntime`). Using different documents or mergers from different threads is safe and needs no lock of your own.
 
 ### Random Crashes or Corruption
 
 **Symptom:** Application crashes randomly or produces corrupted output
 
-**Cause:** Accessing PDFium from multiple threads simultaneously
+**Causes in 2.0:**
 
-**Solutions:**
-
-1. **One document per thread**
+1. **One object used from two threads at once.** A `PdfDocument`, `PdfPage`, `PdfForm`, `PdfMerger` or page object must be used by one thread at a time.
    ```csharp
-   // ✅ Safe: Each thread has own document
-   await Parallel.ForEachAsync(files, async (file, ct) =>
+   // ❌ Unsupported: one document shared by parallel workers
+   using var document = new PdfDocument("file.pdf");
+   Parallel.For(0, document.PageCount, i =>
+   {
+       using var page = document.GetPage(i);
+   });
+
+   // ✅ Safe: each worker has its own document
+   await Parallel.ForEachAsync(files, new ParallelOptions { MaxDegreeOfParallelism = 4 }, async (file, ct) =>
    {
        using var doc = new PdfDocument(file);
-       // Process...
+       await doc.SaveAsTiffAsync(Path.ChangeExtension(file, ".tiff"), 200);
    });
    ```
 
-2. **Serialize access with locks**
-   ```csharp
-   private readonly object _pdfLock = new object();
-   
-   public void ProcessPage(int index)
-   {
-       lock (_pdfLock)
-       {
-           using var page = _document.GetPage(index);
-           // Process...
-       }
-   }
-   ```
+   If one object really must be shared, guard that object with your own `SemaphoreSlim(1, 1)` or `lock`.
 
-3. **Use SemaphoreSlim for async code**
-   ```csharp
-   private readonly SemaphoreSlim _semaphore = new(1, 1);
-   
-   public async Task ProcessPageAsync(int index)
-   {
-       await _semaphore.WaitAsync();
-       try
-       {
-           using var page = _document.GetPage(index);
-           // Process...
-       }
-       finally
-       {
-           _semaphore.Release();
-       }
-   }
-   ```
+2. **A native abort on malformed input.** See [Process Aborts on a Damaged PDF](#process-aborts-on-a-damaged-pdf).
+
+3. **An older package version.** Versions before 2.0 have no gate. Upgrade, or serialize every PdfiumWrapper call in the process behind one lock.
 
 ### AccessViolationException
 
 **Symptom:** `AccessViolationException` in native code
 
 **Causes:**
-- Using disposed document/page
-- Concurrent access from multiple threads
-- Corrupted PDF file
+- One object used from two threads at once (see above)
+- A damaged PDF that PDFium does not reject cleanly
+- `PdfPageObject.GetMatrix()` on a version before 2.0: it used a wrong native signature and could crash. Fixed in 2.0.
 
-**Solutions:**
+Using a disposed document, page, form or page object does not reach native code; it throws `ObjectDisposedException`.
+
+### Process Aborts on a Damaged PDF
+
+**Symptom:** The whole process exits while opening or rendering a corrupt or hostile file
+
+A native abort inside PDFium cannot be caught as a .NET exception; it ends the hosting process.
+
+As a characterization, 25 deliberately damaged inputs were processed in a child process on win-x64 and linux-x64: each of the five test fixtures truncated at 25%, 50% and 75%, with 1% of its bytes flipped, and with its cross-reference data zeroed. Every input was either rejected with `InvalidOperationException` (PDFium error 3) or processed. None aborted the process.
+
+That sample does not prove PDFium never aborts. Services that must survive hostile input should run conversions in a separate process, so a native abort takes down a worker and not the service.
+
+### ObjectDisposedException After Disposing a Document
+
+**Symptom:** `ObjectDisposedException` from a page, form or page object that was not disposed explicitly
+
+**Cause:** A document owns its pages, the forms returned by `GetForm()`, and the page objects removed from its pages with `RemoveObject`. Disposing the document disposes all of them.
+
 ```csharp
-// Check if disposed before use
-if (_disposed)
-    throw new ObjectDisposedException(nameof(PdfDocument));
+PdfForm form;
+using (var document = new PdfDocument("form.pdf"))
+{
+    form = document.GetForm()!;
+}
 
-// Don't access after dispose
-using var document = new PdfDocument("file.pdf");
-using var page = document.GetPage(0);
-// After this block, both are disposed - don't access them!
+form.GetAllFormFields(); // ObjectDisposedException: the document is gone
 ```
+
+**Solution:** Keep the document alive for as long as anything obtained from it is in use.
+
+### Save Throws IOException
+
+**Symptom:** `SaveToStream` or `PdfMerger.Save(stream)` throws `IOException` (or another exception type from the destination stream), where earlier versions threw `InvalidOperationException("Failed to save...")`
+
+**Cause:** In 2.0 the PDF is serialized into memory first and written to the stream afterwards. An exception thrown by the stream now propagates unchanged.
+
+**Solution:** Catch the stream's own exception types around save calls. `InvalidOperationException` is still thrown when PDFium itself fails to serialize the document.
+
+### Thread-Pool Starvation or a Slow Async Service
+
+**Symptom:** Unrelated requests stall while many PDF conversions are in flight
+
+**Cause:** Synchronous methods, including constructors, block the calling thread while they wait for the gate. Calling them from many thread-pool threads at once leaves no threads for other work. With 192 concurrent conversions on a pool pinned to 24 threads, a heartbeat work item waited 1.6 ms (p99) when the conversions used the async API and about 2.5 s when they called the synchronous API from pool threads.
+
+**Solution:** Use the async methods (`SaveAsTiffAsync`, `RenderPagesAsync`, `StreamImageBytesAsync`, `SaveAsJpegsAsync`, `SaveAsImagesAsync`, `ProcessAllPagesAsync`). They wait for the gate without blocking a thread. Also bound how many conversions run at once.
+
+```csharp
+using var document = new PdfDocument(path);
+await document.SaveAsTiffAsync(outputPath, 200);
+```
+
+### PdfiumRuntime.Shutdown Throws
+
+**Symptom:** `InvalidOperationException: Cannot shut down PDFium: N live handles, M pending releases.`
+
+**Cause:** `Shutdown()` destroys the native library and refuses to do so while any wrapper object is alive.
+
+**Solution:** Dispose every document, page, form, merger and detached page object first. `PdfiumRuntime.LiveHandleCount` shows how many native handles are still open. Objects that were dropped without `Dispose()` are released once the garbage collector has finalized them and `PdfiumRuntime.ReleasePending()` (or any other operation) has run. `Shutdown()` is meant for tests and controlled host shutdown; the library initializes again on next use.
 
 ---
 

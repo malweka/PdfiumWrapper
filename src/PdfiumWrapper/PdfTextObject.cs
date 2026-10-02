@@ -10,7 +10,7 @@ public class PdfTextObject : PdfPageObject
     private IntPtr _font;
     private float _fontSize;
 
-    internal PdfTextObject(IntPtr handle, IntPtr documentHandle, IntPtr font, float fontSize) 
+    internal PdfTextObject(IntPtr handle, IntPtr documentHandle, IntPtr font, float fontSize)
         : base(handle, documentHandle)
     {
         _font = font;
@@ -22,6 +22,8 @@ public class PdfTextObject : PdfPageObject
     /// </summary>
     public static PdfTextObject Create(IntPtr documentHandle, string fontName = "Helvetica", float fontSize = 12)
     {
+        using var _ = PdfiumRuntime.Enter();
+
         var font = PDFium.FPDFText_LoadStandardFont(documentHandle, fontName);
         if (font == IntPtr.Zero)
             throw new InvalidOperationException($"Failed to load font: {fontName}");
@@ -43,6 +45,7 @@ public class PdfTextObject : PdfPageObject
     {
         set
         {
+            using var _ = PdfiumRuntime.Enter();
             ThrowIfDisposed();
             if (!PDFium.FPDFText_SetText(Handle, value))
                 throw new InvalidOperationException("Failed to set text");
@@ -56,6 +59,7 @@ public class PdfTextObject : PdfPageObject
     {
         set
         {
+            using var _ = PdfiumRuntime.Enter();
             ThrowIfDisposed();
             // Close old font
             if (_font != IntPtr.Zero)
@@ -71,6 +75,7 @@ public class PdfTextObject : PdfPageObject
     /// <summary>
     /// Set or get the font size
     /// </summary>
+    [NoNativeCall]
     public float FontSize
     {
         get => _fontSize;
@@ -90,6 +95,7 @@ public class PdfTextObject : PdfPageObject
     {
         set
         {
+            using var _ = PdfiumRuntime.Enter();
             ThrowIfDisposed();
             PDFium.FPDFPageObj_SetFillColor(Handle, value.R, value.G, value.B, value.A);
         }
@@ -102,6 +108,7 @@ public class PdfTextObject : PdfPageObject
     {
         set
         {
+            using var _ = PdfiumRuntime.Enter();
             ThrowIfDisposed();
             PDFium.FPDFPageObj_SetStrokeColor(Handle, value.R, value.G, value.B, value.A);
         }
@@ -111,6 +118,7 @@ public class PdfTextObject : PdfPageObject
     {
         if (disposing)
         {
+            using var _ = PdfiumRuntime.Enter();
             if (_font != IntPtr.Zero)
             {
                 PDFium.FPDFFont_Close(_font);
