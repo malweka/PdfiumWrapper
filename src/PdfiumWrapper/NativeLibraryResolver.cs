@@ -1,4 +1,5 @@
 using System.Reflection;
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 
 namespace PdfiumWrapper;
@@ -10,15 +11,15 @@ namespace PdfiumWrapper;
 /// </summary>
 internal static class NativeLibraryResolver
 {
-    private static int _initialized;
+    static NativeLibraryResolver()
+    {
+        // The CLR guarantees no thread observes this type before the static constructor completes,
+        // so no P/Invoke can be reached before the resolver is registered.
+        NativeLibrary.SetDllImportResolver(typeof(NativeLibraryResolver).Assembly, Resolve);
+    }
 
     internal static void EnsureRegistered()
-    {
-        if (Interlocked.CompareExchange(ref _initialized, 1, 0) == 0)
-        {
-            NativeLibrary.SetDllImportResolver(typeof(NativeLibraryResolver).Assembly, Resolve);
-        }
-    }
+        => RuntimeHelpers.RunClassConstructor(typeof(NativeLibraryResolver).TypeHandle);
 
     private static IntPtr Resolve(string libraryName, Assembly assembly, DllImportSearchPath? searchPath)
     {

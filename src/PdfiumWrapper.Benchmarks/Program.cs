@@ -5,6 +5,12 @@ using BenchmarkDotNet.Running;
 using Perfolizer.Horology;
 using PdfiumWrapper.Benchmarks;
 
+// "burst" runs the deadline-oriented batch runner instead of BenchmarkDotNet.
+if (args.Length > 0 && args[0] == "burst")
+{
+    return BurstRunner.Run(args.Skip(1).ToArray());
+}
+
 var config = ManualConfig.CreateMinimumViable()
     .AddExporter(new CsvExporter(
         CsvSeparator.Comma,
@@ -21,10 +27,27 @@ var config = ManualConfig.CreateMinimumViable()
         timeUnit: TimeUnit.Millisecond,
         sizeUnit: null));
 
-BenchmarkRunner.Run(new[]
+var benchmarkTypes = new[]
 {
-    BenchmarkConverter.TypeToBenchmarks(typeof(PdfToJpegBenchmark), config),
-    BenchmarkConverter.TypeToBenchmarks(typeof(PdfToPngBenchmark), config),
-    BenchmarkConverter.TypeToBenchmarks(typeof(PdfToTiffBenchmark), config),
-    BenchmarkConverter.TypeToBenchmarks(typeof(PdfMergeBenchmark), config),
-});
+    typeof(PdfToJpegBenchmark),
+    typeof(PdfToPngBenchmark),
+    typeof(PdfToTiffBenchmark),
+    typeof(PdfMergeBenchmark),
+    typeof(SmallDocumentBenchmark),
+};
+
+// "--only A,B" restricts the run to the named benchmark classes.
+int onlyIndex = Array.IndexOf(args, "--only");
+if (onlyIndex >= 0 && onlyIndex + 1 < args.Length)
+{
+    var names = args[onlyIndex + 1].Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+    benchmarkTypes = benchmarkTypes.Where(t => names.Contains(t.Name, StringComparer.OrdinalIgnoreCase)).ToArray();
+    if (benchmarkTypes.Length == 0)
+    {
+        Console.Error.WriteLine($"--only matched no benchmark class: {args[onlyIndex + 1]}");
+        return 3;
+    }
+}
+
+BenchmarkRunner.Run(benchmarkTypes.Select(t => BenchmarkConverter.TypeToBenchmarks(t, config)).ToArray());
+return 0;

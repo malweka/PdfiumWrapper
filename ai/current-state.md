@@ -2,9 +2,15 @@
 
 ## Current focus
 
-Reviewed and rewrote `ai/plans/plan-pdfium-concurrency.md` (2026-09-30) into an implementation-ready specification with binding design rules, reference code, test skeletons, and benchmark specs. No library code, tests, or benchmarks were changed or run.
+Implementation-readiness check of `ai/plans/plan-pdfium-concurrency.md` against the code (2026-10-02). The plan is implementable, but section 4 reference code has defects that must be corrected during Phase 2 (listed under Blockers or open questions). No library code, tests, or benchmarks were changed or run. The plan file itself was not edited.
 
 ## Completed
+
+### Latest task: implementation-readiness check (2026-10-02)
+
+- Confirmed against code: 192 PDFium `LibraryImport`s (17 + 32 + 32 + 71 + 6 + 34); finalizers at `PdfDocument.cs:1340`, `PdfPage.cs:467`, `PdfMerger.cs:456`, `PdfPageObject.cs:141`; init only in `PdfDocument` static constructor (`:27`); resolver compare-exchange (`NativeLibraryResolver.cs:15`); `TiffWriter.cs:221`; `InternalsVisibleTo` exists for `PdfiumWrapper.Tests` only; no test or benchmark uses raw `PDFium.*` imports.
+- Confirmed environment: .NET SDK 10.0.401, no git tags yet, Docker Desktop present (linux-x64 test runs possible locally), PR CI runs tests on `ubuntu-latest` only.
+- Found reference-code defects and plan/code mismatches; see Blockers or open questions.
 
 ### Latest task: plan review and rewrite (2026-09-30)
 
@@ -94,6 +100,19 @@ Reviewed and rewrote `ai/plans/plan-pdfium-concurrency.md` (2026-09-30) into an 
 When implementation is requested, read `ai/plans/plan-pdfium-concurrency.md` sections 3 and 4 first, then execute Phase 0 (doc correction, `[Collection]` on `PdfPageDeletionExample`, `NativeLibraryResolver` static-constructor barrier, `PdfiumWrapper.Tests.Host` with `init-race`). Tag `bench-baseline-pre-gate` and run Phase 1 before touching `PdfiumRuntime`. Rule R9 is approved; Phase 2 may proceed directly after Phase 1.
 
 ## Blockers or open questions
+
+Findings from the 2026-10-02 readiness check (corrections to apply in Phase 2; not yet written into the plan):
+
+- **`EnterAsync` records the wrong owner thread (plan 4.1).** `OnAcquired` runs inside the async method on the thread that completed `WaitAsync`. If the returned `ValueTask` completes before the caller registers its continuation, the caller resumes on a different thread while `s_owner` names a now-free pool thread. Result: nested `Enter()` self-deadlocks, and that pool thread can later "reenter" without holding the semaphore. Fix: claim ownership on the consuming thread (custom awaiter whose `GetResult()` sets owner, runs init and drain).
+- **Drain can close a document before its pages (plan 4.1/4.4).** The drain walks kinds 0 to 4 while the finalizer thread enqueues page then document; a page enqueued after the drain passed kind 3 is skipped while its document is picked up in kind 4. Fix: snapshot queue counts in reverse kind order (4 to 0) before draining, and drain only those counts.
+- **Backing memory released before the deferred close (plan 4.4/4.5).** The `PdfDocument` finalizer calls `ReleasePinnedMemoryDocument()` immediately, but `FPDF_CloseDocument` runs later in the drain. Same for `PdfForm`: `FPDFDOC_InitFormFillEnvironment` is passed `ref _formInfo` (an object field; the pinned `GCHandle` at `PdfForm.cs:42` pins a boxed copy), so a deferred `ExitFormFillEnvironment` would run after the `PdfForm` is collected. Fix: keep-alive handles released by the drain after the document close; allocate `FPDF_FORMFILLINFO` in native memory.
+- **Spool temp file cannot be deleted while open on Windows.** PDFium opens with `FILE_SHARE_READ | FILE_SHARE_WRITE` only (`cfx_fileaccess_windows.cpp:32`). Plan 4.5 also shows `using var spool` in the constructor, which contradicts "deleted on document dispose or finalizer". Needs a deferred-delete path that never throws on the finalizer thread.
+- **Plan/code mismatches.** No `_form` field: `GetForm()` (`PdfDocument.cs:1256`) returns a new caller-owned `PdfForm` per call and `PdfForm` has no finalizer, so the document must track a set of forms. Plan names `Save(Stream, SaveFlags)`/`SaveAsync(Stream)`; actual API is `Save(string, uint)` and `SaveToStream(Stream, uint)`, no async save. `SaveAsTiffAsync` has a `threshold` parameter and no `CancellationToken`. `PdfMerger` holds no source documents. `SpooledInput` ignores `MemoryStream.Position`/segment offset and does not advance the stream to its end, both of which current constructors do.
+- **Existing tests that will need rewriting.** `PdfMergerTests.cs:173` and `:256` assert on `StreamDocumentLoader` through reflection.
+- **Smaller gaps to settle while implementing.** `InternalsVisibleTo` for `PdfiumWrapper.Tests.Host` and `PdfiumWrapper.Benchmarks`; `LiveHandleCount` accounting when a page object is attached to or removed from a page; `BootstrapLock` can hand two load contexts different lock objects on first use; `Shutdown()` tests belong in the host because leaked handles from other tests make `LiveHandleCount == 0` unreliable in the shared test process; tag `bench-baseline-pre-gate` after adding the Phase 1 benchmark classes so the baseline can be rerun.
+- **Needed from the owner.** Go-ahead to commit and tag locally (Phase 1 requires both); `N` and `T` before the Phase 4 decision gate.
+
+Earlier notes:
 
 - No blocker to the requested plan. The current wrapper still does not enforce PDFium's threading contract; no remedy has been implemented yet.
 - The starvation test bound (heartbeat p99 under 100 ms) and the callback-isolation bound (3x solo p95) are initial guesses to be tuned after the first run and recorded in `benchmark.md`.

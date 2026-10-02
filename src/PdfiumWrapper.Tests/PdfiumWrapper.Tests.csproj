@@ -19,6 +19,8 @@
 
   <ItemGroup>
     <ProjectReference Include="..\PdfiumWrapper\PdfiumWrapper.csproj" />
+    <!-- Built first so HostRunner can launch it; its assembly is not referenced. -->
+    <ProjectReference Include="..\PdfiumWrapper.Tests.Host\PdfiumWrapper.Tests.Host.csproj" ReferenceOutputAssembly="false" Private="false" />
   </ItemGroup>
 
   <ItemGroup>
