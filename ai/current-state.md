@@ -2,11 +2,22 @@
 
 ## Current focus
 
-Global installation of `ai-pr-review` is complete: copied PonaFlow's skill to `C:/Users/hamsm/.codex/skills/ai-pr-review` and verified matching SHA-256 hashes. It will be available across Codex projects on the next turn.
+Follow-up verification of PR #15 commit `f3b15a1130567dc00f604c61b5aab9bc98a9e242` is complete (2026-10-02). The four original reproductions are fixed; one additional accepted-weight overflow edge case remains in `BurstRunner.InterleavingStride`. Independently ran 228 passing tests on Windows and in Linux Docker; exact-commit CI is green, including 228 Linux tests and all four platform build/package jobs. No implementation fixes were made during verification.
 
-PR #15 architecture review is complete (2026-10-02), at head `ecb22a546a403ccb05bded8d7180edf08272276a`, against merge base `9021729ca8e6cfa420a15648dfddb2e779820187`. Verdict: request changes for four reproduced findings below. Release 1 of `ai/plans/plan-pdfium-concurrency.md` is implemented on `feature/pdfium-concurrency-plan` (version 2.0.0); Release 2 remains deferred pending the owner's capacity/deployment inputs. Review only: no implementation or test sources were changed.
+Release 1 of `ai/plans/plan-pdfium-concurrency.md` is implemented on `feature/pdfium-concurrency-plan` (version 2.0.0); Release 2 remains deferred pending the owner's capacity/deployment inputs. The global `ai-pr-review` skill is installed and available.
 
 ## Completed
+
+### Latest task: verify PR #15 review fixes at f3b15a1 (2026-10-02)
+
+- Read startup files, the global `ai-pr-review` skill, concurrency plan updates, and the 18-file follow-up diff against `ecb22a5`. Confirmed PR head and local HEAD are `f3b15a1130567dc00f604c61b5aab9bc98a9e242`; the working tree was clean when verification started.
+- Confirmed the regression tests exercise output preservation across kept/cleaned runs, exact 36/38 allocation for `png:18,jpeg:19`, bitmap cleanup/accounting, managed validation timing, factory return under contention, and constrained-pool async streaming. Managed bitmap returns make caller-owned native-bitmap shutdown checks unnecessary; native leases remain counted during the internal copy.
+- Independently reran the full suite: 228 passed on Windows; 228 passed in a Linux .NET 8 SDK Docker container with a read-only repository mount and isolated build outputs. Existing compiler/analyzer warnings remain.
+- Verified GitHub Actions run `37012904355` for the exact commit completed successfully: Linux build/tests (228 passed), plus build/package jobs for win-x64, osx-x64, osx-arm64 and linux-x64. macOS native runtime tests were not executed. Run: https://github.com/malweka/PdfiumWrapper/actions/runs/37012904355.
+- Temporary pixel probes checked exact BGRA bytes and cleanup for Gray, BGR, BGRx and BGRA source buffers (including row padding), and confirmed public `GetBitmap()` pixels exactly match the rendered PNG source.
+- Confirmed `InterleavingStride(100) == 37`, so the recorded default-mix job sequence is unchanged; performance benchmarks were not rerun.
+- Found a new overflow boundary at `BurstRunner.cs:406`: accepted weights `png:1073741823,jpeg:1073741823` total 2,147,483,646; `37 + totalWeight` overflows, the search never runs and `InterleavingStride` returns zero. A direct compiled probe confirmed zero; every job then uses slot zero. Fix with a widened search bound or reject out-of-range weight totals, and test positive/coprime stride at the boundary.
+- Temporary probes/reports are under `%TEMP%/pdfium-pr15-f3b15a1-1544d7a0fcb04cdcad1a88d0c3845d10/`; Windows test log is `%TEMP%/pdfium-pr15-f3b15a1-tests.log`. Only this state record was edited by the verification agent. Unrelated working-tree edits to README and image setter visibility appeared during verification and were excluded from the commit review.
 
 ### Latest task: install ai-pr-review globally (2026-10-02)
 
@@ -46,7 +57,9 @@ Key measurements (one machine: i7-13700F, 24 logical processors, win-x64):
 
 - Pull request: https://github.com/malweka/PdfiumWrapper/pull/15 (`feature/pdfium-concurrency-plan` into `main`).
 - Fixed four review findings: the burst runner no longer deletes the `--out` directory (run-owned child directory); its format mix is exact for any weights; `PdfImageObject.GetBitmap()` / `GetRenderedBitmap()` return managed BGRA pixels instead of an unreleasable native handle; `StreamImageBytesAsync` / `StreamJpegBytesAsync` no longer wait synchronously for the gate.
-- Added `BurstRunnerTests` (runs the benchmark executable as a child process), tests for async stream admission and validation timing, a `stream` mode in the starvation scenario, and an image-bitmap test. 228 tests pass on win-x64 and linux-x64.
+- Added `BurstRunnerTests` (runs the benchmark executable as a child process), tests for async stream admission and validation timing, a `stream` mode in the starvation scenario, and an image-bitmap test.
+- Second pass: burst runner rejects mix totals above 10,000 (weights near `int.MaxValue` overflowed the stride search and gave a stride of zero); the stride search uses 64-bit arithmetic and the report lists `mixTotalWeight` and `mixStride`. `PdfImageObject.SetBitmap` and `SetImage` are `internal`.
+- 237 tests pass on win-x64 and linux-x64.
 
 ### Previous task: implementation-readiness check (2026-10-02)
 
@@ -132,25 +145,25 @@ Key measurements (one machine: i7-13700F, 24 logical processors, win-x64):
 
 ## In progress
 
-- Nothing active. The global skill installation and PR #15 review are complete; the four PR findings await an implementation request.
+- Nothing active. Verification is complete; the stride overflow edge case awaits correction. The four original review reproductions are resolved.
 
 ## Next recommended step
 
-0. Address PR #15 findings: isolate benchmark outputs in a fresh run-owned child directory; replace raw image-bitmap returns with managed pixels or tracked disposable ownership; move async streaming's native page-count validation to async admission; fix weighted format scheduling for totals sharing a factor with 37. Add regressions for these paths and rerun the full suite before merge.
+0. Correct the stride-search bound at `BurstRunner.cs:406` for large accepted weight totals (widen arithmetic or validate/reject the boundary), add a regression asserting a positive coprime stride, and run the relevant benchmark tests. The original four regressions and full suite already pass; exact-commit CI is green.
 1. Project owner supplies `N` (documents per burst), `T` (window), the real document mix, and whether the consuming service can run several replicas behind its queue. With those, apply rule R13: if replicas are possible, size them from `benchmark.md` and stop; if not, build the process pool (plan Phases 5 to 7).
 2. Run the test suite on macOS (osx-x64, osx-arm64); it has only been run on win-x64 and linux-x64.
 3. Review and merge `feature/pdfium-concurrency-plan`. It is a major version (2.0.0): raw `PDFium.*` imports are no longer public.
 
 ## Blockers or open questions
 
-- PR #15 should not merge before its reproduced data-loss issue (`BurstRunner.cs:77-78`) and bitmap/async/format-scheduling defects are addressed. No fixes were authorized during the review.
+- Original four PR #15 findings are resolved at `f3b15a1`; a new large-weight stride-search overflow remains (`BurstRunner.cs:406`). No implementation fixes were requested during verification.
 - The Release 2 decision is open for the reason above. The measurements say a burst of thousands of documents in a short window is beyond one process on the test hardware (usable rate about 1.3 docs/sec per process on the mixed corpus), so some multi-process arrangement is needed; which one is the owner's call.
 - macOS not verified.
 - Cold start with a document first is about 5 ms slower than before: initialization now loads libtiff to install its error handlers. Moving that to the first TIFF write would recover it.
 - Merge benchmark moved between -5.9% and +4.4% by document (buffered save). Peak memory during a save now includes the whole output.
 - `benchmark.db` was not updated with the new runs; the tables are in `benchmark.md` only.
 - The starvation test bound (heartbeat p99 under 100 ms) is loose against the measured 1.3 ms.
-- `PdfImageObject.SetBitmap(IntPtr, IntPtr)` and `SetImage(byte[], IntPtr)` are still public but take native handles that public callers can no longer obtain; `PdfPage.AddImage` is the usable path. Not changed.
+- `PdfImageObject.SetBitmap(IntPtr, IntPtr)` and `SetImage(byte[], IntPtr)` are now `internal` (they take native handles public callers cannot obtain); `PdfPage.AddImage` is the public path. The static `Create(IntPtr documentHandle, ...)` factories on `PdfImageObject`, `PdfTextObject` and `PdfPathObject` are still public and have the same limitation; not changed.
 - `docs/DOCUMENT_PROPERTIES_IMPLEMENTATION.md` still shows pre-gate implementation snippets with raw `PDFium.FPDF_*` calls. `.github/copilot-instructions.md` points at `AGENT.md`; the file is `AGENTS.md`.
 - Other raw import signatures were not audited. The gate-coverage test exercised every public member once and found one wrong signature; imports not reachable from the public API are unchecked.
 - Benchmarks on this machine: run a baseline worktree from the same volume and kind of directory as the repository. A worktree under `%TEMP%` made file opens about 60 µs slower.
@@ -169,6 +182,7 @@ Earlier notes:Earlier notes:
 
 ## Recently changed files
 
+- Current verification session: `ai/current-state.md` only. Other working-tree edits were preserved.
 - Global skill installation session: `C:/Users/hamsm/.codex/skills/ai-pr-review/SKILL.md` (outside the repository), `ai/current-state.md`.
 - Current review session: `ai/current-state.md` only.
 

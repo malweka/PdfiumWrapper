@@ -444,7 +444,8 @@ dotnet run -c Release --project src/PdfiumWrapper.Benchmarks -- streams
 Burst runner notes:
 
 - `--out` is a parent directory. Each run writes into a new `burst-<timestamp>-<id>` child and removes only that child afterwards (`--keep-output true` keeps it and reports its path as `outputDirectory`). Files already in `--out` are never touched.
-- `--mix` weights are honored exactly over every block of total-weight jobs, for any weights; the report lists the resulting `jobsByFormat`. An earlier revision stepped through the mix with a fixed stride of 37, which collapsed to a single format when the weights summed to a multiple of 37. The runs recorded below used `tiff:50,png:30,jpeg:20` (total 100), for which the job sequence is unchanged.
+- `--mix` weights are honored exactly over every block of total-weight jobs; the report lists `mixTotalWeight`, `mixStride` and the resulting `jobsByFormat`. The weights may sum to at most 10,000: use ratios (`png:1,jpeg:1`), not large counts. A larger total is rejected as an argument error, because a batch much shorter than the total would not reflect the mix.
+- The mix is walked with a stride coprime with the total and close to 0.37 of it, so a short run still spreads across the formats. An earlier revision used a fixed stride of 37, which collapsed to a single format when the weights summed to a multiple of 37. The runs recorded below used `tiff:50,png:30,jpeg:20` (total 100), for which the stride is still 37 and the job sequence is unchanged.
 
 Run the pre-gate code from a worktree of the tag. Put the worktree on the same volume and under the same kind of directory as the repository: on this machine a worktree under `%TEMP%` made every file open about 60 µs slower, which doubled the one-page load time and would have been read as a gate result.
 

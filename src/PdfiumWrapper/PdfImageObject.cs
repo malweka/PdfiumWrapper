@@ -25,9 +25,10 @@ public class PdfImageObject : PdfPageObject
     }
 
     /// <summary>
-    /// Set the image from a bitmap
+    /// Set the image from a native PDFium bitmap. Internal: it takes native handles, which
+    /// callers outside the wrapper cannot obtain. <see cref="PdfPage.AddImage"/> is the public path.
     /// </summary>
-    public void SetBitmap(IntPtr bitmap, IntPtr page)
+    internal void SetBitmap(IntPtr bitmap, IntPtr page)
     {
         using var _ = PdfiumRuntime.Enter();
         ThrowIfDisposed();
@@ -46,9 +47,10 @@ public class PdfImageObject : PdfPageObject
     }
 
     /// <summary>
-    /// Set the image from image bytes (PNG, JPEG, etc.)
+    /// Set the image from image bytes (PNG or JPEG). Internal: it takes a native page handle.
+    /// <see cref="PdfPage.AddImage"/> is the public path.
     /// </summary>
-    public void SetImage(byte[] imageBytes, IntPtr page)
+    internal void SetImage(byte[] imageBytes, IntPtr page)
     {
         // Decoding uses libjpeg-turbo / libpng, not PDFium, so it runs before the gate is taken.
         var (bgraPixels, width, height) = DecodeToBgra(imageBytes);

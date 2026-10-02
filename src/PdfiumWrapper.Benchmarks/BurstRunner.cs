@@ -48,6 +48,8 @@ internal static class BurstRunner
         public bool Diagnostics;
         public bool KeepOutput;
 
+        public (string format, int weight)[] ParsedMix = Array.Empty<(string, int)>();
+
         /// <summary>The directory this run writes into: a fresh child of <see cref="Out"/>.</summary>
         public string RunDirectory = "";
     }
@@ -77,8 +79,10 @@ internal static class BurstRunner
             return 3;
         }
 
-        var mix = ParseMix(options.Mix);
-        var jobs = BuildJobs(options, inputs, mix);
+        var mix = options.ParsedMix;
+        int mixTotalWeight = mix.Sum(m => m.weight);
+        int mixStride = InterleavingStride(mixTotalWeight);
+        var jobs = BuildJobs(options, inputs, mix, mixTotalWeight, mixStride);
 
         // --out may point at a directory that already holds other data. Never delete it: every run
         // writes into its own new child directory and cleans up only that.
@@ -180,6 +184,8 @@ internal static class BurstRunner
             ["callers"] = options.Callers,
             ["mode"] = options.Mode,
             ["mix"] = options.Mix,
+            ["mixTotalWeight"] = mixTotalWeight,
+            ["mixStride"] = mixStride,
             ["jobsByFormat"] = jobs.GroupBy(j => j.Format).ToDictionary(g => g.Key, g => (object?)g.Count()),
             ["outputDirectory"] = options.KeepOutput ? options.RunDirectory : null,
             ["dpi"] = options.Dpi,
@@ -366,10 +372,8 @@ internal static class BurstRunner
             pages, bytes, error);
     }
 
-    private static Job[] BuildJobs(Options options, string[] inputs, (string format, int weight)[] mix)
+    private static Job[] BuildJobs(Options options, string[] inputs, (string format, int weight)[] mix, int totalWeight, int stride)
     {
-        int totalWeight = mix.Sum(m => m.weight);
-        int stride = InterleavingStride(totalWeight);
         int abandonEvery = options.AbandonFraction > 0 ? Math.Max(1, (int)Math.Round(1 / options.AbandonFraction)) : 0;
         var jobs = new Job[options.N];
 
@@ -394,16 +398,32 @@ internal static class BurstRunner
         return jobs;
     }
 
+    /// <summary>Largest accepted sum of mix weights.</summary>
+    /// <remarks>
+    /// Proportions are exact over each block of total-weight jobs. A total far beyond any real
+    /// batch size would leave the first jobs in the first format, so such mixes are rejected
+    /// rather than run with a misleading workload. Use ratios: <c>png:1,jpeg:1</c>, not
+    /// <c>png:1000000,jpeg:1000000</c>.
+    /// </remarks>
+    internal const int MaxTotalWeight = 10_000;
+
     /// <summary>
-    /// The smallest stride from 37 upwards that is coprime with <paramref name="totalWeight"/> and
-    /// does not step through the slots one by one (which would run each format in a single block).
-    /// A stride that shares a factor with the total reaches only some slots: with a total of 37,
-    /// a fixed stride of 37 would put every job in slot 0.
+    /// The step used to walk the mix slots. It is coprime with <paramref name="totalWeight"/>, so
+    /// every block of total-weight consecutive jobs visits each slot exactly once, and it is close
+    /// to 0.37 of the total so that a shorter run still spreads across the formats. For the
+    /// default total of 100 this is 37. A step of +1 or -1, which would run each format in one
+    /// block, is avoided when the total allows another choice.
     /// </summary>
+    /// <returns>A positive stride coprime with <paramref name="totalWeight"/>.</returns>
     internal static int InterleavingStride(int totalWeight)
     {
-        int firstCoprime = 0;
-        for (int stride = 37; stride < 37 + Math.Max(1, totalWeight); stride++)
+        if (totalWeight is < 1 or > MaxTotalWeight)
+            throw new ArgumentOutOfRangeException(nameof(totalWeight), $"The mix total must be between 1 and {MaxTotalWeight}.");
+
+        // long arithmetic: the bound below must not wrap.
+        long start = Math.Max(1L, (long)Math.Round(0.37 * totalWeight));
+        long firstCoprime = 0;
+        for (long stride = start; stride < start + totalWeight; stride++)
         {
             if (Gcd(stride, totalWeight) != 1)
                 continue;
@@ -411,16 +431,17 @@ internal static class BurstRunner
             if (firstCoprime == 0)
                 firstCoprime = stride;
 
-            int step = stride % totalWeight;
+            long step = stride % totalWeight;
             if (step != 1 && step != totalWeight - 1)
-                return stride;
+                return (int)stride;
         }
 
         // Totals such as 1, 2, 3, 4 and 6 have no coprime step other than +1 and -1.
-        return firstCoprime;
+        // totalWeight consecutive integers always include one coprime with it, so this is positive.
+        return (int)firstCoprime;
     }
 
-    private static int Gcd(int a, int b)
+    private static long Gcd(long a, long b)
     {
         while (b != 0)
             (a, b) = (b, a % b);
@@ -438,9 +459,13 @@ internal static class BurstRunner
             .ToArray();
         if (parts.Length == 0)
             throw new ArgumentException("--mix must contain at least one format with a positive weight");
+
+        long total = parts.Sum(p => (long)p.Item2);
+        if (total > MaxTotalWeight)
+            throw new ArgumentException(
+                $"--mix weights sum to {total}; the largest supported total is {MaxTotalWeight}. Use ratios, for example png:1,jpeg:1.");
         return parts;
     }
-
     private static Options Parse(string[] args)
     {
         var options = new Options();
@@ -474,6 +499,7 @@ internal static class BurstRunner
             throw new ArgumentException("--mode must be sync, async or async-starved");
         if (options.AbandonFraction is < 0 or > 1)
             throw new ArgumentException("--abandon-fraction must be between 0 and 1");
+        options.ParsedMix = ParseMix(options.Mix);
         return options;
     }
 

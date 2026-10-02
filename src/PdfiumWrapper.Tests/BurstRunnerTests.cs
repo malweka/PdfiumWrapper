@@ -73,6 +73,73 @@ public class BurstRunnerTests : IDisposable
         Assert.Equal(jpeg, byFormat.GetProperty("jpeg").GetInt32());
     }
 
+    /// <summary>
+    /// Weights near int.MaxValue used to overflow the stride search and leave a stride of zero,
+    /// which sent every job to the first format. Totals that large are refused up front.
+    /// </summary>
+    [Theory]
+    [InlineData("png:1073741823,jpeg:1073741823")]
+    [InlineData("png:2147483647,jpeg:2147483647")]
+    [InlineData("png:5000,jpeg:5001")]
+    public void Mix_WhoseTotalIsAboveTheSupportedLimit_IsRejectedAsAnArgumentError(string mix)
+    {
+        string outDirectory = Path.Combine(_root, "rejected");
+        var result = HostRunner.RunAssembly(BenchmarksAssembly, Timeout,
+            "burst", "--n", "4", "--dpi", "20", "--input", _input, "--out", outDirectory,
+            "--report", Path.Combine(_root, "rejected.json"), "--mix", mix);
+
+        Assert.Equal(3, result.ExitCode);
+        Assert.Contains("largest supported total", result.StandardError);
+        Assert.False(Directory.Exists(outDirectory), "a rejected run must not create output");
+    }
+
+    /// <summary>
+    /// The largest accepted total: the stride must be positive and coprime with it, and a run much
+    /// shorter than the total must still reach both formats.
+    /// </summary>
+    [Theory]
+    [InlineData("png:5000,jpeg:5000", 10_000)]
+    [InlineData("png:4999,jpeg:5000", 9_999)]
+    [InlineData("png:18,jpeg:19", 37)]
+    [InlineData("tiff:50,png:30,jpeg:20", 100)]
+    [InlineData("png:2,jpeg:2", 4)]
+    [InlineData("png:1", 1)]
+    public void Mix_UsesAPositiveStrideCoprimeWithItsTotal(string mix, int expectedTotal)
+    {
+        var report = RunBurst(Path.Combine(_root, "out"), "--n", "40", "--mix", mix);
+
+        int total = report.GetProperty("mixTotalWeight").GetInt32();
+        int stride = report.GetProperty("mixStride").GetInt32();
+        Assert.Equal(expectedTotal, total);
+        Assert.True(stride > 0, $"stride {stride} is not positive");
+        Assert.Equal(1, Gcd(stride, total));
+
+        if (expectedTotal == 100)
+            Assert.Equal(37, stride); // the recorded benchmark runs used this sequence
+
+        // Every format in the mix gets jobs even though 40 jobs is far less than a large total.
+        var byFormat = report.GetProperty("jobsByFormat");
+        foreach (var entry in mix.Split(','))
+        {
+            string format = entry.Split(':')[0];
+            Assert.True(byFormat.TryGetProperty(format, out var count) && count.GetInt32() > 0,
+                $"no {format} jobs were scheduled for --mix {mix}");
+        }
+
+        if (expectedTotal >= 9_999)
+        {
+            // Two equal weights: a 40-job run should land close to half and half.
+            Assert.InRange(byFormat.GetProperty("png").GetInt32(), 14, 26);
+        }
+    }
+
+    private static int Gcd(int a, int b)
+    {
+        while (b != 0)
+            (a, b) = (b, a % b);
+        return a;
+    }
+
     [Fact]
     public void ExistingFilesInTheOutDirectory_SurviveStartupAndCleanup()
     {

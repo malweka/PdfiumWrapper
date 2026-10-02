@@ -69,7 +69,9 @@ Review follow-up (pull request 15, 2026-10-02). Four findings, all confirmed and
 - `PdfImageObject.GetBitmap()` and `GetRenderedBitmap()` returned a caller-owned native bitmap that callers could no longer destroy once the raw imports became internal. They now return managed BGRA pixels (`RawBitmap?`); the native bitmap is leased, counted, copied outside the gate and destroyed.
 - `StreamImageBytesAsync` and `StreamJpegBytesAsync` called the synchronous page-count check and so blocked on the gate. The factory now does managed validation only; the page count is awaited when enumeration starts. The starvation scenario gained a `stream` mode.
 
-228 tests pass on win-x64 and linux-x64 after these changes.
+A second review pass found that weights near `int.MaxValue` overflowed the stride search and produced a stride of zero. Mix totals above 10,000 are now rejected as an argument error, the search uses 64-bit arithmetic, and the stride (coprime with the total, close to 0.37 of it, 37 for a total of 100) is reported. `PdfImageObject.SetBitmap` and `SetImage` were made `internal` at the owner's request: they take native handles that public callers cannot obtain.
+
+237 tests pass on win-x64 and linux-x64 after these changes.
 
 Left open:
 

@@ -280,6 +280,6 @@ The `.csproj` auto-detects the platform RID and includes native binaries with `E
 - Update relevant documentation when adding or changing public API
 - Follow existing patterns for disposal, error handling, and P/Invoke signatures
 - Follow the gate rules under "Thread Safety and the Native Gate" for every member that touches PDFium
-- Run the test suite after changes: all 228+ tests should pass (win-x64 and linux-x64)
+- Run the test suite after changes: all 237+ tests should pass (win-x64 and linux-x64)
 - Coordinate system: PDF uses bottom-left origin (see `docs/PDF-EDITING.md`)
 - Standard page sizes in points: US Letter = 612x792, A4 = 595x842
