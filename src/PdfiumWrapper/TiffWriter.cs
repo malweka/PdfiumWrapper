@@ -28,12 +28,10 @@ internal sealed class TiffWriter : IDisposable
     private static readonly TiffMessageHandler s_warningHandler = OnTiffWarning;
     private static readonly IntPtr s_errorHandlerPtr = Marshal.GetFunctionPointerForDelegate(s_errorHandler);
     private static readonly IntPtr s_warningHandlerPtr = Marshal.GetFunctionPointerForDelegate(s_warningHandler);
-    private static int s_handlersInstalled;
+    private static bool s_handlersInstalled;
 
     public TiffWriter(string outputPath)
     {
-        InstallHandlers();
-
         _tiff = LibTiff.TIFFOpen(outputPath, "w");
         if (_tiff == IntPtr.Zero)
             throw new IOException($"libtiff: failed to open '{outputPath}' for writing.");
@@ -48,8 +46,6 @@ internal sealed class TiffWriter : IDisposable
         if (stream == null) throw new ArgumentNullException(nameof(stream));
         if (!stream.CanWrite) throw new ArgumentException("Stream must be writable.", nameof(stream));
         if (!stream.CanSeek) throw new ArgumentException("Stream must be seekable.", nameof(stream));
-
-        InstallHandlers();
 
         // Pin the stream so we can retrieve it from the IntPtr clientdata in callbacks
         _streamHandle = GCHandle.Alloc(stream);
@@ -216,13 +212,18 @@ internal sealed class TiffWriter : IDisposable
         _pageIndex++;
     }
 
-    private static void InstallHandlers()
+    /// <summary>
+    /// Installs libtiff's process-global error handlers. Called once by <see cref="PdfiumRuntime"/>
+    /// during native initialization, under the gate, so it cannot race with another writer.
+    /// </summary>
+    internal static void EnsureHandlersInstalled()
     {
-        if (Interlocked.CompareExchange(ref s_handlersInstalled, 1, 0) == 0)
-        {
-            LibTiff.TIFFSetErrorHandler(s_errorHandlerPtr);
-            LibTiff.TIFFSetWarningHandler(s_warningHandlerPtr);
-        }
+        if (s_handlersInstalled)
+            return;
+
+        LibTiff.TIFFSetErrorHandler(s_errorHandlerPtr);
+        LibTiff.TIFFSetWarningHandler(s_warningHandlerPtr);
+        s_handlersInstalled = true;
     }
 
     private static void OnTiffError(IntPtr module, IntPtr fmt, IntPtr args)

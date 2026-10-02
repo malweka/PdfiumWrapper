@@ -1,4 +1,5 @@
 using System.Buffers;
+using System.Diagnostics;
 using System.Drawing;
 using System.Runtime.InteropServices;
 
@@ -7,23 +8,34 @@ namespace PdfiumWrapper;
 /// <summary>
 /// Represents a single page in a PDF document
 /// </summary>
+/// <remarks>
+/// Thread safety: operations on different objects may run concurrently; the wrapper serializes
+/// native work. Do not use one object from two threads at once.
+/// </remarks>
 public class PdfPage : IDisposable
 {
-    private IntPtr _page;
+    // Internal so the owning document's finalizer can hand the handle to the deferred-release queue.
+    internal IntPtr _page;
     private readonly PdfDocument _owner;
     private bool _disposed;
     private readonly object _attachedObjectsLock = new();
     private HashSet<PdfPageObject>? _attachedObjects;
 
+    /// <summary>The native gate must be held.</summary>
     internal PdfPage(PdfDocument owner, int pageIndex)
     {
+        PdfiumRuntime.AssertHeld();
+
         _owner = owner ?? throw new ArgumentNullException(nameof(owner));
         PageIndex = pageIndex;
-        _page = PDFium.FPDF_LoadPage(owner.Document, pageIndex);
+        using (PdfiumDiagnostics.NativeInterval(NativeOp.LoadPage))
+            _page = PDFium.FPDF_LoadPage(owner.Document, pageIndex);
         if (_page == IntPtr.Zero)
         {
             throw new InvalidOperationException($"Failed to load page {pageIndex}. Error: {PDFium.FPDF_GetLastError()}");
         }
+
+        PdfiumRuntime.HandleOpened();
 
         try
         {
@@ -32,19 +44,21 @@ public class PdfPage : IDisposable
         catch
         {
             PDFium.FPDF_ClosePage(_page);
+            PdfiumRuntime.HandleClosed();
             _page = IntPtr.Zero;
             throw;
         }
     }
 
+    [NoNativeCall]
     public int PageIndex { get; }
 
     public double Width
     {
         get
         {
-            ThrowIfDisposed();
-            return PDFium.FPDF_GetPageWidth(_page);
+            using var _ = PdfiumRuntime.Enter();
+            return WidthCore;
         }
     }
 
@@ -52,6 +66,26 @@ public class PdfPage : IDisposable
     {
         get
         {
+            using var _ = PdfiumRuntime.Enter();
+            return HeightCore;
+        }
+    }
+
+    internal double WidthCore
+    {
+        get
+        {
+            PdfiumRuntime.AssertHeld();
+            ThrowIfDisposed();
+            return PDFium.FPDF_GetPageWidth(_page);
+        }
+    }
+
+    internal double HeightCore
+    {
+        get
+        {
+            PdfiumRuntime.AssertHeld();
             ThrowIfDisposed();
             return PDFium.FPDF_GetPageHeight(_page);
         }
@@ -59,28 +93,23 @@ public class PdfPage : IDisposable
 
     internal IntPtr Handle => _page;
     internal IntPtr DocumentHandle => _owner.Document;
+    internal PdfDocument Owner => _owner;
     internal bool IsDisposedForChildObjects => _disposed || _owner.IsDisposed;
 
     /// <summary>
-    /// Renders the page to a native PDFium bitmap handle.
-    /// The caller MUST call PDFium.FPDFBitmap_Destroy on the returned handle.
-    /// Use FPDFBitmap_GetBuffer/GetStride to read the BGRA pixel data directly.
+    /// Renders the page to a native PDFium bitmap. Rendering runs inside the gate; the returned
+    /// lease's pixel buffer may then be read with the gate free.
     /// </summary>
-    internal IntPtr RenderToBitmapHandle(int width, int height, int flags = 0)
+    internal BitmapLease RenderToBitmapLease(int width, int height, int flags = 0)
     {
-        ThrowIfDisposed();
-
-        var bitmap = PDFium.FPDFBitmap_Create(width, height, 0);
-        if (bitmap == IntPtr.Zero)
-            throw new OutOfMemoryException("Failed to create bitmap");
-
-        PDFium.FPDFBitmap_FillRect(bitmap, 0, 0, width, height, 0xFFFFFFFF);
-        PDFium.FPDF_RenderPageBitmap(bitmap, _page, 0, 0, width, height, 0, flags);
-        return bitmap;
+        using var _ = PdfiumRuntime.Enter();
+        return RenderToBitmapLeaseCore(width, height, flags);
     }
 
-    public byte[] RenderToBytes(int width, int height, int flags = 0)
+    /// <summary>The native gate must be held.</summary>
+    internal BitmapLease RenderToBitmapLeaseCore(int width, int height, int flags)
     {
+        PdfiumRuntime.AssertHeld();
         ThrowIfDisposed();
 
         var bitmap = PDFium.FPDFBitmap_Create(width, height, 0);
@@ -92,27 +121,29 @@ public class PdfPage : IDisposable
             // Fill with white background
             PDFium.FPDFBitmap_FillRect(bitmap, 0, 0, width, height, 0xFFFFFFFF);
 
-            // Render page to bitmap
-            PDFium.FPDF_RenderPageBitmap(bitmap, _page, 0, 0, width, height, 0, flags);
+            using (PdfiumDiagnostics.NativeInterval(NativeOp.Render))
+                PDFium.FPDF_RenderPageBitmap(bitmap, _page, 0, 0, width, height, 0, flags);
 
-            // Get bitmap data
-            var buffer = PDFium.FPDFBitmap_GetBuffer(bitmap);
-            var stride = PDFium.FPDFBitmap_GetStride(bitmap);
-            var size = stride * height;
-
-            var result = new byte[size];
-            Marshal.Copy(buffer, result, 0, size);
-
-            return result;
+            return new BitmapLease(bitmap, PDFium.FPDFBitmap_GetBuffer(bitmap), width, height,
+                PDFium.FPDFBitmap_GetStride(bitmap));
         }
-        finally
+        catch
         {
             PDFium.FPDFBitmap_Destroy(bitmap);
+            throw;
         }
+    }
+
+    public byte[] RenderToBytes(int width, int height, int flags = 0)
+    {
+        // Render inside the gate, copy the pixels out with the gate free.
+        using var lease = RenderToBitmapLease(width, height, flags);
+        return lease.ToArray();
     }
 
     public string ExtractText()
     {
+        using var _ = PdfiumRuntime.Enter();
         ThrowIfDisposed();
 
         var textPage = PDFium.FPDFText_LoadPage(_page);
@@ -133,7 +164,8 @@ public class PdfPage : IDisposable
                 {
                     fixed (char* bufferPtr = buffer)
                     {
-                        actualCount = PDFium.FPDFText_GetText(textPage, 0, charCount, (IntPtr)bufferPtr);
+                        using (PdfiumDiagnostics.NativeInterval(NativeOp.Text))
+                            actualCount = PDFium.FPDFText_GetText(textPage, 0, charCount, (IntPtr)bufferPtr);
                     }
                 }
 
@@ -162,6 +194,7 @@ public class PdfPage : IDisposable
     {
         get
         {
+            using var _ = PdfiumRuntime.Enter();
             ThrowIfDisposed();
 
             var thumbnail = PDFium.FPDFPage_GetThumbnailAsBitmap(_page);
@@ -180,15 +213,15 @@ public class PdfPage : IDisposable
     /// </summary>
     public byte[] GetEmbeddedThumbnailBytes()
     {
+        using var _ = PdfiumRuntime.Enter();
         ThrowIfDisposed();
 
         var thumbnail = PDFium.FPDFPage_GetThumbnailAsBitmap(_page);
         if (thumbnail == IntPtr.Zero)
-            return null;
+            return null!;
 
         try
         {
-            var width = PDFium.FPDFBitmap_GetWidth(thumbnail);
             var height = PDFium.FPDFBitmap_GetHeight(thumbnail);
             var stride = PDFium.FPDFBitmap_GetStride(thumbnail);
             var buffer = PDFium.FPDFBitmap_GetBuffer(thumbnail);
@@ -211,6 +244,7 @@ public class PdfPage : IDisposable
     /// </summary>
     public (int width, int height)? GetEmbeddedThumbnailSize()
     {
+        using var _ = PdfiumRuntime.Enter();
         ThrowIfDisposed();
 
         var thumbnail = PDFium.FPDFPage_GetThumbnailAsBitmap(_page);
@@ -236,6 +270,7 @@ public class PdfPage : IDisposable
     /// </summary>
     public PdfTextObject AddText(string text, float x, float y, string font = "Helvetica", float fontSize = 12)
     {
+        using var _ = PdfiumRuntime.Enter();
         ThrowIfDisposed();
 
         var textObj = PdfTextObject.Create(_owner.Document, font, fontSize);
@@ -256,6 +291,7 @@ public class PdfPage : IDisposable
     /// </summary>
     public PdfImageObject AddImage(byte[] imageBytes, float x, float y, float width, float height)
     {
+        using var _ = PdfiumRuntime.Enter();
         ThrowIfDisposed();
 
         var imageObj = PdfImageObject.Create(_owner.Document);
@@ -274,6 +310,7 @@ public class PdfPage : IDisposable
     /// </summary>
     public PdfPathObject AddPath()
     {
+        using var _ = PdfiumRuntime.Enter();
         ThrowIfDisposed();
 
         var pathObj = PdfPathObject.Create(_owner.Document);
@@ -290,6 +327,7 @@ public class PdfPage : IDisposable
     /// </summary>
     public PdfPathObject AddRectangle(float x, float y, float width, float height, Color? fillColor = null, Color? strokeColor = null)
     {
+        using var _ = PdfiumRuntime.Enter();
         ThrowIfDisposed();
 
         var rectObj = PdfPathObject.CreateRectangle(_owner.Document, x, y, width, height);
@@ -321,6 +359,7 @@ public class PdfPage : IDisposable
     /// </summary>
     public bool RemoveObject(PdfPageObject pageObject)
     {
+        using var _ = PdfiumRuntime.Enter();
         ThrowIfDisposed();
 
         if (pageObject == null)
@@ -329,8 +368,10 @@ public class PdfPage : IDisposable
         var result = PDFium.FPDFPage_RemoveObject(_page, pageObject.Handle);
         if (result)
         {
-            pageObject.DetachFromPage();
+            // The caller owns the native object again. The document tracks it so it is destroyed
+            // before the document closes, whether by Dispose or by the finalizer.
             UnregisterAttachedObject(pageObject);
+            pageObject.DetachFromPage(_owner);
         }
         return result;
     }
@@ -340,6 +381,7 @@ public class PdfPage : IDisposable
     /// </summary>
     public void GenerateContent()
     {
+        using var _ = PdfiumRuntime.Enter();
         ThrowIfDisposed();
 
         if (!PDFium.FPDFPage_GenerateContent(_page))
@@ -353,6 +395,7 @@ public class PdfPage : IDisposable
     {
         get
         {
+            using var _ = PdfiumRuntime.Enter();
             ThrowIfDisposed();
             return PDFium.FPDFPage_CountObjects(_page);
         }
@@ -363,9 +406,10 @@ public class PdfPage : IDisposable
     /// </summary>
     public IntPtr GetObject(int index)
     {
+        using var _ = PdfiumRuntime.Enter();
         ThrowIfDisposed();
 
-        if (index < 0 || index >= ObjectCount)
+        if (index < 0 || index >= PDFium.FPDFPage_CountObjects(_page))
             throw new ArgumentOutOfRangeException(nameof(index));
 
         return PDFium.FPDFPage_GetObject(_page, index);
@@ -375,6 +419,7 @@ public class PdfPage : IDisposable
 
     internal void UnregisterAttachedObject(PdfPageObject pageObject)
     {
+        PdfiumRuntime.AssertHeld();
         lock (_attachedObjectsLock)
         {
             _attachedObjects?.Remove(pageObject);
@@ -383,6 +428,7 @@ public class PdfPage : IDisposable
 
     private void RegisterAttachedObject(PdfPageObject pageObject)
     {
+        PdfiumRuntime.AssertHeld();
         pageObject.AttachToPage(this);
 
         lock (_attachedObjectsLock)
@@ -394,6 +440,7 @@ public class PdfPage : IDisposable
 
     private PdfPageObject[] DetachAttachedObjects()
     {
+        PdfiumRuntime.AssertHeld();
         lock (_attachedObjectsLock)
         {
             if (_attachedObjects == null || _attachedObjects.Count == 0)
@@ -418,51 +465,63 @@ public class PdfPage : IDisposable
     /// </summary>
     public void Dispose()
     {
-        DisposeInternal(suppressFinalize: true);
-    }
-
-    internal void DisposeFromOwner()
-    {
-        DisposeInternal(suppressFinalize: false);
-    }
-
-    private void DisposeInternal(bool suppressFinalize)
-    {
-        Dispose(true);
-        if (suppressFinalize)
+        using (PdfiumRuntime.Enter())
         {
-            GC.SuppressFinalize(this);
+            Dispose(true);
         }
+
+        GC.SuppressFinalize(this);
+    }
+
+    /// <summary>Dispose from code that already holds the native gate.</summary>
+    internal void DisposeCore()
+    {
+        PdfiumRuntime.AssertHeld();
+        Dispose(true);
+        GC.SuppressFinalize(this);
     }
 
     /// <summary>
     /// Releases the unmanaged resources and optionally releases managed resources.
     /// </summary>
-    /// <param name="disposing">true to release both managed and unmanaged resources; false to release only unmanaged resources.</param>
+    /// <param name="disposing">
+    /// true when called from <see cref="Dispose()"/>: the page is closed now, under the native gate.
+    /// false when called from the finalizer: the handle is queued and closed by the next gated operation.
+    /// </param>
     protected virtual void Dispose(bool disposing)
     {
-        if (!_disposed)
+        if (!disposing)
         {
-            _disposed = true;
-
-            foreach (var pageObject in DetachAttachedObjects())
-            {
-                pageObject.InvalidateFromPageDisposal();
-            }
-
-            // Always release native handle
-            if (_page != IntPtr.Zero)
-            {
-                PDFium.FPDF_ClosePage(_page);
-                _page = IntPtr.Zero;
-            }
-
-            _owner.UnregisterPage(this);
+            // Finalizer thread: never call PDFium, never take a lock, never touch the owner.
+            // The owning document's finalizer may already have taken the handle.
+            PdfiumRuntime.EnqueueRelease(NativeHandleKind.Page, Interlocked.Exchange(ref _page, IntPtr.Zero));
+            return;
         }
+
+        if (_disposed)
+            return;
+
+        using var _ = PdfiumRuntime.Enter();
+        _disposed = true;
+
+        foreach (var pageObject in DetachAttachedObjects())
+        {
+            pageObject.InvalidateFromPageDisposal();
+        }
+
+        if (_page != IntPtr.Zero)
+        {
+            using (PdfiumDiagnostics.NativeInterval(NativeOp.Close))
+                PDFium.FPDF_ClosePage(_page);
+            PdfiumRuntime.HandleClosed();
+            _page = IntPtr.Zero;
+        }
+
+        _owner.UnregisterPage(this);
     }
 
     /// <summary>
-    /// Destructor to ensure native resources are released if Dispose is not called.
+    /// Queues the native handle for deferred release if Dispose was not called.
     /// </summary>
     ~PdfPage()
     {

@@ -5,7 +5,7 @@ namespace PdfiumWrapper;
 /// </summary>
 public class PdfImageObject : PdfPageObject
 {
-    internal PdfImageObject(IntPtr handle, IntPtr documentHandle) 
+    internal PdfImageObject(IntPtr handle, IntPtr documentHandle)
         : base(handle, documentHandle)
     {
     }
@@ -15,6 +15,8 @@ public class PdfImageObject : PdfPageObject
     /// </summary>
     public static PdfImageObject Create(IntPtr documentHandle)
     {
+        using var _ = PdfiumRuntime.Enter();
+
         var handle = PDFium.FPDFPageObj_NewImageObj(documentHandle);
         if (handle == IntPtr.Zero)
             throw new InvalidOperationException("Failed to create image object");
@@ -27,6 +29,7 @@ public class PdfImageObject : PdfPageObject
     /// </summary>
     public void SetBitmap(IntPtr bitmap, IntPtr page)
     {
+        using var _ = PdfiumRuntime.Enter();
         ThrowIfDisposed();
         // Note: pages parameter should be an array of page handles, but we'll use a single page
         var pageHandle = System.Runtime.InteropServices.Marshal.AllocHGlobal(IntPtr.Size);
@@ -47,10 +50,13 @@ public class PdfImageObject : PdfPageObject
     /// </summary>
     public void SetImage(byte[] imageBytes, IntPtr page)
     {
+        // Decoding uses libjpeg-turbo / libpng, not PDFium, so it runs before the gate is taken.
+        var (bgraPixels, width, height) = DecodeToBgra(imageBytes);
+
+        using var _ = PdfiumRuntime.Enter();
         ThrowIfDisposed();
-        
-        // Create a bitmap from the image bytes
-        var bitmap = CreateBitmapFromBytes(imageBytes);
+
+        var bitmap = CreateBitmap(bgraPixels, width, height);
         if (bitmap == IntPtr.Zero)
             throw new InvalidOperationException("Failed to create bitmap from image bytes");
 
@@ -69,6 +75,7 @@ public class PdfImageObject : PdfPageObject
     /// </summary>
     public void SetPositionAndSize(float x, float y, float width, float height)
     {
+        using var _ = PdfiumRuntime.Enter();
         ThrowIfDisposed();
         // Use matrix transformation: [width, 0, 0, height, x, y]
         if (!PDFium.FPDFImageObj_SetMatrix(Handle, width, 0, 0, height, x, y))
@@ -80,6 +87,7 @@ public class PdfImageObject : PdfPageObject
     /// </summary>
     public IntPtr GetBitmap()
     {
+        using var _ = PdfiumRuntime.Enter();
         ThrowIfDisposed();
         return PDFium.FPDFImageObj_GetBitmap(Handle);
     }
@@ -89,11 +97,12 @@ public class PdfImageObject : PdfPageObject
     /// </summary>
     public IntPtr GetRenderedBitmap(IntPtr page)
     {
+        using var _ = PdfiumRuntime.Enter();
         ThrowIfDisposed();
         return PDFium.FPDFImageObj_GetRenderedBitmap(DocumentHandle, page, Handle);
     }
 
-    private IntPtr CreateBitmapFromBytes(byte[] imageBytes)
+    private static (byte[] pixels, int width, int height) DecodeToBgra(byte[] imageBytes)
     {
         int width, height;
         byte[] bgraPixels;
@@ -147,7 +156,14 @@ public class PdfImageObject : PdfPageObject
             throw new NotSupportedException("Image format not supported. Only JPEG and PNG are supported.");
         }
 
-        // Create PDFium bitmap and copy decoded BGRA pixels
+        return (bgraPixels, width, height);
+    }
+
+    /// <summary>Creates a PDFium bitmap holding the decoded BGRA pixels. The native gate must be held.</summary>
+    private static IntPtr CreateBitmap(byte[] bgraPixels, int width, int height)
+    {
+        PdfiumRuntime.AssertHeld();
+
         var bitmap = PDFium.FPDFBitmap_Create(width, height, 1);
         if (bitmap == IntPtr.Zero)
             return IntPtr.Zero;

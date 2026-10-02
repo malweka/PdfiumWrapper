@@ -20,7 +20,7 @@ public static partial class PDFium
     /// <returns>True on success, false on failure</returns>
     [LibraryImport(LibraryName, StringMarshalling = StringMarshalling.Utf8)]
     [return: MarshalAs(UnmanagedType.Bool)]
-    public static partial bool FPDF_ImportPages(IntPtr dest_doc, IntPtr src_doc, string? pagerange, int index);
+    internal static partial bool FPDF_ImportPages(IntPtr dest_doc, IntPtr src_doc, string? pagerange, int index);
 
     /// <summary>
     /// Import pages from src_doc to dest_doc using an array of page indices
@@ -33,7 +33,7 @@ public static partial class PDFium
     /// <returns>True on success, false on failure</returns>
     [LibraryImport(LibraryName)]
     [return: MarshalAs(UnmanagedType.Bool)]
-    public static partial bool FPDF_ImportPagesByIndex(IntPtr dest_doc, IntPtr src_doc,
+    internal static partial bool FPDF_ImportPagesByIndex(IntPtr dest_doc, IntPtr src_doc,
         int[] page_indices, ulong length, int index);
 
     /// <summary>
@@ -44,7 +44,7 @@ public static partial class PDFium
     /// <returns>True on success, false on failure</returns>
     [LibraryImport(LibraryName)]
     [return: MarshalAs(UnmanagedType.Bool)]
-    public static partial bool FPDF_CopyViewerPreferences(IntPtr dest_doc, IntPtr src_doc);
+    internal static partial bool FPDF_CopyViewerPreferences(IntPtr dest_doc, IntPtr src_doc);
 
 
     #endregion
@@ -56,7 +56,7 @@ public static partial class PDFium
     /// </summary>
     /// <returns>Handle to the new document, or null on failure</returns>
     [LibraryImport(LibraryName)]
-    public static partial IntPtr FPDF_CreateNewDocument();
+    internal static partial IntPtr FPDF_CreateNewDocument();
 
 
     #endregion
@@ -68,14 +68,14 @@ public static partial class PDFium
     /// </summary>
     [LibraryImport(LibraryName, StringMarshalling = StringMarshalling.Utf8)]
     [return: MarshalAs(UnmanagedType.Bool)]
-    public static partial bool FPDF_SaveAsCopy(IntPtr document, ref FPDF_FILEWRITE fileWrite, uint flags);
+    internal static partial bool FPDF_SaveAsCopy(IntPtr document, ref FPDF_FILEWRITE fileWrite, uint flags);
 
     /// <summary>
     /// Save the document with specific version
     /// </summary>
     [LibraryImport(LibraryName, StringMarshalling = StringMarshalling.Utf8)]
     [return: MarshalAs(UnmanagedType.Bool)]
-    public static partial bool FPDF_SaveWithVersion(IntPtr document, ref FPDF_FILEWRITE fileWrite,
+    internal static partial bool FPDF_SaveWithVersion(IntPtr document, ref FPDF_FILEWRITE fileWrite,
         uint flags, int fileVersion);
 
     #endregion

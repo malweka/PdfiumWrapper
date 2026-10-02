@@ -153,7 +153,7 @@ internal static class BurstRunner
         }
 
         double totalSeconds = Stopwatch.GetElapsedTime(t0).TotalSeconds;
-        var diagnostics = BurstDiagnostics.End();
+        var diagnostics = BurstDiagnostics.End(options.Callers);
         stop.Cancel();
         sampler.Join();
         heartbeat?.Join();

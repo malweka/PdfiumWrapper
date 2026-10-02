@@ -17,6 +17,7 @@ public class PdfFormObject : PdfPageObject
     {
         get
         {
+            using var _ = PdfiumRuntime.Enter();
             ThrowIfDisposed();
             return PDFium.FPDFFormObj_CountObjects(Handle);
         }
@@ -27,8 +28,9 @@ public class PdfFormObject : PdfPageObject
     /// </summary>
     public IntPtr GetObject(int index)
     {
+        using var _ = PdfiumRuntime.Enter();
         ThrowIfDisposed();
-        if (index < 0 || index >= ObjectCount)
+        if (index < 0 || index >= PDFium.FPDFFormObj_CountObjects(Handle))
             throw new ArgumentOutOfRangeException(nameof(index));
 
         return PDFium.FPDFFormObj_GetObject(Handle, (ulong)index);

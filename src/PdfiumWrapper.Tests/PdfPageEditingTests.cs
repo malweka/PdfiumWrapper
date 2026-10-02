@@ -29,6 +29,64 @@ public class PdfPageEditingTests : IDisposable
         return tempDir;
     }
 
+    #region Page Object Tests
+
+    [Fact]
+    public void GetMatrix_AfterSetMatrix_ShouldReturnTheSameValues()
+    {
+        // Arrange
+        using var doc = new PdfDocument();
+        using var page = doc.AddPage();
+        var rectangle = page.AddRectangle(10, 20, 30, 40);
+
+        // Act
+        rectangle.SetMatrix(2, 0, 0, 3, 50, 60);
+        var matrix = rectangle.GetMatrix();
+
+        // Assert
+        Assert.Equal((2d, 0d, 0d, 3d, 50d, 60d), matrix);
+    }
+
+    [Fact]
+    public void RemoveObject_ThenDisposeObject_ShouldReleaseItOnce()
+    {
+        // Arrange
+        using var doc = new PdfDocument();
+        using var page = doc.AddPage();
+        var rectangle = page.AddRectangle(10, 20, 30, 40);
+        long liveBefore = PdfiumRuntime.LiveHandleCount;
+
+        // Act: the caller owns the object again after removal
+        Assert.True(page.RemoveObject(rectangle));
+        Assert.Equal(liveBefore + 1, PdfiumRuntime.LiveHandleCount);
+        _ = rectangle.GetBounds();
+        rectangle.Dispose();
+
+        // Assert
+        Assert.Equal(liveBefore, PdfiumRuntime.LiveHandleCount);
+        Assert.Throws<ObjectDisposedException>(() => rectangle.GetBounds());
+    }
+
+    [Fact]
+    public void RemoveObject_ThenDisposeDocument_ShouldReleaseTheDetachedObject()
+    {
+        // Arrange
+        long liveBefore = PdfiumRuntime.LiveHandleCount;
+        var doc = new PdfDocument();
+        var page = doc.AddPage();
+        var rectangle = page.AddRectangle(10, 20, 30, 40);
+        Assert.True(page.RemoveObject(rectangle));
+
+        // Act: the document destroys what was removed from its pages but never disposed
+        doc.Dispose();
+
+        // Assert
+        Assert.Equal(liveBefore, PdfiumRuntime.LiveHandleCount);
+        Assert.Throws<ObjectDisposedException>(() => rectangle.GetBounds());
+    }
+
+    #endregion
+
     #region AddPage Tests
 
     [Fact]

@@ -10,43 +10,43 @@ public static partial class PDFium
     #region Annotation Management
 
     [LibraryImport(LibraryName)]
-    public static partial int FPDFPage_GetAnnotCount(IntPtr page);
+    internal static partial int FPDFPage_GetAnnotCount(IntPtr page);
 
     [LibraryImport(LibraryName)]
-    public static partial IntPtr FPDFPage_GetAnnot(IntPtr page, int index);
+    internal static partial IntPtr FPDFPage_GetAnnot(IntPtr page, int index);
 
     [LibraryImport(LibraryName)]
-    public static partial void FPDFPage_CloseAnnot(IntPtr annot);
+    internal static partial void FPDFPage_CloseAnnot(IntPtr annot);
 
     [LibraryImport(LibraryName)]
-    public static partial int FPDFAnnot_GetSubtype(IntPtr annot);
+    internal static partial int FPDFAnnot_GetSubtype(IntPtr annot);
 
     #endregion
 
     #region Form Field Information
 
     [LibraryImport(LibraryName)]
-    public static partial int FPDFAnnot_GetFormFieldType(IntPtr hHandle, IntPtr annot);
+    internal static partial int FPDFAnnot_GetFormFieldType(IntPtr hHandle, IntPtr annot);
 
     [LibraryImport(LibraryName)]
-    public static partial ulong FPDFAnnot_GetFormFieldName(IntPtr hHandle, IntPtr annot, IntPtr buffer, ulong buflen);
+    internal static partial ulong FPDFAnnot_GetFormFieldName(IntPtr hHandle, IntPtr annot, IntPtr buffer, ulong buflen);
 
     [LibraryImport(LibraryName)]
-    public static partial ulong FPDFAnnot_GetFormFieldAlternateName(IntPtr hHandle, IntPtr annot, IntPtr buffer, ulong buflen);
+    internal static partial ulong FPDFAnnot_GetFormFieldAlternateName(IntPtr hHandle, IntPtr annot, IntPtr buffer, ulong buflen);
 
     [LibraryImport(LibraryName)]
-    public static partial int FPDFAnnot_GetFormFieldFlags(IntPtr hHandle, IntPtr annot);
+    internal static partial int FPDFAnnot_GetFormFieldFlags(IntPtr hHandle, IntPtr annot);
 
     #endregion
 
     #region Form Field Value Get/Set
 
     [LibraryImport(LibraryName)]
-    public static partial ulong FPDFAnnot_GetFormFieldValue(IntPtr hHandle, IntPtr annot, IntPtr buffer, ulong buflen);
+    internal static partial ulong FPDFAnnot_GetFormFieldValue(IntPtr hHandle, IntPtr annot, IntPtr buffer, ulong buflen);
 
     [LibraryImport(LibraryName)]
     [return: MarshalAs(UnmanagedType.Bool)]
-    public static partial bool FPDFAnnot_SetStringValue(IntPtr annot,
+    internal static partial bool FPDFAnnot_SetStringValue(IntPtr annot,
         [MarshalAs(UnmanagedType.LPStr)] string key,
         [MarshalAs(UnmanagedType.LPWStr)] string value);
 
@@ -55,14 +55,14 @@ public static partial class PDFium
     #region Form Field Options (for List/Combo boxes)
 
     [LibraryImport(LibraryName)]
-    public static partial int FPDFAnnot_GetOptionCount(IntPtr hHandle, IntPtr annot);
+    internal static partial int FPDFAnnot_GetOptionCount(IntPtr hHandle, IntPtr annot);
 
     [LibraryImport(LibraryName)]
-    public static partial ulong FPDFAnnot_GetOptionLabel(IntPtr hHandle, IntPtr annot, int index, IntPtr buffer, ulong buflen);
+    internal static partial ulong FPDFAnnot_GetOptionLabel(IntPtr hHandle, IntPtr annot, int index, IntPtr buffer, ulong buflen);
 
     [LibraryImport(LibraryName)]
     [return: MarshalAs(UnmanagedType.Bool)]
-    public static partial bool FPDFAnnot_IsOptionSelected(IntPtr hHandle, IntPtr annot, int index);
+    internal static partial bool FPDFAnnot_IsOptionSelected(IntPtr hHandle, IntPtr annot, int index);
 
     #endregion
 
@@ -70,16 +70,16 @@ public static partial class PDFium
 
     [LibraryImport(LibraryName)]
     [return: MarshalAs(UnmanagedType.Bool)]
-    public static partial bool FPDFAnnot_IsChecked(IntPtr hHandle, IntPtr annot);
+    internal static partial bool FPDFAnnot_IsChecked(IntPtr hHandle, IntPtr annot);
 
     [LibraryImport(LibraryName)]
-    public static partial int FPDFAnnot_GetFormControlCount(IntPtr hHandle, IntPtr annot);
+    internal static partial int FPDFAnnot_GetFormControlCount(IntPtr hHandle, IntPtr annot);
 
     [LibraryImport(LibraryName)]
-    public static partial int FPDFAnnot_GetFormControlIndex(IntPtr hHandle, IntPtr annot);
+    internal static partial int FPDFAnnot_GetFormControlIndex(IntPtr hHandle, IntPtr annot);
 
     [LibraryImport(LibraryName)]
-    public static partial ulong FPDFAnnot_GetFormFieldExportValue(IntPtr hHandle, IntPtr annot, IntPtr buffer, ulong buflen);
+    internal static partial ulong FPDFAnnot_GetFormFieldExportValue(IntPtr hHandle, IntPtr annot, IntPtr buffer, ulong buflen);
 
     #endregion
 

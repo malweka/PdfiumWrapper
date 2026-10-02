@@ -11,6 +11,12 @@ if (args.Length > 0 && args[0] == "burst")
     return BurstRunner.Run(args.Skip(1).ToArray());
 }
 
+// "streams" prints gate hold time per operation for each stream type (instrumented run).
+if (args.Length > 0 && args[0] == "streams")
+{
+    return StreamHoldReport.Run(args.Skip(1).ToArray());
+}
+
 var config = ManualConfig.CreateMinimumViable()
     .AddExporter(new CsvExporter(
         CsvSeparator.Comma,
@@ -34,6 +40,9 @@ var benchmarkTypes = new[]
     typeof(PdfToTiffBenchmark),
     typeof(PdfMergeBenchmark),
     typeof(SmallDocumentBenchmark),
+    typeof(GateOverheadBenchmark),
+    typeof(ConcurrentCallersBenchmark),
+    typeof(StreamCallbackBenchmark),
 };
 
 // "--only A,B" restricts the run to the named benchmark classes.

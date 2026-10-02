@@ -12,7 +12,7 @@ public class SmallDocumentBenchmark
     private string _path = null!;
 
     [GlobalSetup]
-    public void Setup()
+    public virtual void Setup()
     {
         _path = Path.Combine(AppContext.BaseDirectory, "Docs", "doc-1-page.pdf");
     }

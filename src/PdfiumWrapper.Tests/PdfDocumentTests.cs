@@ -1297,7 +1297,7 @@ public class PdfDocumentTests : IDisposable
     #region Edge Case Tests
     
     [Fact]
-    public void MultipleDocuments_ShouldWorkConcurrently()
+    public void MultipleDocuments_CanCoexistSequentially()
     {
         // Arrange & Act
         using var doc1 = new PdfDocument(ContractPdfPath);

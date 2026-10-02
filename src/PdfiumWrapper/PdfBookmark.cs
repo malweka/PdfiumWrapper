@@ -3,6 +3,7 @@
 /// <summary>
 /// PDF bookmark/outline information
 /// </summary>
+[NoNativeCall]
 public class PdfBookmark
 {
     public string? Title { get; set; }

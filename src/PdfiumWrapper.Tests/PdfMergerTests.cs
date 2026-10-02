@@ -33,11 +33,11 @@ public class PdfMergerTests : IDisposable
         return (byte[]?)field.GetValue(merger);
     }
 
-    private static object? GetStreamDocumentLoader(PdfMerger merger)
+    private static string? GetSpoolPath(PdfMerger merger)
     {
-        var field = typeof(PdfMerger).GetField("_streamDocumentLoader", BindingFlags.Instance | BindingFlags.NonPublic);
+        var field = typeof(PdfMerger).GetField("_spoolPath", BindingFlags.Instance | BindingFlags.NonPublic);
         Assert.NotNull(field);
-        return field.GetValue(merger);
+        return (string?)field.GetValue(merger);
     }
 
     public void Dispose()
@@ -156,7 +156,7 @@ public class PdfMergerTests : IDisposable
     }
 
     [Fact]
-    public void Constructor_WithSeekableFileStream_ShouldUseCustomLoader()
+    public void Constructor_WithSeekableFileStream_ShouldSpoolIntoMemoryAndConsumeStream()
     {
         // Arrange
         var tempPath = GetUniqueTestFilePath("constructor_stream_file");
@@ -166,11 +166,92 @@ public class PdfMergerTests : IDisposable
         // Act
         using var merger = new PdfMerger(stream);
 
-        // Assert
+        // Assert: the stream was read to its end up front, so the merger no longer depends on it
         Assert.Equal(1, merger.PageCount);
-        Assert.Null(GetDocumentBytes(merger));
-        Assert.False(GetDocumentBytesHandle(merger).IsAllocated);
-        Assert.NotNull(GetStreamDocumentLoader(merger));
+        Assert.Equal(stream.Length, stream.Position);
+        Assert.NotNull(GetDocumentBytes(merger));
+        Assert.True(GetDocumentBytesHandle(merger).IsAllocated);
+        Assert.Null(GetSpoolPath(merger));
+    }
+
+    [Fact]
+    public void Constructor_WithSeekableFileStream_ShouldRemainUsableAfterSourceStreamDisposed()
+    {
+        // Arrange
+        var tempPath = GetUniqueTestFilePath("constructor_stream_closed");
+        File.WriteAllBytes(tempPath, Doc1PageBytes);
+
+        PdfMerger merger;
+        using (var stream = File.OpenRead(tempPath))
+        {
+            merger = new PdfMerger(stream);
+        }
+
+        // Act & Assert
+        using (merger)
+        {
+            Assert.Equal(1, merger.PageCount);
+            Assert.True(merger.ToBytes().Length > 0);
+        }
+    }
+
+    [Fact]
+    public void Constructor_WithStreamAboveSpoolThreshold_ShouldUseTempFileAndDeleteItOnDispose()
+    {
+        // Arrange
+        var tempPath = GetUniqueTestFilePath("constructor_stream_spool");
+        File.WriteAllBytes(tempPath, Doc1PageBytes);
+        AppContext.SetData("PdfiumWrapper.SpoolThreshold", 1024L);
+
+        try
+        {
+            string? spoolPath;
+            using (var stream = File.OpenRead(tempPath))
+            using (var merger = new PdfMerger(stream))
+            {
+                // Act
+                spoolPath = GetSpoolPath(merger);
+
+                // Assert
+                Assert.NotNull(spoolPath);
+                Assert.True(File.Exists(spoolPath));
+                Assert.Null(GetDocumentBytes(merger));
+                Assert.Equal(1, merger.PageCount);
+                Assert.True(merger.ToBytes().Length > 0);
+            }
+
+            Assert.False(File.Exists(spoolPath));
+        }
+        finally
+        {
+            AppContext.SetData("PdfiumWrapper.SpoolThreshold", null);
+        }
+    }
+
+    [Fact]
+    public void Constructor_WithNonSeekableStreamAboveSpoolThreshold_ShouldUseTempFile()
+    {
+        // Arrange
+        using var innerStream = new MemoryStream((byte[])Doc3PagesBytes.Clone());
+        using var stream = new NonSeekableReadOnlyStream(innerStream);
+        AppContext.SetData("PdfiumWrapper.SpoolThreshold", 1024L);
+
+        try
+        {
+            string? spoolPath;
+            using (var merger = new PdfMerger(stream))
+            {
+                spoolPath = GetSpoolPath(merger);
+                Assert.NotNull(spoolPath);
+                Assert.Equal(3, merger.PageCount);
+            }
+
+            Assert.False(File.Exists(spoolPath));
+        }
+        finally
+        {
+            AppContext.SetData("PdfiumWrapper.SpoolThreshold", null);
+        }
     }
 
     [Fact]
@@ -253,7 +334,7 @@ public class PdfMergerTests : IDisposable
         Assert.Equal(1, merger.PageCount);
         Assert.NotNull(GetDocumentBytes(merger));
         Assert.True(GetDocumentBytesHandle(merger).IsAllocated);
-        Assert.Null(GetStreamDocumentLoader(merger));
+        Assert.Null(GetSpoolPath(merger));
     }
 
     [Fact]

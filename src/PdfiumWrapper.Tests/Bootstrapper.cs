@@ -10,6 +10,9 @@ public static class Bootstrapper
     [ModuleInitializer]
     public static void Initialize()
     {
+        // Read once by the wrapper, so it must be set before any PDFium type is touched.
+        AppContext.SetSwitch("PdfiumWrapper.Diagnostics", true);
+
         if (Directory.Exists(WorkingDirectory))
         {
             Directory.Delete(WorkingDirectory, recursive: true);

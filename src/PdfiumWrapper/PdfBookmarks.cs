@@ -7,11 +7,11 @@ namespace PdfiumWrapper;
 /// </summary>
 public class PdfBookmarks
 {
-    private IntPtr _document;
+    private readonly PdfDocument _owner;
 
-    internal PdfBookmarks(IntPtr document)
+    internal PdfBookmarks(PdfDocument owner)
     {
-        _document = document;
+        _owner = owner;
     }
 
     /// <summary>
@@ -19,38 +19,42 @@ public class PdfBookmarks
     /// </summary>
     public List<PdfBookmark> GetAllBookmarks()
     {
+        using var _ = PdfiumRuntime.Enter();
+        _owner.ThrowIfDisposed();
+        var document = _owner.Document;
+
         var bookmarks = new List<PdfBookmark>();
-        var firstBookmark = PDFium.FPDFBookmark_GetFirstChild(_document, IntPtr.Zero);
+        var firstBookmark = PDFium.FPDFBookmark_GetFirstChild(document, IntPtr.Zero);
 
         if (firstBookmark != IntPtr.Zero)
         {
-            TraverseBookmarks(firstBookmark, bookmarks);
+            TraverseBookmarks(document, firstBookmark, bookmarks);
         }
 
         return bookmarks;
     }
 
-    private void TraverseBookmarks(IntPtr bookmarkHandle, List<PdfBookmark> bookmarkList)
+    private static void TraverseBookmarks(IntPtr document, IntPtr bookmarkHandle, List<PdfBookmark> bookmarkList)
     {
         while (bookmarkHandle != IntPtr.Zero)
         {
-            var bookmark = ExtractBookmark(bookmarkHandle);
+            var bookmark = ExtractBookmark(document, bookmarkHandle);
 
             // Get children
-            var firstChild = PDFium.FPDFBookmark_GetFirstChild(_document, bookmarkHandle);
+            var firstChild = PDFium.FPDFBookmark_GetFirstChild(document, bookmarkHandle);
             if (firstChild != IntPtr.Zero)
             {
-                TraverseBookmarks(firstChild, bookmark.Children);
+                TraverseBookmarks(document, firstChild, bookmark.Children);
             }
 
             bookmarkList.Add(bookmark);
 
             // Move to next sibling
-            bookmarkHandle = PDFium.FPDFBookmark_GetNextSibling(_document, bookmarkHandle);
+            bookmarkHandle = PDFium.FPDFBookmark_GetNextSibling(document, bookmarkHandle);
         }
     }
 
-    private PdfBookmark ExtractBookmark(IntPtr bookmarkHandle)
+    private static PdfBookmark ExtractBookmark(IntPtr document, IntPtr bookmarkHandle)
     {
         var bookmark = new PdfBookmark();
 
@@ -71,10 +75,10 @@ public class PdfBookmarks
         }
 
         // Get destination page
-        var dest = PDFium.FPDFBookmark_GetDest(_document, bookmarkHandle);
+        var dest = PDFium.FPDFBookmark_GetDest(document, bookmarkHandle);
         if (dest != IntPtr.Zero)
         {
-            bookmark.PageIndex = (int)PDFium.FPDFDest_GetDestPageIndex(_document, dest);
+            bookmark.PageIndex = (int)PDFium.FPDFDest_GetDestPageIndex(document, dest);
         }
         else
         {
@@ -82,10 +86,10 @@ public class PdfBookmarks
             var action = PDFium.FPDFBookmark_GetAction(bookmarkHandle);
             if (action != IntPtr.Zero)
             {
-                dest = PDFium.FPDFAction_GetDest(_document, action);
+                dest = PDFium.FPDFAction_GetDest(document, action);
                 if (dest != IntPtr.Zero)
                 {
-                    bookmark.PageIndex = (int)PDFium.FPDFDest_GetDestPageIndex(_document, dest);
+                    bookmark.PageIndex = (int)PDFium.FPDFDest_GetDestPageIndex(document, dest);
                 }
             }
         }

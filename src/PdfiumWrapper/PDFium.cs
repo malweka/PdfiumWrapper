@@ -17,38 +17,38 @@ public static partial class PDFium
     #region Library Management
 
     [LibraryImport(LibraryName)]
-    public static partial void FPDF_InitLibrary();
+    internal static partial void FPDF_InitLibrary();
 
     [LibraryImport(LibraryName)]
-    public static partial void FPDF_DestroyLibrary();
+    internal static partial void FPDF_DestroyLibrary();
 
     [LibraryImport(LibraryName)]
-    public static partial void FPDF_SetSandBoxPolicy(uint policy, int enable);
+    internal static partial void FPDF_SetSandBoxPolicy(uint policy, int enable);
 
     #endregion
 
     #region Document Management
 
     [LibraryImport(LibraryName, StringMarshalling = StringMarshalling.Utf8)]
-    public static partial IntPtr FPDF_LoadDocument(string file_path, string? password);
+    internal static partial IntPtr FPDF_LoadDocument(string file_path, string? password);
 
     [LibraryImport(LibraryName, StringMarshalling = StringMarshalling.Utf8)]
-    public static partial IntPtr FPDF_LoadMemDocument(IntPtr data_buf, int size, string? password);
+    internal static partial IntPtr FPDF_LoadMemDocument(IntPtr data_buf, int size, string? password);
 
     [LibraryImport(LibraryName, StringMarshalling = StringMarshalling.Utf8)]
-    public static partial IntPtr FPDF_LoadCustomDocument(ref FPDF_FILEACCESS fileAccess, string? password);
+    internal static partial IntPtr FPDF_LoadCustomDocument(ref FPDF_FILEACCESS fileAccess, string? password);
 
     [LibraryImport(LibraryName)]
-    public static partial void FPDF_CloseDocument(IntPtr document);
+    internal static partial void FPDF_CloseDocument(IntPtr document);
 
     [LibraryImport(LibraryName)]
-    public static partial int FPDF_GetPageCount(IntPtr document);
+    internal static partial int FPDF_GetPageCount(IntPtr document);
 
     [LibraryImport(LibraryName)]
-    public static partial uint FPDF_GetDocPermissions(IntPtr document);
+    internal static partial uint FPDF_GetDocPermissions(IntPtr document);
 
     [LibraryImport(LibraryName)]
-    public static partial int FPDF_GetSecurityHandlerRevision(IntPtr document);
+    internal static partial int FPDF_GetSecurityHandlerRevision(IntPtr document);
 
     [StructLayout(LayoutKind.Sequential)]
     public struct FPDF_FILEACCESS
@@ -63,34 +63,34 @@ public static partial class PDFium
     #region Page Management
 
     [LibraryImport(LibraryName)]
-    public static partial IntPtr FPDF_LoadPage(IntPtr document, int page_index);
+    internal static partial IntPtr FPDF_LoadPage(IntPtr document, int page_index);
 
     [LibraryImport(LibraryName)]
-    public static partial void FPDF_ClosePage(IntPtr page);
+    internal static partial void FPDF_ClosePage(IntPtr page);
 
     [LibraryImport(LibraryName)]
-    public static partial double FPDF_GetPageWidth(IntPtr page);
+    internal static partial double FPDF_GetPageWidth(IntPtr page);
 
     [LibraryImport(LibraryName)]
-    public static partial double FPDF_GetPageHeight(IntPtr page);
+    internal static partial double FPDF_GetPageHeight(IntPtr page);
 
     [LibraryImport(LibraryName)]
-    public static partial int FPDF_GetPageSizeByIndex(IntPtr document, int page_index, out double width, out double height);
+    internal static partial int FPDF_GetPageSizeByIndex(IntPtr document, int page_index, out double width, out double height);
 
     #endregion
 
     #region Rendering
 
     [LibraryImport(LibraryName)]
-    public static partial void FPDF_RenderPage(IntPtr dc, IntPtr page, int start_x, int start_y,
+    internal static partial void FPDF_RenderPage(IntPtr dc, IntPtr page, int start_x, int start_y,
         int size_x, int size_y, int rotate, int flags);
 
     [LibraryImport(LibraryName)]
-    public static partial void FPDF_RenderPageBitmap(IntPtr bitmap, IntPtr page, int start_x, int start_y,
+    internal static partial void FPDF_RenderPageBitmap(IntPtr bitmap, IntPtr page, int start_x, int start_y,
         int size_x, int size_y, int rotate, int flags);
 
     [LibraryImport(LibraryName)]
-    public static partial void FPDF_RenderPageBitmapWithMatrix(IntPtr bitmap, IntPtr page,
+    internal static partial void FPDF_RenderPageBitmapWithMatrix(IntPtr bitmap, IntPtr page,
         ref Matrix matrix, ref RectF clipping, int flags);
 
     #endregion
@@ -98,56 +98,56 @@ public static partial class PDFium
     #region Bitmap Management
 
     [LibraryImport(LibraryName)]
-    public static partial IntPtr FPDFBitmap_Create(int width, int height, int alpha);
+    internal static partial IntPtr FPDFBitmap_Create(int width, int height, int alpha);
 
     [LibraryImport(LibraryName)]
-    public static partial IntPtr FPDFBitmap_CreateEx(int width, int height, int format,
+    internal static partial IntPtr FPDFBitmap_CreateEx(int width, int height, int format,
         IntPtr first_scan, int stride);
 
     [LibraryImport(LibraryName)]
-    public static partial void FPDFBitmap_FillRect(IntPtr bitmap, int left, int top,
+    internal static partial void FPDFBitmap_FillRect(IntPtr bitmap, int left, int top,
         int width, int height, uint color);
 
     [LibraryImport(LibraryName)]
-    public static partial IntPtr FPDFBitmap_GetBuffer(IntPtr bitmap);
+    internal static partial IntPtr FPDFBitmap_GetBuffer(IntPtr bitmap);
 
     [LibraryImport(LibraryName)]
-    public static partial int FPDFBitmap_GetWidth(IntPtr bitmap);
+    internal static partial int FPDFBitmap_GetWidth(IntPtr bitmap);
 
     [LibraryImport(LibraryName)]
-    public static partial int FPDFBitmap_GetHeight(IntPtr bitmap);
+    internal static partial int FPDFBitmap_GetHeight(IntPtr bitmap);
 
     [LibraryImport(LibraryName)]
-    public static partial int FPDFBitmap_GetStride(IntPtr bitmap);
+    internal static partial int FPDFBitmap_GetStride(IntPtr bitmap);
 
     [LibraryImport(LibraryName)]
-    public static partial void FPDFBitmap_Destroy(IntPtr bitmap);
+    internal static partial void FPDFBitmap_Destroy(IntPtr bitmap);
 
     #endregion
 
     #region Text Extraction
 
     [LibraryImport(LibraryName)]
-    public static partial IntPtr FPDFText_LoadPage(IntPtr page);
+    internal static partial IntPtr FPDFText_LoadPage(IntPtr page);
 
     [LibraryImport(LibraryName)]
-    public static partial void FPDFText_ClosePage(IntPtr text_page);
+    internal static partial void FPDFText_ClosePage(IntPtr text_page);
 
     [LibraryImport(LibraryName)]
-    public static partial int FPDFText_CountChars(IntPtr text_page);
+    internal static partial int FPDFText_CountChars(IntPtr text_page);
 
     [LibraryImport(LibraryName)]
-    public static partial uint FPDFText_GetUnicode(IntPtr text_page, int index);
+    internal static partial uint FPDFText_GetUnicode(IntPtr text_page, int index);
 
     [LibraryImport(LibraryName)]
-    public static partial int FPDFText_GetText(IntPtr text_page, int start_index, int count, IntPtr result);
+    internal static partial int FPDFText_GetText(IntPtr text_page, int start_index, int count, IntPtr result);
 
     #endregion
 
     #region Error Handling
 
     [LibraryImport(LibraryName)]
-    public static partial uint FPDF_GetLastError();
+    internal static partial uint FPDF_GetLastError();
 
     #endregion
 
