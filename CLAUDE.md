@@ -1,5 +1,5 @@
 Use AGENTS.md as the primary project instruction file.
 
-## Pull requests
+## Commits and pull requests
 
-- Do not put the Claude session URL (`https://claude.ai/code/session_...`) in pull request descriptions or in PR comments.
+- Do not put the Claude session URL (`https://claude.ai/code/session_...`) in commit messages, pull request descriptions or PR comments. No `Claude-Session:` trailer.
