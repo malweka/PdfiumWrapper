@@ -1376,6 +1376,56 @@ public class PdfDocumentTests : IDisposable
         Assert.Same(bookmarks1, bookmarks2);
     }
     
+    // Three pages and five top-level bookmarks: a direct destination (page 1), a GoTo action
+    // (page 3), no target, a remote GoTo and an undefined named destination. Written without an
+    // xref table; PDFium rebuilds it.
+    private static byte[] BuildOutlinePdf()
+    {
+        const string pdf = """
+            %PDF-1.7
+            1 0 obj << /Type /Catalog /Pages 2 0 R /Outlines 10 0 R >> endobj
+            2 0 obj << /Type /Pages /Kids [3 0 R 4 0 R 5 0 R] /Count 3 >> endobj
+            3 0 obj << /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] >> endobj
+            4 0 obj << /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] >> endobj
+            5 0 obj << /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] >> endobj
+            10 0 obj << /Type /Outlines /First 11 0 R /Last 15 0 R /Count 5 >> endobj
+            11 0 obj << /Title (Intro) /Parent 10 0 R /Next 12 0 R /Dest [3 0 R /Fit] >> endobj
+            12 0 obj << /Title (Chapter) /Parent 10 0 R /Prev 11 0 R /Next 13 0 R /A << /S /GoTo /D [5 0 R /Fit] >> >> endobj
+            13 0 obj << /Title (Note) /Parent 10 0 R /Prev 12 0 R /Next 14 0 R >> endobj
+            14 0 obj << /Title (Remote) /Parent 10 0 R /Prev 13 0 R /Next 15 0 R /A << /S /GoToR /F (other.pdf) /D [1 /Fit] >> >> endobj
+            15 0 obj << /Title (Missing) /Parent 10 0 R /Prev 14 0 R /Dest (nowhere) >> endobj
+            trailer << /Root 1 0 R >>
+            %%EOF
+
+            """;
+        return System.Text.Encoding.ASCII.GetBytes(pdf);
+    }
+
+    [Fact]
+    public void Bookmarks_WithDestination_HaveThePageIndex()
+    {
+        using var doc = new PdfDocument(BuildOutlinePdf());
+
+        var bookmarks = doc.Bookmarks.GetAllBookmarks();
+
+        Assert.Equal(new[] { "Intro", "Chapter", "Note", "Remote", "Missing" }, bookmarks.Select(b => b.Title));
+        Assert.Equal(0, bookmarks[0].PageIndex);
+        Assert.Equal(2, bookmarks[1].PageIndex);
+    }
+
+    [Fact]
+    public void Bookmarks_WithoutAResolvableDestination_HaveNoPageIndex()
+    {
+        // Before PageIndex was nullable, "Note" read as page 0 and "Missing" as -1.
+        using var doc = new PdfDocument(BuildOutlinePdf());
+
+        var bookmarks = doc.Bookmarks.GetAllBookmarks();
+
+        Assert.Null(bookmarks.Single(b => b.Title == "Note").PageIndex);
+        Assert.Null(bookmarks.Single(b => b.Title == "Remote").PageIndex);
+        Assert.Null(bookmarks.Single(b => b.Title == "Missing").PageIndex);
+    }
+
     #endregion
     
     #region Attachments Tests

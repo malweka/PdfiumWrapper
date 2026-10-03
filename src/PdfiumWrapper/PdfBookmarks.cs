@@ -60,24 +60,20 @@ public class PdfBookmarks
         if (title != null)
             bookmark.Title = title;
 
-        // Get destination page
-        var dest = PDFium.FPDFBookmark_GetDest(document, bookmarkHandle);
+        // Get destination page. FPDFBookmark_GetDest falls back to the destination of the
+        // bookmark's action, whatever its type: a remote or embedded GoTo names a page of another
+        // document, so only a GoTo action (or none) can target a page here.
+        var action = PDFium.FPDFBookmark_GetAction(bookmarkHandle);
+        bool targetsThisDocument = action == IntPtr.Zero || PDFium.FPDFAction_GetType(action).Value == PDFium.PDFACTION_GOTO;
+        var dest = targetsThisDocument ? PDFium.FPDFBookmark_GetDest(document, bookmarkHandle) : IntPtr.Zero;
+
+        // No destination stays null, and so does one PDFium cannot resolve (-1) or one that names
+        // a page number past the end, so page 0 is never confused with "no target".
         if (dest != IntPtr.Zero)
         {
-            bookmark.PageIndex = PDFium.FPDFDest_GetDestPageIndex(document, dest);
-        }
-        else
-        {
-            // Try to get from action
-            var action = PDFium.FPDFBookmark_GetAction(bookmarkHandle);
-            if (action != IntPtr.Zero)
-            {
-                dest = PDFium.FPDFAction_GetDest(document, action);
-                if (dest != IntPtr.Zero)
-                {
-                    bookmark.PageIndex = PDFium.FPDFDest_GetDestPageIndex(document, dest);
-                }
-            }
+            int pageIndex = PDFium.FPDFDest_GetDestPageIndex(document, dest);
+            if (pageIndex >= 0 && pageIndex < PDFium.FPDF_GetPageCount(document))
+                bookmark.PageIndex = pageIndex;
         }
 
         // Get child count
