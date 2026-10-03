@@ -125,6 +125,16 @@ public sealed partial class PdfProcessingPool : IAsyncDisposable
 
     private static bool IsBusy(Worker worker) => !worker.Active.IsEmpty;
 
+    /// <summary>Process ids of the workers in the table, retirees included, for tests that kill them.</summary>
+    internal int[] WorkerPidsForTests
+    {
+        get
+        {
+            lock (_workersLock)
+                return _workers.Select(w => w.Pid).ToArray();
+        }
+    }
+
     /// <summary>Slots taken across all workers (jobs in flight plus the dispatcher's claim), for tests that check none leaks.</summary>
     internal int SlotsInUseForTests
     {
@@ -489,6 +499,8 @@ public sealed partial class PdfProcessingPool : IAsyncDisposable
 
             // Nothing alive and nothing coming: the sizer only adds workers when some exist or min > 0.
             startOne = _workers.Count == 0 && _startingWorkers == 0 && _options.MinWorkers == 0 && !_shutdown.IsCancellationRequested;
+            if (startOne)
+                ReserveStarts(1);
         }
 
         if (startOne)
@@ -868,16 +880,30 @@ public sealed partial class PdfProcessingPool : IAsyncDisposable
 
     private async Task StartInitialWorkersAsync(CancellationToken ct)
     {
+        lock (_workersLock)
+            ReserveStarts(_options.MinWorkers);
         var starts = Enumerable.Range(0, _options.MinWorkers).Select(_ => StartWorkerAsync(PdfPoolEventKind.WorkerStarting, "initial", ct)).ToArray();
         await Task.WhenAll(starts).ConfigureAwait(false);
     }
 
+    /// <summary>
+    /// Counts <paramref name="count"/> starts in <c>_startingWorkers</c> before they begin. Called
+    /// under <c>_workersLock</c> by whoever decided there is room for them, so a capacity check and
+    /// its reservation are one step and concurrent deciders never exceed MaxWorkers. Each reserved
+    /// start must be followed by one <see cref="StartWorkerAsync"/>, which releases it.
+    /// </summary>
+    private void ReserveStarts(int count)
+    {
+        Debug.Assert(Monitor.IsEntered(_workersLock));
+        Interlocked.Add(ref _startingWorkers, count);
+    }
+
+    /// <summary>Starts a worker whose place was reserved with <see cref="ReserveStarts"/>.</summary>
     private async Task StartWorkerAsync(PdfPoolEventKind reason, string detail, CancellationToken ct = default)
     {
-        Interlocked.Increment(ref _startingWorkers);
-        Raise(PdfPoolEventKind.WorkerStarting, 0, 0, detail);
         try
         {
+            Raise(PdfPoolEventKind.WorkerStarting, 0, 0, detail);
             using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, _shutdown.Token);
             var worker = await Worker.StartAsync(_options, OnFrame, OnStderr, OnWorkerExit, linked.Token).ConfigureAwait(false);
 
@@ -1021,6 +1047,10 @@ public sealed partial class PdfProcessingPool : IAsyncDisposable
             int processes = _workers.Count + _startingWorkers;
             missing = Math.Min(_options.MinWorkers - (_workers.Count(w => !w.Retiring) + _startingWorkers),
                 _options.MaxWorkers - processes);
+            // Reserved here, under the lock where capacity was counted: two exit handlers running
+            // at once must not both count the same free place.
+            if (missing > 0)
+                ReserveStarts(missing);
         }
 
         for (int i = 0; i < missing; i++)
@@ -1071,6 +1101,7 @@ public sealed partial class PdfProcessingPool : IAsyncDisposable
                 if (processes < _options.MaxWorkers && Stopwatch.GetElapsedTime(_allBusySince, now) >= _options.ScaleUpAfter)
                 {
                     startOne = true;
+                    ReserveStarts(1);
                     _allBusySince = 0;
                 }
             }

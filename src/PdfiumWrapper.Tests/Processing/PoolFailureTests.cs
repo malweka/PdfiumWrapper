@@ -75,6 +75,49 @@ public class PoolFailureTests : IDisposable
         Assert.Equal(1, recovered.Value);
     }
 
+    /// <summary>
+    /// Every worker of a full pool dies at once: each exit handler starts replacements, and together
+    /// they must start exactly as many as were lost, never more than MaxWorkers.
+    /// </summary>
+    [Fact]
+    public async Task SimultaneousExits_ReplaceEachWorkerOnce()
+    {
+        await using var pool = await CreateAsync(o =>
+        {
+            o.MinWorkers = 2;
+            o.MaxWorkers = 2;
+        });
+
+        for (int round = 0; round < 5; round++)
+        {
+            await WaitUntilAsync(() => pool.WorkerPidsForTests.Length == 2 && pool.Workers == 2, TimeSpan.FromSeconds(60));
+            int[] pids = pool.WorkerPidsForTests;
+            int readyBefore = Events(PdfPoolEventKind.WorkerReady).Length;
+
+            // Kill both together, so their exit handlers run concurrently
+            using var go = new ManualResetEventSlim();
+            var killers = pids.Select(pid => Task.Run(() => { go.Wait(); Kill(pid); })).ToArray();
+            go.Set();
+            await Task.WhenAll(killers);
+
+            int most = 0;
+            var watch = Stopwatch.StartNew();
+            while (watch.Elapsed < TimeSpan.FromSeconds(3) || Events(PdfPoolEventKind.WorkerReady).Length < readyBefore + 2)
+            {
+                most = Math.Max(most, pool.Workers);
+                Assert.True(watch.Elapsed < TimeSpan.FromSeconds(60), "the lost workers were not replaced");
+                await Task.Delay(10);
+            }
+
+            Assert.True(most <= 2, $"round {round}: {most} workers alive or starting");
+            Assert.Equal(readyBefore + 2, Events(PdfPoolEventKind.WorkerReady).Length);
+            Assert.DoesNotContain(pool.WorkerPidsForTests, pids.Contains);
+        }
+
+        var result = await pool.GetPageCountAsync(PoolFixture.Input("doc-1-page.pdf")).WaitAsync(PoolFixture.TestTimeout);
+        Assert.Equal(1, result.Value);
+    }
+
     [Fact]
     public void Timeouts_BeyondTimerLimits_AreRejected()
     {
