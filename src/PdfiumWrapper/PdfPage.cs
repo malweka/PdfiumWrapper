@@ -389,8 +389,14 @@ public class PdfPage : IDisposable
     }
 
     /// <summary>
-    /// Remove a page object from the page
+    /// Remove a page object from the page. The caller owns the object afterwards: dispose it, or
+    /// the document disposes it when the document is disposed.
     /// </summary>
+    /// <returns>
+    /// False when <paramref name="pageObject"/> is not on this page: an object of another page, a
+    /// sub-object of a form object, or one already removed.
+    /// </returns>
+    /// <exception cref="ObjectDisposedException"><paramref name="pageObject"/> is disposed.</exception>
     public bool RemoveObject(PdfPageObject pageObject)
     {
         using var _ = PdfiumRuntime.Enter();
@@ -398,6 +404,22 @@ public class PdfPage : IDisposable
 
         if (pageObject == null)
             throw new ArgumentNullException(nameof(pageObject));
+
+        // A disposed wrapper still holds the pointer. Removing through it handed the object to a
+        // wrapper whose Dispose does nothing, so the object was never destroyed.
+        if (pageObject.IsDisposedForChildObjects)
+            throw new ObjectDisposedException(pageObject.GetType().Name);
+
+        // Only the wrapper this page tracks for the object may remove it. Any other wrapper would
+        // leave the tracked one in place, pointing at an object the page no longer owns.
+        lock (_attachedObjectsLock)
+        {
+            if (_attachedObjects == null || !_attachedObjects.TryGetValue(pageObject.Handle, out var tracked)
+                || !ReferenceEquals(tracked, pageObject))
+            {
+                return false;
+            }
+        }
 
         var result = PDFium.FPDFPage_RemoveObject(_page, pageObject.Handle);
         if (result)

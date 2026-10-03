@@ -86,6 +86,47 @@ public class PdfPageEditingTests : IDisposable
     }
 
     [Fact]
+    public void RemoveObject_WithDisposedWrapper_Throws_AndLeaksNothing()
+    {
+        // Arrange: a disposed wrapper still holds the pointer of an object the page owns
+        long liveBefore = PdfiumRuntime.LiveHandleCount;
+        using (var doc = new PdfDocument(ContractPdfPath))
+        using (var page = doc.GetPage(0))
+        {
+            var original = page.GetObject(0);
+            original.Dispose();
+            var live = page.GetObject(0);
+            int count = page.ObjectCount;
+
+            // Act / Assert: the object stays on the page, and the live wrapper still owns the removal
+            Assert.Throws<ObjectDisposedException>(() => page.RemoveObject(original));
+            Assert.Equal(count, page.ObjectCount);
+            Assert.True(page.RemoveObject(live));
+            Assert.Equal(count - 1, page.ObjectCount);
+        }
+
+        // The removed object was destroyed with the document
+        Assert.Equal(liveBefore, PdfiumRuntime.LiveHandleCount);
+    }
+
+    [Fact]
+    public void RemoveObject_WithObjectNotOnThisPage_ReturnsFalse()
+    {
+        // Arrange
+        using var doc = new PdfDocument();
+        using var first = doc.AddPage();
+        using var second = doc.AddPage();
+        var rectangle = first.AddRectangle(10, 20, 30, 40);
+
+        // Act / Assert: another page's object, then an object removed already
+        Assert.False(second.RemoveObject(rectangle));
+        Assert.Equal(1, first.ObjectCount);
+        Assert.True(first.RemoveObject(rectangle));
+        Assert.False(first.RemoveObject(rectangle));
+        rectangle.Dispose();
+    }
+
+    [Fact]
     public void ImageObject_GetBitmap_ReturnsManagedBgraPixels_AndLeavesNoNativeBitmapBehind()
     {
         // Arrange: a PNG of known size
