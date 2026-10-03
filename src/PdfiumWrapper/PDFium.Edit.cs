@@ -372,6 +372,20 @@ public static partial class PDFium
     internal static partial void FPDFFont_Close(IntPtr font);
 
     /// <summary>
+    /// Get the font size of a text object, in points
+    /// </summary>
+    [LibraryImport(LibraryName)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static partial bool FPDFTextObj_GetFontSize(IntPtr text, out float size);
+
+    /// <summary>
+    /// Set the font size of a text object, in points (experimental API; must be non-negative)
+    /// </summary>
+    [LibraryImport(LibraryName)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static partial bool FPDFTextObj_SetFontSize(IntPtr text, float size);
+
+    /// <summary>
     /// Get the font name
     /// </summary>
     [LibraryImport(LibraryName)]

@@ -75,9 +75,7 @@ using var document = new PdfDocument();
 using var page = document.AddPage(width: 612, height: 792);
 
 // Add text
-var text = page.AddText("Hello World", x: 100, y: 700);
-text.Font = "Helvetica";
-text.FontSize = 24;
+var text = page.AddText("Hello World", x: 100, y: 700, font: "Helvetica", fontSize: 24);
 text.Color = Color.Black;
 
 // Add a rectangle

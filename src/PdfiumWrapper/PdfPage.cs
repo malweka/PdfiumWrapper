@@ -303,8 +303,17 @@ public class PdfPage : IDisposable
         ThrowIfDisposed();
 
         var imageObj = PdfImageObject.Create(_owner.Document);
-        imageObj.SetImage(imageBytes, _page);
-        imageObj.SetPositionAndSize(x, y, width, height);
+        try
+        {
+            imageObj.SetImage(imageBytes, _page);
+            imageObj.SetPositionAndSize(x, y, width, height);
+        }
+        catch
+        {
+            // Not inserted yet, so nothing else owns it: an undecodable image must not leak the object.
+            imageObj.Dispose();
+            throw;
+        }
 
         // Insert into page
         PDFium.FPDFPage_InsertObject(_page, imageObj.Handle);

@@ -451,9 +451,7 @@ public class PdfPage : IDisposable
 Adds a text object to the page.
 
 ```csharp
-var text = page.AddText("Hello World", x: 100, y: 700);
-text.Font = "Helvetica-Bold";
-text.FontSize = 24;
+var text = page.AddText("Hello World", x: 100, y: 700, font: "Helvetica-Bold", fontSize: 24);
 text.Color = Color.Black;
 ```
 
@@ -638,16 +636,17 @@ public class PdfTextObject : PdfPageObject
 
 | Property | Type | Description |
 |----------|------|-------------|
-| `Font` | `string` | Font name (e.g., "Helvetica", "Times-Roman") |
-| `FontSize` | `float` | Font size in points |
-| `Color` | `Color` | Text color |
+| `Text` | `string` | Text content (set only) |
+| `FontSize` | `float` | Font size in points (get and set) |
+| `Color` | `Color` | Fill color (set only) |
+| `StrokeColor` | `Color` | Stroke color (set only) |
+
+The font is chosen when the text is added (`PdfPage.AddText(text, x, y, font, fontSize)`); PDFium cannot change a text object's font afterwards.
 
 #### Example
 
 ```csharp
-var text = page.AddText("Hello World", x: 100, y: 700);
-text.Font = "Helvetica-Bold";
-text.FontSize = 24;
+var text = page.AddText("Hello World", x: 100, y: 700, font: "Helvetica-Bold", fontSize: 24);
 text.Color = Color.DarkBlue;
 ```
 
@@ -1292,7 +1291,7 @@ if (attachment != null)
 
 #### ExtractAll(string outputDirectory)
 
-Extracts all attachments to a directory, creating it if needed. Attachment names come from the document, so each file is named after the last path component of its attachment name (`/` and `\` separate components everywhere; on macOS `:` does too, because PDFium returns `/` in a name as `:` there), with characters the file system rejects replaced by `_`; nothing is written outside `outputDirectory`. An attachment with no usable name (empty, `.`, `..`) is written as `attachment_N`, numbered from 1 by its position. Attachments that reduce to the same name overwrite each other.
+Extracts all attachments to a directory, creating it if needed. Attachment names come from the document, so each file is named after the last path component of its attachment name (`/` and `\` separate components everywhere; on macOS `:` does too, because PDFium returns `/` in a name as `:` there), with characters the file system rejects replaced by `_`; nothing is written outside `outputDirectory`. Trailing dots and spaces are removed (Windows drops them), and a Windows device name such as `CON`, `NUL.txt` or `COM1.log` gets a leading `_`, on every platform. An attachment with no usable name (empty, `.`, `..`) is written as `attachment_N`, numbered from 1 by its position. Attachments whose names are then equal, ignoring case, are not overwritten: later ones get `_2`, `_3` before the extension (`report.txt`, `report_2.txt`).
 
 ```csharp
 document.Attachments.ExtractAll("extracted_files");

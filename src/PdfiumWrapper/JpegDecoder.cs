@@ -70,8 +70,14 @@ internal sealed class JpegDecoder : IDisposable
 
         var info = ReadHeader(jpegData);
         int pixelSize = GetPixelSize(outputFormat);
-        int pitch = info.Width * pixelSize;
-        var destBuffer = new byte[pitch * info.Height];
+        // The dimensions come from the file. Size the buffer in 64-bit arithmetic: a header claiming
+        // 32768 x 32769 wraps to 128 KB in int, and the decoder would write 4 GB into it.
+        long pitch = (long)info.Width * pixelSize;
+        long size = pitch * info.Height;
+        if (info.Width <= 0 || info.Height <= 0 || size > Array.MaxLength)
+            throw new InvalidDataException(
+                $"JPEG dimensions {info.Width} x {info.Height} are not supported: the decoded image would need {size:N0} bytes.");
+        var destBuffer = new byte[size];
 
         unsafe
         {
@@ -84,7 +90,7 @@ internal sealed class JpegDecoder : IDisposable
                     (nuint)jpegData.Length,
                     (IntPtr)dstPtr,
                     info.Width,
-                    pitch,
+                    (int)pitch,
                     info.Height,
                     (int)outputFormat,
                     0);
@@ -95,39 +101,6 @@ internal sealed class JpegDecoder : IDisposable
         }
 
         return (destBuffer, info);
-    }
-
-    /// <summary>
-    /// Decode JPEG data directly into a caller-provided buffer (zero-copy for PDFium interop).
-    /// </summary>
-    public JpegInfo Decode(byte[] jpegData, IntPtr destBuffer, int destPitch,
-        LibTurboJpeg.TJPixelFormat outputFormat = LibTurboJpeg.TJPixelFormat.BGRA)
-    {
-        ObjectDisposedException.ThrowIf(_disposed, this);
-
-        var info = ReadHeader(jpegData);
-
-        unsafe
-        {
-            fixed (byte* srcPtr = jpegData)
-            {
-                int result = LibTurboJpeg.tjDecompress2(
-                    _handle,
-                    (IntPtr)srcPtr,
-                    (nuint)jpegData.Length,
-                    destBuffer,
-                    info.Width,
-                    destPitch,
-                    info.Height,
-                    (int)outputFormat,
-                    0);
-
-                if (result != 0)
-                    ThrowTurboJpegError("tjDecompress2");
-            }
-        }
-
-        return info;
     }
 
     private static int GetPixelSize(LibTurboJpeg.TJPixelFormat format) => format switch

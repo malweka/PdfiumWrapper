@@ -1192,6 +1192,40 @@ public class PdfDocumentTests : IDisposable
     }
 
     [Fact]
+    public async Task SaveAsTiff_ToStreamThatFails_RethrowsTheStreamException()
+    {
+        // Arrange: libtiff calls the stream from native code; the stream's exception must come back
+        // to the caller as itself, not unwind through libtiff (which ends the process off Windows)
+        using var doc = new PdfDocument(ContractPdfPath);
+        using var failing = new FailingWriteStream(writesBeforeFailure: 1);
+        using var failingAsync = new FailingWriteStream(writesBeforeFailure: 1);
+
+        // Act
+        var ex = Assert.Throws<IOException>(() => doc.SaveAsTiff(failing, dpi: 72));
+        var asyncEx = await Assert.ThrowsAsync<IOException>(() => doc.SaveAsTiffAsync(failingAsync, dpi: 72));
+
+        // Assert: the original exception, and the next TIFF still works
+        Assert.Equal(FailingWriteStream.Message, ex.Message);
+        Assert.Equal(FailingWriteStream.Message, asyncEx.Message);
+        using var stream = new MemoryStream();
+        doc.SaveAsTiff(stream, dpi: 72);
+        Assert.True(stream.Length > 0);
+    }
+
+    private sealed class FailingWriteStream(int writesBeforeFailure) : MemoryStream
+    {
+        public const string Message = "simulated disk full";
+        private int _writes;
+
+        public override void Write(byte[] buffer, int offset, int count)
+        {
+            if (_writes++ >= writesBeforeFailure)
+                throw new IOException(Message);
+            base.Write(buffer, offset, count);
+        }
+    }
+
+    [Fact]
     public void SaveAsTiff_PresentationPdf_ShouldCreateValidFile()
     {
         // Arrange
@@ -1330,6 +1364,41 @@ public class PdfDocumentTests : IDisposable
         Assert.Empty(File.ReadAllBytes(Path.Combine(outputDir, "empty.txt")));
         var unnamed = Assert.Single(written, name => name.StartsWith("attachment_"));
         Assert.Equal("dots", File.ReadAllText(Path.Combine(outputDir, unnamed)));
+    }
+
+    [Fact]
+    public void ExtractAll_DeviceNamesAndNamesWindowsWouldMerge_GetDistinctFiles()
+    {
+        // Arrange
+        var outputDir = Path.Combine(CreateTempDirectory(), "out");
+
+        using var doc = new PdfDocument();
+        using (PdfiumRuntime.Enter())
+        {
+            AddAttachment(doc, "CON", "con");
+            AddAttachment(doc, "nul.txt", "nul");
+            AddAttachment(doc, "COM1.log", "com1");
+            AddAttachment(doc, "a.", "a-dot");
+            AddAttachment(doc, "a ", "a-space");
+            AddAttachment(doc, "Report.txt", "upper");
+            AddAttachment(doc, "report.txt", "lower");
+            AddAttachment(doc, "console.txt", "console");
+        }
+
+        // Act
+        doc.Attachments.ExtractAll(outputDir);
+
+        // Assert: every attachment is a regular file of its own, named the same on every platform
+        string Read(string name) => File.ReadAllText(Path.Combine(outputDir, name));
+        Assert.Equal(8, Directory.GetFiles(outputDir).Length);
+        Assert.Equal("con", Read("_CON"));
+        Assert.Equal("nul", Read("_nul.txt"));
+        Assert.Equal("com1", Read("_COM1.log"));
+        // PDFium keeps attachments in a sorted name tree, so which of two merged names comes first
+        // depends on the names, not on the order they were added
+        Assert.Equal(new[] { "a-dot", "a-space" }, new[] { Read("a"), Read("a_2") }.Order());
+        Assert.Equal(new[] { "lower", "upper" }, new[] { Read("Report.txt"), Read("report_2.txt") }.Order());
+        Assert.Equal("console", Read("console.txt"));
     }
 
     private static void AddAttachment(PdfDocument doc, string name, string contents)

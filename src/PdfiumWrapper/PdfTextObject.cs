@@ -7,14 +7,9 @@ namespace PdfiumWrapper;
 /// </summary>
 public class PdfTextObject : PdfPageObject
 {
-    private IntPtr _font;
-    private float _fontSize;
-
-    internal PdfTextObject(IntPtr handle, IntPtr documentHandle, IntPtr font, float fontSize)
+    internal PdfTextObject(IntPtr handle, IntPtr documentHandle)
         : base(handle, documentHandle)
     {
-        _font = font;
-        _fontSize = fontSize;
     }
 
     /// <summary>
@@ -28,18 +23,24 @@ public class PdfTextObject : PdfPageObject
         if (font == IntPtr.Zero)
             throw new InvalidOperationException($"Failed to load font: {fontName}");
 
-        var handle = PDFium.FPDFPageObj_CreateTextObj(documentHandle, font, fontSize);
-        if (handle == IntPtr.Zero)
+        try
         {
-            PDFium.FPDFFont_Close(font);
-            throw new InvalidOperationException("Failed to create text object");
-        }
+            var handle = PDFium.FPDFPageObj_CreateTextObj(documentHandle, font, fontSize);
+            if (handle == IntPtr.Zero)
+                throw new InvalidOperationException("Failed to create text object");
 
-        return new PdfTextObject(handle, documentHandle, font, fontSize);
+            return new PdfTextObject(handle, documentHandle);
+        }
+        finally
+        {
+            // The text object keeps its own reference to the font. Holding ours until the object
+            // was disposed leaked the font whenever the page or document was disposed first.
+            PDFium.FPDFFont_Close(font);
+        }
     }
 
     /// <summary>
-    /// Set or get the text content
+    /// Set the text content
     /// </summary>
     public string Text
     {
@@ -53,38 +54,26 @@ public class PdfTextObject : PdfPageObject
     }
 
     /// <summary>
-    /// Set or get the font name (changes require recreating the text object)
+    /// Get or set the font size, in points. The font itself is chosen when the text is added
+    /// (<see cref="PdfPage.AddText"/>); PDFium cannot change it afterwards.
     /// </summary>
-    public string Font
+    public float FontSize
     {
+        get
+        {
+            using var _ = PdfiumRuntime.Enter();
+            ThrowIfDisposed();
+            if (!PDFium.FPDFTextObj_GetFontSize(Handle, out float size))
+                throw new InvalidOperationException("Failed to get font size");
+            return size;
+        }
         set
         {
             using var _ = PdfiumRuntime.Enter();
             ThrowIfDisposed();
-            // Close old font
-            if (_font != IntPtr.Zero)
-                PDFium.FPDFFont_Close(_font);
-
-            // Load new font
-            _font = PDFium.FPDFText_LoadStandardFont(DocumentHandle, value);
-            if (_font == IntPtr.Zero)
-                throw new InvalidOperationException($"Failed to load font: {value}");
-        }
-    }
-
-    /// <summary>
-    /// Set or get the font size
-    /// </summary>
-    [NoNativeCall]
-    public float FontSize
-    {
-        get => _fontSize;
-        set
-        {
-            ThrowIfDisposed();
-            _fontSize = value;
-            // Note: PDFium doesn't have a direct API to change font size after creation
-            // The font size is set during object creation
+            ArgumentOutOfRangeException.ThrowIfNegative(value);
+            if (!PDFium.FPDFTextObj_SetFontSize(Handle, value))
+                throw new InvalidOperationException("Failed to set font size");
         }
     }
 
@@ -113,19 +102,4 @@ public class PdfTextObject : PdfPageObject
             PDFium.FPDFPageObj_SetStrokeColor(Handle, value.R, value.G, value.B, value.A);
         }
     }
-
-    protected override void Dispose(bool disposing)
-    {
-        if (disposing)
-        {
-            using var _ = PdfiumRuntime.Enter();
-            if (_font != IntPtr.Zero)
-            {
-                PDFium.FPDFFont_Close(_font);
-                _font = IntPtr.Zero;
-            }
-        }
-        base.Dispose(disposing);
-    }
 }
-

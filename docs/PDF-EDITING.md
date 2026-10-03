@@ -129,9 +129,7 @@ var text = page.AddText("Hello World", x: 100, y: 700);
 ### Styled Text
 
 ```csharp
-var text = page.AddText("Hello World", x: 100, y: 700);
-text.Font = "Helvetica";
-text.FontSize = 24;
+var text = page.AddText("Hello World", x: 100, y: 700, font: "Helvetica", fontSize: 24);
 text.Color = Color.Black;
 ```
 
@@ -146,21 +144,15 @@ text.Color = Color.DarkBlue;
 
 ```csharp
 // Title
-var title = page.AddText("Document Title", x: 100, y: 750);
-title.Font = "Helvetica-Bold";
-title.FontSize = 24;
+var title = page.AddText("Document Title", x: 100, y: 750, font: "Helvetica-Bold", fontSize: 24);
 title.Color = Color.Black;
 
 // Subtitle
-var subtitle = page.AddText("A sample document", x: 100, y: 720);
-subtitle.Font = "Helvetica";
-subtitle.FontSize = 14;
+var subtitle = page.AddText("A sample document", x: 100, y: 720, font: "Helvetica", fontSize: 14);
 subtitle.Color = Color.Gray;
 
 // Body text
-var body = page.AddText("This is the main content of the document.", x: 100, y: 680);
-body.Font = "Times-Roman";
-body.FontSize = 12;
+var body = page.AddText("This is the main content of the document.", x: 100, y: 680, font: "Times-Roman", fontSize: 12);
 body.Color = Color.Black;
 ```
 
@@ -408,11 +400,10 @@ The following fonts are built into PDF and don't require embedding:
 | ZapfDingbats | ZapfDingbats |
 
 ```csharp
-// Using standard fonts
-text.Font = "Helvetica";
-text.Font = "Helvetica-Bold";
-text.Font = "Times-Roman";
-text.Font = "Courier";
+// The font is chosen when the text is added; PDFium cannot change it afterwards
+var heading = page.AddText("Heading", x: 100, y: 700, font: "Helvetica-Bold", fontSize: 18);
+var code = page.AddText("var x = 1;", x: 100, y: 670, font: "Courier");
+code.FontSize = 10; // the size can be changed later
 ```
 
 ---
@@ -429,15 +420,11 @@ using var document = new PdfDocument();
 using var page = document.AddPage(width: 612, height: 792);
 
 // Add title
-var title = page.AddText("Hello World", x: 100, y: 700);
-title.Font = "Helvetica";
-title.FontSize = 24;
+var title = page.AddText("Hello World", x: 100, y: 700, font: "Helvetica", fontSize: 24);
 title.Color = Color.Black;
 
 // Add body text
-var body = page.AddText("This is a sample PDF created with PdfiumWrapper", x: 100, y: 650);
-body.Font = "Helvetica";
-body.FontSize = 12;
+var body = page.AddText("This is a sample PDF created with PdfiumWrapper", x: 100, y: 650, font: "Helvetica", fontSize: 12);
 body.Color = Color.Gray;
 
 page.GenerateContent();
@@ -451,9 +438,7 @@ using var document = new PdfDocument();
 using var page = document.AddPage(width: 612, height: 792);
 
 // Add title
-var title = page.AddText("Document with Image", x: 100, y: 700);
-title.Font = "Helvetica-Bold";
-title.FontSize = 18;
+var title = page.AddText("Document with Image", x: 100, y: 700, font: "Helvetica-Bold", fontSize: 18);
 title.Color = Color.Black;
 
 // Add image
@@ -461,9 +446,7 @@ var imageBytes = File.ReadAllBytes("logo.png");
 var image = page.AddImage(imageBytes, x: 100, y: 500, width: 200, height: 100);
 
 // Add caption
-var caption = page.AddText("Figure 1: Company Logo", x: 100, y: 480);
-caption.Font = "Helvetica-Oblique";
-caption.FontSize = 10;
+var caption = page.AddText("Figure 1: Company Logo", x: 100, y: 480, font: "Helvetica-Oblique", fontSize: 10);
 caption.Color = Color.Gray;
 
 page.GenerateContent();
@@ -480,9 +463,7 @@ for (int i = 0; i < 3; i++)
     using var page = document.AddPage();
     
     // Page title
-    var title = page.AddText($"Page {i + 1}", x: 250, y: 750);
-    title.Font = "Helvetica-Bold";
-    title.FontSize = 24;
+    var title = page.AddText($"Page {i + 1}", x: 250, y: 750, font: "Helvetica-Bold", fontSize: 24);
     title.Color = Color.DarkBlue;
     
     // Page border
@@ -495,9 +476,7 @@ for (int i = 0; i < 3; i++)
     border.StrokeWidth = 1;
     
     // Content
-    var content = page.AddText($"This is the content of page {i + 1}.", x: 100, y: 600);
-    content.Font = "Times-Roman";
-    content.FontSize = 12;
+    var content = page.AddText($"This is the content of page {i + 1}.", x: 100, y: 600, font: "Times-Roman", fontSize: 12);
     content.Color = Color.Black;
     
     page.GenerateContent();
@@ -513,9 +492,7 @@ using var document = new PdfDocument();
 using var page = document.AddPage();
 
 // Title
-var title = page.AddText("Shapes Demo", x: 250, y: 750);
-title.Font = "Helvetica-Bold";
-title.FontSize = 20;
+var title = page.AddText("Shapes Demo", x: 250, y: 750, font: "Helvetica-Bold", fontSize: 20);
 title.Color = Color.Black;
 
 // Rectangle

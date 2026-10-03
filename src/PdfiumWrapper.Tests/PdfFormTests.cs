@@ -21,6 +21,21 @@ public class PdfFormTests
     }
 
     [Fact]
+    public void FormFillInfo_LayoutMatchesTheHeader()
+    {
+        // fpdf_formfill.h (8076): FPDF_BOOL xfa_disabled sits between m_pJsPlatform and
+        // FFI_DisplayCaret. PDFium reads the whole structure, so a missing field shifts every
+        // version 2 callback and makes PDFium read past the allocation.
+        if (IntPtr.Size != 8)
+            return; // the offsets below are for 64-bit processes, which every supported runtime is
+
+        Assert.Equal(128, (int)System.Runtime.InteropServices.Marshal.OffsetOf<PDFium.FPDF_FORMFILLINFO>(nameof(PDFium.FPDF_FORMFILLINFO.m_pJsPlatform)));
+        Assert.Equal(136, (int)System.Runtime.InteropServices.Marshal.OffsetOf<PDFium.FPDF_FORMFILLINFO>(nameof(PDFium.FPDF_FORMFILLINFO.xfa_disabled)));
+        Assert.Equal(144, (int)System.Runtime.InteropServices.Marshal.OffsetOf<PDFium.FPDF_FORMFILLINFO>(nameof(PDFium.FPDF_FORMFILLINFO.FFI_DisplayCaret)));
+        Assert.Equal(280, System.Runtime.InteropServices.Marshal.SizeOf<PDFium.FPDF_FORMFILLINFO>());
+    }
+
+    [Fact]
     public void GetForm_WithDocumentWithoutForms_ShouldReturnNull()
     {
         // Arrange
