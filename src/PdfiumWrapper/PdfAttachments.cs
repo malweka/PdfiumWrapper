@@ -130,10 +130,15 @@ public class PdfAttachments
     // Attachment names come from the document. Path.Combine would follow "..\" segments
     // and return an absolute name unchanged, so keep only the last component of either
     // separator style and replace characters the file system rejects (":" would open an
-    // alternate data stream on Windows).
+    // alternate data stream on Windows). On macOS PDFium returns "/" in a name as ":", the
+    // classic Mac separator, so ":" is a separator there too.
     private static string SafeFileName(string? name, int index)
     {
-        string fileName = Path.GetFileName((name ?? string.Empty).Replace('\\', '/'));
+        string normalized = (name ?? string.Empty).Replace('\\', '/');
+        if (OperatingSystem.IsMacOS())
+            normalized = normalized.Replace(':', '/');
+
+        string fileName = Path.GetFileName(normalized);
         foreach (char c in Path.GetInvalidFileNameChars())
             fileName = fileName.Replace(c, '_');
 

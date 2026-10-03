@@ -724,8 +724,11 @@ public class PdfDocument : IDisposable
         }
     }
 
-    private const int ImageRenderFlags = PDFium.FPDF_ANNOT;
-    private const int TiffRenderFlags = PDFium.FPDF_PRINTING | PDFium.FPDF_ANNOT;
+    // FPDF_NO_NATIVETEXT: on macOS PDFium otherwise draws text into 32-bit bitmaps with
+    // CoreGraphics, which gives heavier glyphs (about 20% more ink) than the Windows and Linux
+    // output and than the 8-bit gray TIFF render. It has no effect on other platforms.
+    private const int ImageRenderFlags = PDFium.FPDF_ANNOT | PDFium.FPDF_NO_NATIVETEXT;
+    private const int TiffRenderFlags = PDFium.FPDF_PRINTING | PDFium.FPDF_ANNOT | PDFium.FPDF_NO_NATIVETEXT;
 
     #endregion
 

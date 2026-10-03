@@ -257,6 +257,7 @@ Rules for pool code:
 - `PixelConverter` uses pre-scaled threshold comparison to avoid per-pixel division in bilevel conversion
 - PNG encoding uses zlib-ng (SIMD: NEON/AVX2) + `PNG_FILTER_SUB` for ~40% faster than SkiaSharp
 - JPEG encoding uses libjpeg-turbo (SIMD) for ~2x faster than SkiaSharp
+- Document-level renders add `FPDF_NO_NATIVETEXT` so macOS draws text with PDFium's own rasterizer instead of CoreGraphics (heavier glyphs), matching Windows/Linux and the gray TIFF render
 - For TIFF: render flags include `FPDF_PRINTING | FPDF_ANNOT` (vs just `FPDF_ANNOT` for other formats), and pages are rendered into an 8-bit gray bitmap instead of BGRA (26-39% faster on text documents)
 - `StreamImageBytes` uses eager validation + private core pattern to throw immediately on bad input while deferring iteration
 

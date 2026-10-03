@@ -1323,7 +1323,9 @@ public class PdfDocumentTests : IDisposable
         Assert.Equal("backslash", File.ReadAllText(Path.Combine(outputDir, "backslash.txt")));
         Assert.Equal("absolute", File.ReadAllText(Path.Combine(outputDir, "absolute.txt")));
         Assert.Equal("plain", File.ReadAllText(Path.Combine(outputDir, "plain.txt")));
-        var colonName = OperatingSystem.IsWindows() ? "stream.txt_hidden" : "stream.txt:hidden";
+        // PDFium returns "/" as ":" on macOS, where the wrapper therefore splits names at ":"
+        var colonName = OperatingSystem.IsWindows() ? "stream.txt_hidden"
+            : OperatingSystem.IsMacOS() ? "hidden" : "stream.txt:hidden";
         Assert.Equal("colon", File.ReadAllText(Path.Combine(outputDir, colonName)));
         Assert.Empty(File.ReadAllBytes(Path.Combine(outputDir, "empty.txt")));
         var unnamed = Assert.Single(written, name => name.StartsWith("attachment_"));

@@ -2,7 +2,7 @@
 
 ## Current focus
 
-.NET 10 and dependency upgrade (2026-10-03), branch `feature/net10-upgrade` from `main` at `4497749`, uncommitted. Every project targets `net10.0`; win-x64 and linux-x64 natives are rebuilt at the new versions; 274 tests pass on win-x64 and on linux-x64 (.NET 10 SDK container). **macOS natives (osx-arm64, osx-x64) are still the old versions** and must be rebuilt on a Mac before a release: `bash src/native/build-natives.sh --target osx-arm64` and `--target osx-x64`, then run the tests.
+.NET 10 and dependency upgrade (2026-10-03), branch `feature/net10-upgrade` from `main` at `4497749`, uncommitted. Every project targets `net10.0`; win-x64 and linux-x64 natives are rebuilt at the new versions; 274 tests pass on win-x64 and on linux-x64 (.NET 10 SDK container). macOS natives (osx-arm64, osx-x64) were rebuilt on a Mac at the same versions (2026-10-03, uncommitted). After fixing three macOS-only test failures, 275/275 tests pass on osx-arm64 (two full runs).
 
 ### Earlier focus (2026-10-03, before the upgrade)
 
@@ -27,6 +27,19 @@ Follow-up verification of PR #15 commit `f3b15a1130567dc00f604c61b5aab9bc98a9e24
 Release 1 of `ai/plans/plan-pdfium-concurrency.md` is implemented on `feature/pdfium-concurrency-plan` (version 2.0.0); Release 2 remains deferred pending the owner's capacity/deployment inputs. The global `ai-pr-review` skill is installed and available.
 
 ## Completed
+
+### Latest task: make the test suite pass on macOS (2026-10-03, same branch, uncommitted)
+
+- `PdfAttachments.ExtractAll`: on macOS PDFium returns `/` in an attachment name as `:` (`CPDF_FileSpec::DecodeFileName`), so `../parent.txt` came back as `..:parent.txt` and was written under that name. `SafeFileName` now also splits at `:` on macOS. Test expects `hidden` for `stream.txt:hidden` on macOS. `docs/API-REFERENCE.md` updated.
+- Render flags: on macOS PDFium draws text into 32-bit bitmaps with CoreGraphics (about 22% more dark pixels on contract.pdf page 0: 54,898 against 44,903 without, and 41,279 in the 8-bit gray TIFF render, where native text is never used). `ImageRenderFlags` and `TiffRenderFlags` in `PdfDocument.cs` now include `FPDF_NO_NATIVETEXT`, so PNG/JPEG/RawBitmap output on macOS matches Windows/Linux and the TIFF render. The flag has no effect on other platforms. **This changes macOS PNG/JPEG output** (lighter text). `PdfPage.RenderToBytes(width, height, flags)` still uses the flags the caller passes. AGENTS.md notes the flag.
+- `AsyncCallers_DoNotStarveTheThreadPool` was flaky: macOS assesses a newly written dylib on its first `dlopen` (reproduced 60 to 90 ms, 116 to 148 ms in the failing runs), and `libtiff_shim`/`libturbojpeg` load lazily inside the measured window, so one heartbeat exceeded the 100 ms bound (with about 18 samples, p99 is the maximum). Real starvation (sync mode) is about 800 ms; async under full CPU load stays under 30 ms. The `starvation` scenario (`Scenarios.Concurrency.cs`) now runs one warm-up conversion before the heartbeat starts. The conversion lambdas are shared as one `convert` delegate.
+- Verified: library builds with 0 warnings; 275/275 on osx-arm64, twice (the second time after rewriting every dylib in `bin` so macOS reassesses them). Not rerun on win-x64/linux-x64 (no code path there changed: `FPDF_NO_NATIVETEXT` is a no-op off Apple, the `:` split is macOS-only, and the scenario change only adds a warm-up).
+
+### Earlier task: rebuild the macOS natives (2026-10-03, same branch, uncommitted)
+
+- Built on an Apple Silicon Mac with `bash src/native/build-natives.sh --target osx-arm64 --clean` and `--target osx-x64 --clean` (cmake 4.3.1, Homebrew nasm installed for this build). All 10 dylibs replaced. Each is single-arch, links only system libraries (`libtiff` uses `/usr/lib/libz.1.dylib`, `libpdfium` uses system frameworks), and is ad-hoc signed. osx-x64 libturbojpeg built with `WITH_SIMD = 1`.
+- osx-arm64 tests: 271/275 pass. The same four fail with the old (7869) dylibs: `SaveAsTiff_Content_ShouldMatchTheBgraRender` (Grayscale and Bilevel; TIFF dark-pixel ratio 0.75 against the 0.80 bound, apparently because macOS PDFium renders BGRA text heavier than 8-bit gray text), `ExtractAll_WritesEveryAttachmentInsideTheOutputDirectory` (`..\backslash.txt` is not a path separator on macOS, so `parent.txt`/`backslash.txt` naming differs), and `AsyncCallers_DoNotStarveTheThreadPool` (timing; passed in one of two runs with the new dylibs). These failures already happen on macOS and are not caused by the rebuild; none is fixed yet.
+- osx-x64: no x64 .NET SDK on this Mac, so no test run. An x86_64 C program run under Rosetta loaded all five dylibs, called `FPDF_InitLibrary`/`FPDF_CreateNewDocument`, `TIFFGetVersion` (4.7.2) and `tjInitCompress`.
 
 ### Latest task: resolve the compiler warnings (2026-10-03, same branch)
 
@@ -251,7 +264,7 @@ Key measurements (one machine: i7-13700F, 24 logical processors, win-x64):
 
 ## In progress
 
-- .NET 10 upgrade on `feature/net10-upgrade`: done for win-x64 and linux-x64, uncommitted. macOS natives not rebuilt.
+- .NET 10 upgrade on `feature/net10-upgrade`: natives rebuilt for all four RIDs; macOS dylibs uncommitted.
 
 - Follow-up review is finished. The two remaining findings await implementation by the owner; no code corrections were requested in this verification turn.
 
@@ -261,7 +274,7 @@ Key measurements (one machine: i7-13700F, 24 logical processors, win-x64):
 
 ## Next recommended step
 
-- On a Mac: `bash src/native/build-natives.sh --target osx-arm64` and `--target osx-x64` (versions pinned in the script), run the tests on osx-arm64, check the osx-x64 dylibs with `file`/`otool -L`. Then commit the upgrade on `feature/net10-upgrade`, open a PR and confirm CI on the .NET 10 SDK. Bump the package version (2.0.0 has not been released) if the TFM change should be called out.
+- Commit the macOS dylibs and the macOS test fixes, then commit the upgrade on `feature/net10-upgrade`, open a PR and confirm CI on the .NET 10 SDK. Bump the package version (2.0.0 has not been released) if the TFM change should be called out.
 
 - Correct artifact ownership in `RemovePartialOutput` (`PdfProcessingPool.cs:568`) so undispatched/rejected jobs cannot delete existing files, and remove completed task history from `Batch` (`PdfProcessingPool.Operations.cs:184`). Add preservation and task-retention regressions, rerun tests, then commit/push the fixes and verify CI for that exact commit. Earlier recommendations below are historical.
 
@@ -278,7 +291,6 @@ Earlier list (items 1 and 2 still apply; item 3 is done):
 
 ## Blockers or open questions
 
-- macOS natives are still PDFium 7869 / libtiff 4.7.1 / libjpeg-turbo 3.1.4.1 / zlib-ng 2.2.4 / libpng 1.6.56 until rebuilt on a Mac; a release from this branch before that would ship mixed versions.
 - Dropping `net8.0` means .NET 8 and 9 consumers can no longer use the package (both reach end of support on 2026-11-10). Multi-targeting `net8.0;net10.0` is the alternative if that matters.
 
 - The local PR #18 fixes still have one Critical output-loss regression and one Moderate batch-memory issue. GitHub CI has not evaluated these uncommitted changes. The review itself is complete.
@@ -287,7 +299,6 @@ Earlier list (items 1 and 2 still apply; item 3 is done):
 
 - Original four PR #15 findings are resolved at `f3b15a1`; a new large-weight stride-search overflow remains (`BurstRunner.cs:406`). No implementation fixes were requested during verification.
 - The Release 2 decision is open for the reason above. The measurements say a burst of thousands of documents in a short window is beyond one process on the test hardware (usable rate about 1.3 docs/sec per process on the mixed corpus), so some multi-process arrangement is needed; which one is the owner's call.
-- macOS not verified.
 - Cold start with a document first is about 5 ms slower than before: initialization now loads libtiff to install its error handlers. Moving that to the first TIFF write would recover it.
 - Merge benchmark moved between -5.9% and +4.4% by document (buffered save). Peak memory during a save now includes the whole output.
 - `benchmark.db` was not updated with the new runs; the tables are in `benchmark.md` only.
@@ -311,6 +322,8 @@ Earlier notes:Earlier notes:
 
 ## Recently changed files
 
+- macOS test fixes (2026-10-03): `src/PdfiumWrapper/PdfAttachments.cs`, `PdfDocument.cs`; `src/PdfiumWrapper.Tests/PdfDocumentTests.cs`; `src/PdfiumWrapper.Tests.Host/Scenarios.Concurrency.cs`; `docs/API-REFERENCE.md`, `AGENTS.md`, `ai/current-state.md`.
+- macOS natives (2026-10-03): `src/libs/osx-arm64/*.dylib` (5), `src/libs/osx-x64/*.dylib` (5), `ai/current-state.md`.
 - Warning cleanup (2026-10-03): `src/PdfiumWrapper/PdfAttachments.cs`, `PdfForm.cs`, `PdfMetadata.cs`, `PDFium.Metadata.cs`; `src/PdfiumWrapper.Tests/PdfDocumentTests.cs`, `PdfFormTests.cs`, `PdfMergerTests.cs`, `LifetimeCoordinationTests.cs`, `Concurrency/PdfiumConcurrencyTests.cs`; `docs/API-REFERENCE.md`.
 - .NET 10 upgrade (2026-10-03): all seven `*.csproj`; `.github/workflows/pr-build.yml`, `release.yml`; `src/native/build-natives.cmd`, `build-natives.sh`; `src/libs/win-x64/*` (5), `src/libs/linux-x64/*` (4; `libtiff_shim.so` unchanged); `README.md`, `AGENTS.md`, `docs/BUILDING-NATIVE-LIBS.md`, `docs/TROUBLESHOOTING.md`, `ai/current-state.md`.
 
