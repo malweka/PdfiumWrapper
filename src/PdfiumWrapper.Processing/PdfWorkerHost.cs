@@ -29,6 +29,23 @@ public static class PdfWorkerHost
     /// <summary>Jobs this worker runs at once; set by the pool from <see cref="PdfPoolOptions.JobsPerWorker"/>.</summary>
     internal const string SlotsVariable = "PDFIUMWRAPPER_WORKER_SLOTS";
 
+    /// <summary>The pool's temp directory, where large text results are written; set by the pool.</summary>
+    internal const string TempDirectoryVariable = "PDFIUMWRAPPER_WORKER_TEMP";
+
+    /// <summary>Prefix and extension of the file a large text result travels in.</summary>
+    internal const string TextFilePrefix = "pdfium-text-";
+    internal const string TextFileExtension = ".json";
+
+    /// <summary>
+    /// Time the jobs in flight get to stop once the coordinator is gone (standard input closed), before
+    /// the worker exits regardless. Nobody can receive their results any more; this only lets them
+    /// remove what they staged.
+    /// </summary>
+    internal static readonly TimeSpan InputClosedGrace = TimeSpan.FromSeconds(5);
+
+    /// <summary>Exit code of a worker that ended because its jobs did not stop within <see cref="InputClosedGrace"/>.</summary>
+    internal const int InputClosedExitCode = 5;
+
     /// <summary>
     /// Runs the worker loop if this process was started as a worker, and returns true when it has
     /// finished (the process should then exit). Returns false at once in a normal process.
@@ -71,10 +88,12 @@ public static class PdfWorkerHost
                 UtcTicks = DateTime.UtcNow.Ticks,
                 DiagnosticsEnabled = PdfiumDiagnostics.Enabled,
             }), writeLock, exit.Token).ConfigureAwait(false);
+            hooks?.AfterHello?.Invoke();
 
             // Frames are read on their own task so a Cancel can arrive while a job runs.
             var inbox = new BlockingCollection<Frame>();
             var cancellations = new ConcurrentDictionary<long, CancellationTokenSource>();
+            bool inputClosed = false;
             var reader = Task.Run(async () =>
             {
                 try
@@ -94,7 +113,11 @@ public static class PdfWorkerHost
                         }
 
                         if (frame == null)
+                        {
+                            Volatile.Write(ref inputClosed, true);
+                            OnInputClosed(cancellations);
                             break;
+                        }
 
                         if (frame.Kind == FrameKind.Cancel && frame.CancelJobId is { } cancelId)
                         {
@@ -126,7 +149,8 @@ public static class PdfWorkerHost
 
             foreach (var frame in inbox.GetConsumingEnumerable())
             {
-                if (frame.Kind == FrameKind.Shutdown)
+                // Once the coordinator is gone, nothing more is started: no result could reach it.
+                if (frame.Kind == FrameKind.Shutdown || Volatile.Read(ref inputClosed))
                     break;
 
                 if (frame.Kind == FrameKind.Cancel && frame.CancelJobId is { } id)
@@ -177,6 +201,12 @@ public static class PdfWorkerHost
                     {
                         await FrameStream.WriteAsync(output, Frame.ForResult(result), writeLock, CancellationToken.None).ConfigureAwait(false);
                     }
+                    catch when (result.TextFile != null)
+                    {
+                        // The coordinator will never read the text file it was not told about.
+                        TryDelete(result.TextFile);
+                        throw;
+                    }
                     finally
                     {
                         running.TryRemove(job.Id, out _);
@@ -198,6 +228,38 @@ public static class PdfWorkerHost
             await Console.Error.WriteLineAsync("worker failed: " + ex).ConfigureAwait(false);
             return 1;
         }
+    }
+
+    /// <summary>
+    /// Standard input has ended without the process being stopped: the coordinator closed the pipe
+    /// or is gone (crashed or killed; on Windows the job object usually kills this process first).
+    /// Every job in flight is told to stop, and if they have not stopped within
+    /// <see cref="InputClosedGrace"/> the process exits anyway, so a worker hung in a job, or in native
+    /// code, never outlives its coordinator.
+    /// </summary>
+    private static void OnInputClosed(ConcurrentDictionary<long, CancellationTokenSource> cancellations)
+    {
+        foreach (var cts in cancellations.Values)
+        {
+            try
+            {
+                cts.Cancel();
+            }
+            catch (ObjectDisposedException)
+            {
+                // The job finished meanwhile.
+            }
+        }
+
+        new Thread(() =>
+        {
+            Thread.Sleep(InputClosedGrace);
+            Environment.Exit(InputClosedExitCode);
+        })
+        {
+            IsBackground = true,
+            Name = "PdfWorkerHost input-closed watchdog",
+        }.Start();
     }
 
     /// <summary>Pays native initialization and JIT before the first job: one small page rendered.</summary>
@@ -312,8 +374,20 @@ public static class PdfWorkerHost
                 }
                 else
                 {
-                    string file = Path.Combine(Path.GetTempPath(), $"pdfium-text-{job.Id}-{Guid.NewGuid():N}.json");
-                    File.WriteAllText(file, JsonSerializer.Serialize(pages));
+                    // In the pool's own temp directory: the coordinator accepts a text file only from
+                    // there, and removes whatever a lost worker left in it when it is disposed.
+                    string directory = Environment.GetEnvironmentVariable(TempDirectoryVariable) is { Length: > 0 } temp ? temp : Path.GetTempPath();
+                    string file = Path.Combine(directory, $"{TextFilePrefix}{job.Id}-{Guid.NewGuid():N}{TextFileExtension}");
+                    try
+                    {
+                        File.WriteAllText(file, JsonSerializer.Serialize(pages));
+                    }
+                    catch
+                    {
+                        TryDelete(file);
+                        throw;
+                    }
+
                     result.TextFile = file;
                 }
 
@@ -376,6 +450,9 @@ internal sealed class WorkerHooks
 {
     /// <summary>Called once the worker is warm, just before it reports ready.</summary>
     public Action? BeforeHello { get; set; }
+
+    /// <summary>Called once the worker has reported ready, before it reads its first frame.</summary>
+    public Action? AfterHello { get; set; }
 
     /// <summary>Called before each job runs, with the job about to run.</summary>
     public Action<JobPayload>? BeforeJob { get; set; }

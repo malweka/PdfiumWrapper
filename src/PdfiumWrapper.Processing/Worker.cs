@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Text;
 using PdfiumWrapper.Processing.Protocol;
 
 namespace PdfiumWrapper.Processing;
@@ -6,6 +7,9 @@ namespace PdfiumWrapper.Processing;
 /// <summary>One worker process and the frames to and from it.</summary>
 internal sealed class Worker : IAsyncDisposable
 {
+    /// <summary>Longest standard error line passed on; the rest of a longer line is dropped.</summary>
+    internal const int MaxStderrLineChars = 4096;
+
     private readonly Process _process;
     private readonly Stream _toWorker;
     private readonly Stream _fromWorker;
@@ -63,10 +67,18 @@ internal sealed class Worker : IAsyncDisposable
     /// </summary>
     public long KilledFor;
 
-    public static async Task<Worker> StartAsync(PdfPoolOptions options, Action<Worker, Frame> onFrame,
+    /// <summary>
+    /// Set once the pool has handled this worker's exit. The exit of a worker that dies right after
+    /// reporting ready can be handled before its start adds it to the pool's table; the start sees
+    /// this and does not add it. Guarded by the pool's worker lock.
+    /// </summary>
+    public bool ExitHandled;
+
+    /// <param name="tempDirectory">The pool's own temp directory, where the worker writes large text results.</param>
+    public static async Task<Worker> StartAsync(PdfPoolOptions options, string tempDirectory, Action<Worker, Frame> onFrame,
         Action<Worker, string> onStderr, Action<Worker> onExit, CancellationToken ct)
     {
-        var psi = WorkerLauncher.Create(options);
+        var psi = WorkerLauncher.Create(options, tempDirectory);
         Process process;
         try
         {
@@ -76,6 +88,8 @@ internal sealed class Worker : IAsyncDisposable
         {
             throw new PdfPoolException($"Could not start a worker from '{psi.FileName}': {ex.Message}", ex);
         }
+
+        WorkerJobObject.Assign(process);
 
         var worker = new Worker(process, onFrame, onStderr, onExit) { Pid = process.Id, Slots = options.JobsPerWorker };
         bool ready = false;
@@ -171,15 +185,46 @@ internal sealed class Worker : IAsyncDisposable
         }
     }
 
+    /// <summary>
+    /// Passes on each line the worker writes to standard error, cut at <see cref="MaxStderrLineChars"/>:
+    /// a worker that writes without line breaks must not grow the pool's memory without bound.
+    /// </summary>
     private async Task DrainStderrAsync()
     {
+        var buffer = new char[1024];
+        var line = new StringBuilder();
+        bool truncated = false;
         try
         {
-            while (await _process.StandardError.ReadLineAsync().ConfigureAwait(false) is { } line)
-                _onStderr(this, line);
+            int read;
+            while ((read = await _process.StandardError.ReadAsync(buffer.AsMemory()).ConfigureAwait(false)) > 0)
+            {
+                for (int i = 0; i < read; i++)
+                {
+                    char c = buffer[i];
+                    if (c == '\n')
+                        Emit();
+                    else if (c == '\r')
+                        continue;
+                    else if (line.Length < MaxStderrLineChars)
+                        line.Append(c);
+                    else
+                        truncated = true;
+                }
+            }
+
+            if (line.Length > 0 || truncated)
+                Emit();
         }
         catch (Exception)
         {
+        }
+
+        void Emit()
+        {
+            _onStderr(this, truncated ? line.Append(" [truncated]").ToString() : line.ToString());
+            line.Clear();
+            truncated = false;
         }
     }
 
@@ -277,7 +322,7 @@ internal sealed class Worker : IAsyncDisposable
 /// <summary>Builds the start info for a worker process.</summary>
 internal static class WorkerLauncher
 {
-    public static ProcessStartInfo Create(PdfPoolOptions options)
+    public static ProcessStartInfo Create(PdfPoolOptions options, string tempDirectory)
     {
         var psi = new ProcessStartInfo
         {
@@ -321,6 +366,7 @@ internal static class WorkerLauncher
 
         psi.Environment[PdfWorkerHost.EnvironmentVariable] = "1";
         psi.Environment[PdfWorkerHost.SlotsVariable] = options.JobsPerWorker.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        psi.Environment[PdfWorkerHost.TempDirectoryVariable] = tempDirectory;
         foreach (var pair in options.WorkerEnvironment)
             psi.Environment[pair.Key] = pair.Value;
 

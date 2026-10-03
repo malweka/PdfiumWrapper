@@ -68,7 +68,7 @@ PdfiumWrapper ships as two packages:
 | Package | What it is | Processes it starts |
 |---|---|---|
 | `PdfiumWrapper` | The core library: `PdfDocument`, `PdfPage`, `PdfMerger`, image and text output. Everything runs inside your process. | None |
-| `PdfiumWrapper.Processing` | Optional. `PdfProcessingPool` runs the same operations in worker processes it starts and manages. Depends on the core package. | Workers, between `MinWorkers` and `MaxWorkers` |
+| `PdfiumWrapper.Processing` | Optional. `PdfProcessingPool` runs the same operations in worker processes it starts and manages. Depends on the core package of exactly the same version. | Workers, between `MinWorkers` and `MaxWorkers` |
 
 The pool is not required. The core package never launches a process, and an application that only references it needs no `Main` changes and no worker configuration. Add the pool only when the reasons below apply.
 

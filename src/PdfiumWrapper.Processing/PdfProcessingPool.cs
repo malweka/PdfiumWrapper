@@ -77,7 +77,8 @@ public sealed partial class PdfProcessingPool : IAsyncDisposable
         _options = (options ?? new PdfPoolOptions()).Clone();
         _options.Validate();
 
-        _tempDirectory = Path.Combine(_options.TempDirectory ?? Path.GetTempPath(), $"pdfium-pool-{Environment.ProcessId}-{Guid.NewGuid():N}");
+        // Absolute: workers run in another working directory and write large text results here.
+        _tempDirectory = Path.GetFullPath(Path.Combine(_options.TempDirectory ?? Path.GetTempPath(), $"pdfium-pool-{Environment.ProcessId}-{Guid.NewGuid():N}"));
         Directory.CreateDirectory(_tempDirectory);
 
         _queue = Channel.CreateBounded<PendingJob>(new BoundedChannelOptions(_options.QueueCapacity)
@@ -609,7 +610,10 @@ public sealed partial class PdfProcessingPool : IAsyncDisposable
         lock (_workersLock)
         {
             if (!worker.Active.TryRemove(result.JobId, out job))
+            {
+                DiscardTextFile(result);
                 return;
+            }
             if (worker.InUse > 0)
                 worker.InUse--;
             if (worker.InUse == 0)
@@ -622,7 +626,11 @@ public sealed partial class PdfProcessingPool : IAsyncDisposable
         StopIfDrained(worker);
         SignalDispatcher();
         if (!current)
+        {
+            // The job has ended otherwise (cancelled, timed out, failed): nobody reads what it produced.
+            DiscardTextFile(result);
             return;
+        }
 
         if (result.RenderIntervalsUtcTicks != null)
         {
@@ -644,7 +652,9 @@ public sealed partial class PdfProcessingPool : IAsyncDisposable
         switch (result.Status)
         {
             case ResultStatus.Succeeded:
-                Finish(job, PdfJobStatus.Succeeded, null, result);
+                // The caller's projection reads and deletes the text file, unless the job ended meanwhile.
+                if (!Finish(job, PdfJobStatus.Succeeded, null, result))
+                    DiscardTextFile(result);
                 break;
             case ResultStatus.Cancelled:
                 Finish(job, PdfJobStatus.Cancelled, result.Error ?? "cancelled", result);
@@ -688,6 +698,7 @@ public sealed partial class PdfProcessingPool : IAsyncDisposable
         long killedFor;
         lock (_workersLock)
         {
+            worker.ExitHandled = true;
             if (!_workers.Remove(worker))
                 return;
             jobs = worker.Active.Values.ToArray();
@@ -777,10 +788,11 @@ public sealed partial class PdfProcessingPool : IAsyncDisposable
         Finish(job, status, error, new ResultPayload { JobId = job.Id, Status = ResultStatus.Failed, Error = error });
     }
 
-    private void Finish(PendingJob job, PdfJobStatus status, string? error, ResultPayload result)
+    /// <summary>Gives the job its final status; false if it already had one.</summary>
+    private bool Finish(PendingJob job, PdfJobStatus status, string? error, ResultPayload result)
     {
         if (Interlocked.Exchange(ref job.Retired, 1) != 0)
-            return;
+            return false;
 
         job.FinalStatus = status;
         job.FinalError = error;
@@ -805,6 +817,48 @@ public sealed partial class PdfProcessingPool : IAsyncDisposable
         }
 
         job.Completion.TrySetResult(result);
+        return true;
+    }
+
+    /// <summary>
+    /// True when <paramref name="path"/> is a text result file directly in this pool's temp directory:
+    /// the only place a worker writes one, and the only file the pool reads or deletes on a worker's word.
+    /// </summary>
+    internal bool IsPoolTextFile(string path)
+    {
+        string full;
+        try
+        {
+            full = Path.GetFullPath(path);
+        }
+        catch (Exception)
+        {
+            return false;
+        }
+
+        var comparison = OperatingSystem.IsLinux() ? StringComparison.Ordinal : StringComparison.OrdinalIgnoreCase;
+        string name = Path.GetFileName(full);
+        return string.Equals(Path.GetDirectoryName(full), _tempDirectory, comparison)
+               && name.StartsWith(PdfWorkerHost.TextFilePrefix, StringComparison.Ordinal)
+               && name.EndsWith(PdfWorkerHost.TextFileExtension, StringComparison.Ordinal);
+    }
+
+    /// <summary>Deletes the text file of a result nobody will read; a path outside the pool's temp directory is left alone.</summary>
+    private void DiscardTextFile(ResultPayload result)
+    {
+        if (result.TextFile is { } file && IsPoolTextFile(file))
+            TryDeleteFile(file);
+    }
+
+    private static void TryDeleteFile(string path)
+    {
+        try
+        {
+            File.Delete(path);
+        }
+        catch (Exception)
+        {
+        }
     }
 
     private void CleanUp(PendingJob job)
@@ -826,52 +880,47 @@ public sealed partial class PdfProcessingPool : IAsyncDisposable
     /// attempts: a worker that fails or is cancelled in a managed way cleans up itself, and a job that
     /// never reached a worker has nothing to remove. Only files the attempt owns are touched: its
     /// staged pages (named with the job id) and, if it had begun moving them into place, the final
-    /// names it had claimed. Files that were in the directory before are never deleted.
+    /// names it had claimed. Files that were in the directory before are never deleted. A text job's
+    /// result file, written to the pool's temp directory just before the worker died, goes too.
     /// </summary>
-    private static void RemovePartialOutput(PendingJob job)
+    private void RemovePartialOutput(PendingJob job)
     {
         var payload = job.Payload;
-        if (payload.Output == null || job.DispatchedAt == 0)
+        if (job.DispatchedAt == 0)
             return;
 
         try
         {
             switch (payload.Kind)
             {
+                case JobKind.ExtractText:
+                    foreach (var file in Directory.GetFiles(_tempDirectory, $"{PdfWorkerHost.TextFilePrefix}{job.Id}-*{PdfWorkerHost.TextFileExtension}"))
+                        TryDeleteFile(file);
+                    break;
+
                 case JobKind.ConvertToPng:
                 case JobKind.ConvertToJpeg:
                 {
-                    if (!Directory.Exists(payload.Output))
+                    if (payload.Output == null || !Directory.Exists(payload.Output))
                         return;
                     // The same naming contract the worker writes with (PdfDocument.PageFileName).
                     var format = payload.Kind == JobKind.ConvertToPng ? ImageFormat.Png : ImageFormat.Jpeg;
                     string pattern = PdfDocument.PageFileSearchPattern(payload.FileNamePrefix, format) + $".{job.Id}.tmp";
                     foreach (var temp in Directory.GetFiles(payload.Output, pattern))
-                        TryDelete(temp);
+                        TryDeleteFile(temp);
                     for (int page = 1; page <= job.CommittingPages; page++)
-                        TryDelete(Path.Combine(payload.Output, PdfDocument.PageFileName(payload.FileNamePrefix, page, format)));
+                        TryDeleteFile(Path.Combine(payload.Output, PdfDocument.PageFileName(payload.FileNamePrefix, page, format)));
                     break;
                 }
 
-                case JobKind.ConvertToTiff:
-                    TryDelete(payload.Output + $".{job.Id}.tmp");
+                case JobKind.ConvertToTiff when payload.Output != null:
+                    TryDeleteFile(payload.Output + $".{job.Id}.tmp");
                     break;
             }
         }
         catch (Exception)
         {
             // Best effort: a directory that vanished or is unreadable is not the job's problem any more.
-        }
-
-        static void TryDelete(string path)
-        {
-            try
-            {
-                File.Delete(path);
-            }
-            catch (Exception)
-            {
-            }
         }
     }
 
@@ -905,12 +954,16 @@ public sealed partial class PdfProcessingPool : IAsyncDisposable
         {
             Raise(PdfPoolEventKind.WorkerStarting, 0, 0, detail);
             using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, _shutdown.Token);
-            var worker = await Worker.StartAsync(_options, OnFrame, OnStderr, OnWorkerExit, linked.Token).ConfigureAwait(false);
+            var worker = await Worker.StartAsync(_options, _tempDirectory, OnFrame, OnStderr, OnWorkerExit, linked.Token).ConfigureAwait(false);
+            WorkerReadyHookForTests?.Invoke(worker.Pid);
 
-            bool accepted;
+            bool accepted, exited;
             lock (_workersLock)
             {
-                accepted = !_shutdown.IsCancellationRequested;
+                // A worker whose exit has already been handled (it died right after reporting ready)
+                // is not added: nothing would ever take it out of the table again.
+                exited = worker.ExitHandled;
+                accepted = !_shutdown.IsCancellationRequested && !exited;
                 if (accepted)
                     _workers.Add(worker);
             }
@@ -918,6 +971,8 @@ public sealed partial class PdfProcessingPool : IAsyncDisposable
             if (!accepted)
             {
                 await worker.DisposeAsync().ConfigureAwait(false);
+                if (exited)
+                    throw new PdfPoolException($"Worker {worker.Pid} exited right after reporting ready.");
                 return;
             }
 
@@ -947,6 +1002,12 @@ public sealed partial class PdfProcessingPool : IAsyncDisposable
             Interlocked.Decrement(ref _startingWorkers);
         }
     }
+
+    /// <summary>Test hook: called with a new worker's process id once it has reported ready, before the pool adds it to its table.</summary>
+    internal Action<int>? WorkerReadyHookForTests { get; set; }
+
+    /// <summary>The pool's own temp directory, for tests.</summary>
+    internal string TempDirectoryForTests => _tempDirectory;
 
     /// <summary>
     /// Counts a failed start. Once <see cref="PdfPoolOptions.MaxConsecutiveStartFailures"/> starts in
@@ -1133,7 +1194,7 @@ public sealed partial class PdfProcessingPool : IAsyncDisposable
     }
 
     private void OnStderr(Worker worker, string line)
-        => Raise(PdfPoolEventKind.WorkerStopped, worker.Pid, 0, "stderr: " + line);
+        => Raise(PdfPoolEventKind.WorkerMessage, worker.Pid, 0, line);
 
     private void Raise(PdfPoolEventKind kind, int pid, long jobId, string? detail)
     {
