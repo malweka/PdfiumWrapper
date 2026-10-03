@@ -2,11 +2,43 @@
 
 ## Current focus
 
+Release 2 of `ai/plans/plan-pdfium-concurrency.md` (the worker pool, package `PdfiumWrapper.Processing`) was approved by the owner on 2026-10-02 and the plan was revised: section 4.9 holds the API, hosting model, sizing policy and protocol; Phases 5 to 7 are the build order, tests and acceptance. Implementation has not started. Also on the working tree, uncommitted, on branch `feature/tiff-gray-render`: gray TIFF rendering, the comparison harness, and documentation notes.
+
+### Earlier focus
+
 Follow-up verification of PR #15 commit `f3b15a1130567dc00f604c61b5aab9bc98a9e242` is complete (2026-10-02). The four original reproductions are fixed; one additional accepted-weight overflow edge case remains in `BurstRunner.InterleavingStride`. Independently ran 228 passing tests on Windows and in Linux Docker; exact-commit CI is green, including 228 Linux tests and all four platform build/package jobs. No implementation fixes were made during verification.
 
 Release 1 of `ai/plans/plan-pdfium-concurrency.md` is implemented on `feature/pdfium-concurrency-plan` (version 2.0.0); Release 2 remains deferred pending the owner's capacity/deployment inputs. The global `ai-pr-review` skill is installed and available.
 
 ## Completed
+
+### Latest task: version comparison and engine comparison (2026-10-02, after the merge)
+
+- Pull request 15 was merged into `main` (merge commit `df0ef31`). The feature branch still exists.
+- `benchmark.db` now holds two runs from this machine: `pre-gate-1.0.0` (the `bench-baseline-pre-gate` tag) and `gated-2.0.0` (merged code). Conversion is within about 3% of 1.0.0; merge is up to 5.6% slower on the larger documents. `benchmark.db` is modified and not committed.
+- New opt-in project `src/PdfiumWrapper.Benchmarks.Comparison` (not in `PdfiumWrapper.sln`): PdfiumWrapper against other engines for page count, TIFF, PNG, JPEG, merge and text. Ghostscript is located on `PATH` or through `GHOSTSCRIPT_EXE`; Aspose.PDF needs `ASPOSE_PDF_LICENSE` and is skipped without it. A `check` mode verifies the engines produce equivalent output.
+- **Owner's rule: results for other engines are not published.** The comparison report and its CSV files are in `ai/tmp/`, which is ignored by git. Only PdfiumWrapper's own numbers go into tracked files. License files are never copied into this repository; `*.lic` is ignored as a guard.
+- One finding relevant to the wrapper itself: bilevel TIFF renders a 32-bit page and then thresholds it.
+
+### Experiment: render TIFF pages into an 8-bit gray bitmap (2026-10-02)
+
+- Prototype only, in `src/PdfiumWrapper.Benchmarks/GrayscaleTiffExperiment.cs` (`dotnet run -c Release -- grayscale [dpi]`, plus `--dump <dir>` for image crops). The library is unchanged. Not committed.
+- Method: `FPDFBitmap_CreateEx` with `FPDFBitmap_Gray`, then threshold or copy one byte per pixel. Whole document to one TIFF at 200 DPI, median of 7 runs, pinned to the performance cores.
+- Result, bilevel TIFF: 28% to 39% faster on the four text documents (for example contract.pdf 158.6 ms to 108.7 ms); no gain on presentation.pdf (3,092 ms to 3,019 ms), whose time is almost all page rendering and that is not faster in gray.
+- Result, grayscale TIFF: 26% to 32% faster on the four text documents and files 23% to 26% smaller; 5% faster on presentation.pdf.
+- The bitmap is a quarter of the size (US Letter at 200 DPI: 3.7 MB instead of 15 MB), and the time saved is inside the native gate.
+- The output is not identical. PDFium anti-aliases text differently by bitmap depth (`cfx_renderdevice.cpp`: below 16 bits per pixel it uses normal grayscale anti-aliasing, at 32 bits LCD-mode anti-aliasing normalized to gray). About 0.6% to 1.9% of pixels differ after thresholding on text documents, at glyph edges; on contract.pdf page 1 the gray render has about 2% fewer black pixels. Crops of both were inspected and are equally legible.
+- The `FPDF_GRAYSCALE` render flag on a BGRA bitmap gives near-identical output to today's and no speedup.
+- Measurement note: on this hybrid CPU an unpinned run showed the same render taking either about 2.9 s or about 6.0 s depending on the core it landed on. Pin stopwatch experiments to the performance cores.
+- **Adopted** at the owner's request (same day), on branch `feature/tiff-gray-render` (from `main`, not committed yet). `PdfPage.RenderToBitmapLeaseCore(..., gray: true)` creates the bitmap with `FPDFBitmap_CreateEx(FPDFBitmap_Gray)`; `BitmapLease.IsGray`; `PixelConverter.GrayToPackedBilevel` / `GrayToGrayscale`; `PdfDocument` uses the gray lease for every TIFF path. The prototype file was removed. New test `SaveAsTiff_Content_ShouldMatchTheBgraRender` decodes the TIFF with Magick.NET and compares its ink with the BGRA render. 239 tests pass on win-x64 and linux-x64. `PdfToTiffBenchmark`: 27% to 39% faster on the four text documents, 2% on the presentation; recorded in `benchmark.md` and in `benchmark.db` as `gray-tiff-2.0.0`.
+
+### Throughput comparison harness (2026-10-02)
+
+- `src/PdfiumWrapper.Benchmarks.Comparison` gained a `throughput` command (`ThroughputRunner.cs`): N requests arrive at once, each reads the page count and converts every page to PNG. One engine and one deployment shape per run: `--engine pdfium|ghostscript|aspose --n 1000 --concurrency C [--processes P] --dpi 150`. Multi-process runs spawn copies of the program that start together. Reports go to `ai/tmp/throughput/` (private).
+- Sweep run 2026-10-02: 1,000 requests (12,400 pages, PNG at 150 DPI), 16 deployment shapes across the three engines, all completed without failures. Report: `ai/tmp/throughput-comparison.md` (private; no figures for other engines belong in tracked files). PdfiumWrapper's own figures: one process 1.49 requests/s with one request thread and 2.21 with four (gate-bound, 1.5 cores); 4 processes 7.19, 8 processes 10.87, 16 processes 13.06 requests/s (19.6 cores, 1.9 GB). The deciding factor for throughput is running several processes, which supports replicas or the Release 2 process pool.
+- Correction: `presentation.pdf` has 37 pages, not the 30 its benchmark label says (the corpus is 62 pages, not 55). The label is kept so `benchmark.db` history still joins; `BenchmarkBase.CorpusPages()` now counts real pages, and the `ConcurrentCallersBenchmark` pages/sec table in `benchmark.md` was recomputed (speedups unchanged).
+- The comparison project's BenchmarkDotNet artifacts now go to `ai/tmp/comparison-artifacts`. Reason: a run from the repository root left other engines' CSV files in the shared artifacts folder and they were imported into `benchmark.db` by mistake; that run was deleted, the database vacuumed, and its bytes checked. **Only import from a folder that holds PdfiumWrapper's own CSV files.**
+
 
 ### Latest task: verify PR #15 review fixes at f3b15a1 (2026-10-02)
 
@@ -149,10 +181,14 @@ Key measurements (one machine: i7-13700F, 24 logical processors, win-x64):
 
 ## Next recommended step
 
+0. Commit the current working tree on `feature/tiff-gray-render` (gray TIFF rendering, test, docs, `benchmark.db`, `.gitignore`, the comparison harness without results, the plan revision), open a PR, merge. Then start Release 2 on a new branch from `main`, Phase 5 in its listed order.
+
+Earlier list (items 1 and 2 still apply; item 3 is done):
+
 0. Correct the stride-search bound at `BurstRunner.cs:406` for large accepted weight totals (widen arithmetic or validate/reject the boundary), add a regression asserting a positive coprime stride, and run the relevant benchmark tests. The original four regressions and full suite already pass; exact-commit CI is green.
 1. Project owner supplies `N` (documents per burst), `T` (window), the real document mix, and whether the consuming service can run several replicas behind its queue. With those, apply rule R13: if replicas are possible, size them from `benchmark.md` and stop; if not, build the process pool (plan Phases 5 to 7).
 2. Run the test suite on macOS (osx-x64, osx-arm64); it has only been run on win-x64 and linux-x64.
-3. Review and merge `feature/pdfium-concurrency-plan`. It is a major version (2.0.0): raw `PDFium.*` imports are no longer public.
+3. Decide whether to commit `src/PdfiumWrapper.Benchmarks.Comparison` (code only, no results), the `.gitignore` entries and the updated `benchmark.db`. 2.0.0 is merged but not released: the release workflow takes its version from a `release/<version>` branch.
 
 ## Blockers or open questions
 

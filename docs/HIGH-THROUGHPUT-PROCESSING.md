@@ -413,7 +413,7 @@ For more throughput on native-only work, scale out across processes (see below).
 
 ## Measured Capacity and Sizing
 
-These figures come from one machine (Intel Core i7-13700F, 8 performance and 8 efficiency cores, 24 logical processors, NVMe SSD, Windows 11, .NET 8.0.31, PDFium 150.0.7869.0) and the repository's five test documents (55 pages). They show the shape of the scaling. They do not size your deployment; measure on your hardware with your documents. The full record is in `benchmark.md`.
+These figures come from one machine (Intel Core i7-13700F, 8 performance and 8 efficiency cores, 24 logical processors, NVMe SSD, Windows 11, .NET 8.0.31, PDFium 150.0.7869.0) and the repository's five test documents (62 pages). They show the shape of the scaling. They do not size your deployment; measure on your hardware with your documents. The full record is in `benchmark.md`.
 
 **One process.** 200 jobs enqueued at once (2,480 pages), half bilevel TIFF, 30% PNG, 20% JPEG, 200 DPI, output written to disk:
 
@@ -425,6 +425,8 @@ These figures come from one machine (Intel Core i7-13700F, 8 performance and 8 e
 | 8 | 1.62 | 20.0 | 253 MB |
 | 16 | 1.62 | 20.1 | 387 MB |
 | 24 | 1.62 | 20.1 | 493 MB |
+
+> **Note:** half of this mix is bilevel TIFF, measured before TIFF output switched to 8-bit gray rendering. TIFF conversion is now 27% to 39% faster on text documents (see `benchmark.md`), so a TIFF-heavy workload will measure higher than this table. The ceiling still comes from rendering being serialized in one process, so the shape of the scaling is the same.
 
 With 8 callers the gate was held 99.8% of the time. Rendering is the serialized part and it dominates, so one process tops out at about 1.25 times its sequential rate. Two to four callers reach that ceiling; more only use memory. By format, the gain from extra callers was 1.11x for bilevel TIFF, 1.09x for JPEG and 1.45x for PNG, whose encoding is the largest share.
 
@@ -461,6 +463,13 @@ One process has one PDFium and one gate. When a single process cannot meet the r
 - Measure the single-process rate on your own documents, formats, DPI and hardware. The burst runner in `src/PdfiumWrapper.Benchmarks` (`dotnet run -c Release -- burst ...`) measures completion of a whole batch, including queueing and output writes.
 - Size the replica count from the measured single-process rate with 25% headroom: `replicas = ceil(1.25 * (N / T) / measured docs per second per process)`.
 - Give each replica enough memory for its callers in flight (one rendered page per caller) plus the documents it has open.
+
+> **Note: there is no built-in batch or worker-pool API.** PdfiumWrapper processes one document per call. For a large volume of files you currently write the orchestration yourself:
+>
+> - **Within one process:** a bounded parallel loop or a bounded channel, as in [Pattern 1](#pattern-1-bounded-parallel-conversion-of-different-files) and [Pattern 2](#pattern-2-producer-consumer-with-bounded-channel). This reaches the single-process ceiling (about 1.25x sequential on the mix above), not more.
+> - **Beyond one process:** run several instances of your service (replicas), each pulling from your queue. This is where most of the throughput comes from (8 processes: 5.7x), and it is deployment configuration rather than code.
+>
+> If your application must stay a single process from the outside (for example one API that receives a document and returns the result), the only way past the single-process ceiling is to run conversions in separate worker processes started and managed by your application. PdfiumWrapper does not provide that yet; a worker-pool package that does is planned.
 
 ---
 

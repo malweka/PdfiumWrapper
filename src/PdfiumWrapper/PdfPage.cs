@@ -107,12 +107,20 @@ public class PdfPage : IDisposable
     }
 
     /// <summary>The native gate must be held.</summary>
-    internal BitmapLease RenderToBitmapLeaseCore(int width, int height, int flags)
+    /// <param name="gray">
+    /// Render into an 8-bit gray bitmap instead of 32-bit BGRA. Used for TIFF output, which is
+    /// bilevel or grayscale anyway: a quarter of the memory and less work to convert. PDFium
+    /// anti-aliases text with plain grayscale smoothing at this depth, where the 32-bit path uses
+    /// LCD-style smoothing reduced to gray, so glyph edges differ slightly between the two.
+    /// </param>
+    internal BitmapLease RenderToBitmapLeaseCore(int width, int height, int flags, bool gray = false)
     {
         PdfiumRuntime.AssertHeld();
         ThrowIfDisposed();
 
-        var bitmap = PDFium.FPDFBitmap_Create(width, height, 0);
+        var bitmap = gray
+            ? PDFium.FPDFBitmap_CreateEx(width, height, PDFium.FPDFBitmap_Gray, IntPtr.Zero, 0)
+            : PDFium.FPDFBitmap_Create(width, height, 0);
         if (bitmap == IntPtr.Zero)
             throw new OutOfMemoryException("Failed to create bitmap");
 
@@ -125,7 +133,7 @@ public class PdfPage : IDisposable
                 PDFium.FPDF_RenderPageBitmap(bitmap, _page, 0, 0, width, height, 0, flags);
 
             return new BitmapLease(bitmap, PDFium.FPDFBitmap_GetBuffer(bitmap), width, height,
-                PDFium.FPDFBitmap_GetStride(bitmap));
+                PDFium.FPDFBitmap_GetStride(bitmap), gray);
         }
         catch
         {

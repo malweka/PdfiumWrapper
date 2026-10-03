@@ -133,11 +133,11 @@ Every pipeline renders inside the native gate and returns a `BitmapLease` (bitma
 
 **TIFF:**
 ```
-PdfPage.RenderToBitmapLease() → BitmapLease (native BGRA buffer, IntPtr)      [inside the gate]
+PdfPage.RenderToBitmapLeaseCore(gray: true) → BitmapLease (native 8-bit gray buffer)   [inside the gate]
     → PixelConverter (unsafe pointer math, no managed copy)                    [outside the gate]
         → TiffWriter (pinned write, zero per-row allocation)                   [outside the gate]
 ```
-`PixelConverter.cs` reads directly from the native IntPtr. `TiffWriter.cs` pins the output array once and writes all scanlines via pointer offsets. Stream-based TIFF output uses `TIFFClientOpen` with GCHandle-pinned callback delegates.
+TIFF output is bilevel or grayscale, so its pages are rendered straight into an 8-bit gray PDFium bitmap (`FPDFBitmap_Gray`): a quarter of the memory of BGRA and one byte per pixel to threshold or copy. PDFium anti-aliases text with plain grayscale smoothing at that depth and with LCD-style smoothing at 32 bits, so TIFF glyph edges differ slightly from the PNG/JPEG render of the same page. `PixelConverter.cs` reads directly from the native IntPtr. `TiffWriter.cs` pins the output array once and writes all scanlines via pointer offsets. Stream-based TIFF output uses `TIFFClientOpen` with GCHandle-pinned callback delegates.
 
 **JPEG:**
 ```
@@ -236,7 +236,7 @@ After adding/modifying page objects, `page.GenerateContent()` MUST be called bef
 - `PixelConverter` uses pre-scaled threshold comparison to avoid per-pixel division in bilevel conversion
 - PNG encoding uses zlib-ng (SIMD: NEON/AVX2) + `PNG_FILTER_SUB` for ~40% faster than SkiaSharp
 - JPEG encoding uses libjpeg-turbo (SIMD) for ~2x faster than SkiaSharp
-- For TIFF: render flags include `FPDF_PRINTING | FPDF_ANNOT` (vs just `FPDF_ANNOT` for other formats)
+- For TIFF: render flags include `FPDF_PRINTING | FPDF_ANNOT` (vs just `FPDF_ANNOT` for other formats), and pages are rendered into an 8-bit gray bitmap instead of BGRA (26-39% faster on text documents)
 - `StreamImageBytes` uses eager validation + private core pattern to throw immediately on bad input while deferring iteration
 
 ## Testing
@@ -280,6 +280,6 @@ The `.csproj` auto-detects the platform RID and includes native binaries with `E
 - Update relevant documentation when adding or changing public API
 - Follow existing patterns for disposal, error handling, and P/Invoke signatures
 - Follow the gate rules under "Thread Safety and the Native Gate" for every member that touches PDFium
-- Run the test suite after changes: all 237+ tests should pass (win-x64 and linux-x64)
+- Run the test suite after changes: all 239+ tests should pass (win-x64 and linux-x64)
 - Coordinate system: PDF uses bottom-left origin (see `docs/PDF-EDITING.md`)
 - Standard page sizes in points: US Letter = 612x792, A4 = 595x842
