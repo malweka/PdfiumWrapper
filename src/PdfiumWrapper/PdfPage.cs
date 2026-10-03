@@ -19,7 +19,8 @@ public class PdfPage : IDisposable
     private readonly PdfDocument _owner;
     private bool _disposed;
     private readonly object _attachedObjectsLock = new();
-    private HashSet<PdfPageObject>? _attachedObjects;
+    // Keyed by native handle so GetObject finds an existing wrapper without a scan.
+    private Dictionary<IntPtr, PdfPageObject>? _attachedObjects;
 
     /// <summary>The native gate must be held.</summary>
     internal PdfPage(PdfDocument owner, int pageIndex)
@@ -457,8 +458,7 @@ public class PdfPage : IDisposable
         // destroy the object under the other.
         lock (_attachedObjectsLock)
         {
-            var existing = _attachedObjects?.FirstOrDefault(o => o.Handle == handle);
-            if (existing != null)
+            if (_attachedObjects != null && _attachedObjects.TryGetValue(handle, out var existing))
                 return existing;
         }
 
@@ -474,7 +474,11 @@ public class PdfPage : IDisposable
         PdfiumRuntime.AssertHeld();
         lock (_attachedObjectsLock)
         {
-            _attachedObjects?.Remove(pageObject);
+            if (_attachedObjects != null && _attachedObjects.TryGetValue(pageObject.Handle, out var tracked)
+                && ReferenceEquals(tracked, pageObject))
+            {
+                _attachedObjects.Remove(pageObject.Handle);
+            }
         }
     }
 
@@ -497,8 +501,9 @@ public class PdfPage : IDisposable
 
         lock (_attachedObjectsLock)
         {
-            _attachedObjects ??= new HashSet<PdfPageObject>();
-            _attachedObjects.Add(pageObject);
+            _attachedObjects ??= new Dictionary<IntPtr, PdfPageObject>();
+            bool added = _attachedObjects.TryAdd(pageObject.Handle, pageObject);
+            Debug.Assert(added, "One wrapper per native object: GetObject returns the tracked one.");
         }
     }
 
@@ -510,7 +515,7 @@ public class PdfPage : IDisposable
             if (_attachedObjects == null || _attachedObjects.Count == 0)
                 return Array.Empty<PdfPageObject>();
 
-            var pageObjects = _attachedObjects.ToArray();
+            var pageObjects = _attachedObjects.Values.ToArray();
             _attachedObjects.Clear();
             _attachedObjects = null;
             return pageObjects;

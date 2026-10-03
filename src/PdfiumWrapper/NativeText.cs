@@ -32,9 +32,11 @@ internal static class NativeText
                 written = CheckedLength(get(state, (IntPtr)bufferPtr, new CULong((nuint)byteLength)));
 
             // A second call that reports a different length wrote at most what the buffer holds.
+            // Only the final terminator is dropped: a PDF string may contain U+0000 itself.
             var text = buffer.AsSpan(0, (int)(Math.Min(written, byteLength) / 2));
-            int terminator = text.IndexOf('\0');
-            return new string(terminator >= 0 ? text[..terminator] : text);
+            if (!text.IsEmpty && text[^1] == '\0')
+                text = text[..^1];
+            return new string(text);
         }
         finally
         {

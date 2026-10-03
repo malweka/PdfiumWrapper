@@ -157,6 +157,11 @@ public class NativeBoundaryTests
         // Objects the wrapper added come back as the same instances.
         Assert.Same(text, page.GetObject(0));
         Assert.Same(rectangle, page.GetObject(1));
+
+        // A removed object is no longer the page's: the remaining index holds the rectangle.
+        Assert.True(page.RemoveObject(text));
+        Assert.Same(rectangle, page.GetObject(0));
+        text.Dispose();
     }
 
     [Fact]
@@ -193,6 +198,28 @@ public class NativeBoundaryTests
         Assert.Equal("abc", ReadFake("abc\0"));
         Assert.Equal("", ReadFake("\0"));
         Assert.Null(NativeText.ReadUtf16(0, static (_, _, _) => default));
+    }
+
+    [Fact]
+    public void ReadUtf16_KeepsEmbeddedNulCharacters()
+    {
+        Assert.Equal("ABC\0DEF", ReadFake("ABC\0DEF\0"));
+    }
+
+    [Fact]
+    public void GetPageLabel_KeepsAnEmbeddedNulCharacter()
+    {
+        // A page label prefix of "ABC", U+0000, "DEF" as a UTF-16BE string. PDFium rebuilds the
+        // missing cross-reference table.
+        var pdf = Encoding.ASCII.GetBytes(
+            "%PDF-1.4\n" +
+            "1 0 obj << /Type /Catalog /Pages 2 0 R /PageLabels << /Nums [0 << /P <FEFF004100420043000000440045004600> >>] >> >> endobj\n" +
+            "2 0 obj << /Type /Pages /Kids [3 0 R] /Count 1 >> endobj\n" +
+            "3 0 obj << /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100] >> endobj\n" +
+            "trailer << /Root 1 0 R >>\n%%EOF\n");
+        using var doc = new PdfDocument(pdf);
+
+        Assert.Equal("ABC\0DEF", doc.GetPageLabel(0));
     }
 
     [Fact]
