@@ -181,7 +181,9 @@ public class LifetimeCoordinationTests
         Assert.Throws<ObjectDisposedException>(() => _ = doc.DocumentId);
         Assert.Throws<ObjectDisposedException>(() => doc.DeletePage((PdfPage)null!));
         Assert.Throws<ObjectDisposedException>(() => doc.DeletePage(-1));
+#pragma warning disable CS0618 // GetAllPages is obsolete but still public, so its disposed check is covered
         Assert.Throws<ObjectDisposedException>(() => doc.GetAllPages());
+#pragma warning restore CS0618
         Assert.Throws<ObjectDisposedException>(() => doc.ProcessAllPages((Action<PdfPage>)null!));
         Assert.Throws<ObjectDisposedException>(() => doc.RenderPages());
         Assert.Throws<ObjectDisposedException>(() => doc.StreamImageBytes(ImageFormat.Png));

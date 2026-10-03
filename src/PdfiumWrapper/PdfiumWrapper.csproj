@@ -1,6 +1,6 @@
 <Project Sdk="Microsoft.NET.Sdk">
 	<PropertyGroup>
-		<TargetFramework>net8.0</TargetFramework>
+		<TargetFramework>net10.0</TargetFramework>
 		<ImplicitUsings>enable</ImplicitUsings>
 		<AllowUnsafeBlocks>true</AllowUnsafeBlocks>
 		<Nullable>enable</Nullable>
@@ -12,7 +12,7 @@
 		<PackageId>PdfiumWrapper</PackageId>
 		<Product>PdfiumWrapper</Product>
 		<Title>PdfiumWrapper</Title>
-		<Description>Cross-platform .NET 8 wrapper around Google's PDFium engine for rendering, manipulating, editing, and form-filling PDF documents. Native binaries for Windows (x64), Linux (x64), and macOS (x64 and Arm64) are bundled in the package, so no separate native setup is required. Supports rasterizing pages to PNG, JPEG, and multi-page TIFF.</Description>
+		<Description>Cross-platform .NET 10 wrapper around Google's PDFium engine for rendering, manipulating, editing, and form-filling PDF documents. Native binaries for Windows (x64), Linux (x64), and macOS (x64 and Arm64) are bundled in the package, so no separate native setup is required. Supports rasterizing pages to PNG, JPEG, and multi-page TIFF.</Description>
 		<PackageTags>pdf;pdfium;pdf-manipulation;pdf-rendering;pdf-editing;pdf-forms;cross-platform;native</PackageTags>
 		<RepositoryUrl>https://github.com/malweka/PdfiumWrapper</RepositoryUrl>
 		<RepositoryType>git</RepositoryType>
@@ -37,10 +37,6 @@
 		<InternalsVisibleTo Include="PdfiumWrapper.Tests.Host" />
 		<InternalsVisibleTo Include="PdfiumWrapper.Processing" />
 		<InternalsVisibleTo Include="PdfiumWrapper.Benchmarks" />
-	</ItemGroup>
-
-	<ItemGroup>
-		<PackageReference Include="Microsoft.SourceLink.GitHub" Version="8.0.0" PrivateAssets="All" />
 	</ItemGroup>
 
 	<!-- Platform detection fallbacks when NativeRid/NativeLibName not provided (drives local dev copy-to-output) -->

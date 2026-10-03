@@ -327,7 +327,7 @@ public class PdfiumConcurrencyTests
     }
 
     [Fact]
-    public void FailingOperations_AlwaysReleaseTheGate()
+    public async Task FailingOperations_AlwaysReleaseTheGate()
     {
         const string good = "Docs/contract.pdf";
         var oracle = RenderHashesSequential(good, dpi: 36);
@@ -364,6 +364,8 @@ public class PdfiumConcurrencyTests
         });
 
         AssertSerialized(snapshot);
+        // Checked before the await below, which may resume on another thread.
+        Assert.False(PdfiumRuntime.IsHeldByCurrentThread);
 
         // Had any failure leaked the gate, this would never be admitted.
         var probe = Task.Run(() =>
@@ -371,9 +373,9 @@ public class PdfiumConcurrencyTests
             using var _ = PdfiumRuntime.Enter();
             return PdfiumRuntime.IsHeldByCurrentThread;
         });
-        Assert.True(probe.Wait(TimeSpan.FromSeconds(10)), "the gate was left held after a failing operation");
-        Assert.True(probe.Result);
-        Assert.False(PdfiumRuntime.IsHeldByCurrentThread);
+        var finished = await Task.WhenAny(probe, Task.Delay(TimeSpan.FromSeconds(10)));
+        Assert.True(finished == probe, "the gate was left held after a failing operation");
+        Assert.True(await probe);
     }
 
     [Fact]

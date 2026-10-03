@@ -22,6 +22,8 @@ REM   (pdfium_png transitively builds zlib-ng + libpng + the shim)
 REM
 REM Library versions can be overridden from the caller's environment, e.g.
 REM   set PDFIUM_VERSION=6721 & build-natives.cmd --only pdfium
+REM PDFIUM_VERSION is a pdfium-binaries build number (chromium/<n>), or "latest",
+REM which downloads again on every run.
 REM
 REM Output: All DLLs are copied to src\libs\win-x64\
 REM =============================================================================
@@ -29,11 +31,11 @@ REM ============================================================================
 setlocal enabledelayedexpansion
 
 REM ---- Library versions (override from caller env if set) ----
-if not defined LIBTIFF_VERSION       set LIBTIFF_VERSION=4.7.1
-if not defined LIBJPEG_TURBO_VERSION set LIBJPEG_TURBO_VERSION=3.1.4.1
-if not defined ZLIB_NG_VERSION       set ZLIB_NG_VERSION=2.2.4
-if not defined LIBPNG_VERSION        set LIBPNG_VERSION=1.6.56
-if not defined PDFIUM_VERSION        set PDFIUM_VERSION=latest
+if not defined LIBTIFF_VERSION       set LIBTIFF_VERSION=4.7.2
+if not defined LIBJPEG_TURBO_VERSION set LIBJPEG_TURBO_VERSION=3.2.0
+if not defined ZLIB_NG_VERSION       set ZLIB_NG_VERSION=2.3.3
+if not defined LIBPNG_VERSION        set LIBPNG_VERSION=1.6.59
+if not defined PDFIUM_VERSION        set PDFIUM_VERSION=8076
 
 REM ---- Source URLs ----
 set LIBTIFF_URL=https://download.osgeo.org/libtiff/tiff-%LIBTIFF_VERSION%.zip
@@ -170,15 +172,19 @@ if /I "%PDFIUM_VERSION%"=="latest" (
 ) else (
     set "PDFIUM_URL=%PDFIUM_BASE%/download/chromium/%PDFIUM_VERSION%/pdfium-win-x64.tgz"
 )
-if not exist pdfium-win-x64 (
+REM The extracted archive is cached per version, so changing PDFIUM_VERSION downloads again.
+set "PDFIUM_DIR=pdfium-%PDFIUM_VERSION%-win-x64"
+if /I "%PDFIUM_VERSION%"=="latest" if exist "!PDFIUM_DIR!" rmdir /s /q "!PDFIUM_DIR!"
+if not exist "!PDFIUM_DIR!" (
     echo Downloading !PDFIUM_URL!
-    curl -fLO "!PDFIUM_URL!"
+    curl -fL -o "!PDFIUM_DIR!.tgz" "!PDFIUM_URL!"
     if errorlevel 1 exit /b 1
-    mkdir pdfium-win-x64
-    tar -xzf pdfium-win-x64.tgz -C pdfium-win-x64
+    mkdir "!PDFIUM_DIR!"
+    tar -xzf "!PDFIUM_DIR!.tgz" -C "!PDFIUM_DIR!"
     if errorlevel 1 exit /b 1
 )
-copy /Y "%BUILDDIR%\pdfium-win-x64\bin\pdfium.dll" "%OUTDIR%\"
+type "%BUILDDIR%\!PDFIUM_DIR!\VERSION"
+copy /Y "%BUILDDIR%\!PDFIUM_DIR!\bin\pdfium.dll" "%OUTDIR%\"
 if errorlevel 1 exit /b 1
 echo [OK] pdfium.dll
 exit /b 0

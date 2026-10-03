@@ -29,6 +29,36 @@ internal static partial class Scenarios
         // conversions themselves.
         var documents = Enumerable.Range(0, callers).Select(_ => new PdfDocument(input)).ToArray();
 
+        Func<PdfDocument, Task<long>> convert = mode switch
+        {
+            "async" => async doc =>
+            {
+                using var tiff = new MemoryStream();
+                await doc.SaveAsTiffAsync(tiff, 100).ConfigureAwait(false);
+                return tiff.Length;
+            },
+            "stream" => async doc =>
+            {
+                // The factory call itself must not wait for the gate on a pool thread.
+                long bytes = 0;
+                await foreach (var page in doc.StreamImageBytesAsync(ImageFormat.Jpeg, 80, 100).ConfigureAwait(false))
+                    bytes += page.Length;
+                return bytes;
+            },
+            _ => doc =>
+            {
+                using var tiff = new MemoryStream();
+                doc.SaveAsTiff(tiff, 100);
+                return Task.FromResult(tiff.Length);
+            },
+        };
+
+        // One conversion before the heartbeat starts, so one-time costs are not counted as admission
+        // waits: libtiff_shim and libturbojpeg load on first use, and macOS assesses a newly written
+        // dylib on its first load (60 to 150 ms), while every pool thread that reaches the encoder waits.
+        using (var warmUp = new PdfDocument(input))
+            convert(warmUp).GetAwaiter().GetResult();
+
         var heartbeatMs = new List<double>();
         using var stop = new CancellationTokenSource();
         var heartbeat = new Thread(() =>
@@ -45,29 +75,7 @@ internal static partial class Scenarios
         long t0 = Stopwatch.GetTimestamp();
         heartbeat.Start();
 
-        var tasks = documents.Select(doc => mode switch
-        {
-            "async" => Task.Run(async () =>
-            {
-                using var tiff = new MemoryStream();
-                await doc.SaveAsTiffAsync(tiff, 100).ConfigureAwait(false);
-                return tiff.Length;
-            }),
-            "stream" => Task.Run(async () =>
-            {
-                // The factory call itself must not wait for the gate on a pool thread.
-                long bytes = 0;
-                await foreach (var page in doc.StreamImageBytesAsync(ImageFormat.Jpeg, 80, 100).ConfigureAwait(false))
-                    bytes += page.Length;
-                return bytes;
-            }),
-            _ => Task.Run(() =>
-            {
-                using var tiff = new MemoryStream();
-                doc.SaveAsTiff(tiff, 100);
-                return tiff.Length;
-            }),
-        }).ToArray();
+        var tasks = documents.Select(doc => Task.Run(() => convert(doc))).ToArray();
 
         bool finished;
         string[] errors = Array.Empty<string>();

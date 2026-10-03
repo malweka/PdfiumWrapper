@@ -10,11 +10,11 @@ set -euo pipefail
 # =============================================================================
 
 # Library versions (override via env or CLI flag)
-: "${LIBTIFF_VERSION:=4.7.1}"
-: "${LIBJPEG_TURBO_VERSION:=3.1.4.1}"
-: "${ZLIB_NG_VERSION:=2.2.4}"
-: "${LIBPNG_VERSION:=1.6.56}"
-: "${PDFIUM_VERSION:=latest}"
+: "${LIBTIFF_VERSION:=4.7.2}"
+: "${LIBJPEG_TURBO_VERSION:=3.2.0}"
+: "${ZLIB_NG_VERSION:=2.3.3}"
+: "${LIBPNG_VERSION:=1.6.59}"
+: "${PDFIUM_VERSION:=8076}"
 
 # Source URLs (templated; rarely overridden)
 LIBTIFF_URL="https://download.osgeo.org/libtiff/tiff-${LIBTIFF_VERSION}.zip"
@@ -343,7 +343,8 @@ pdfium_archive_url() {
     if [[ "${PDFIUM_VERSION}" == "latest" ]]; then
         printf '%s/latest/download/pdfium-%s.tgz\n' "${PDFIUM_BASE}" "${archive_rid}"
     else
-        printf '%s/download/%s/pdfium-%s.tgz\n' "${PDFIUM_BASE}" "${PDFIUM_VERSION}" "${archive_rid}"
+        # Accept a bare build number (8076) or the release tag (chromium/8076).
+        printf '%s/download/chromium/%s/pdfium-%s.tgz\n' "${PDFIUM_BASE}" "${PDFIUM_VERSION#chromium/}" "${archive_rid}"
     fi
 }
 
@@ -368,11 +369,16 @@ download_pdfium() {
 
     PHASE="pdfium"
     url="$(pdfium_archive_url "${rid}")"
-    archive="${BUILD_DIR}/pdfium-${rid}.tgz"
-    extract_dir="${BUILD_DIR}/pdfium-${rid}"
+    # Cached per version, so changing PDFIUM_VERSION downloads again; "latest" always does.
+    archive="${BUILD_DIR}/pdfium-${PDFIUM_VERSION#chromium/}-${rid}.tgz"
+    extract_dir="${BUILD_DIR}/pdfium-${PDFIUM_VERSION#chromium/}-${rid}"
     lib_name="$(pdfium_lib_name "${rid}")"
     source_lib="${extract_dir}/lib/${lib_name}"
     destination_lib="${LIBS_DIR}/${rid}/${lib_name}"
+
+    if [[ "${PDFIUM_VERSION}" == "latest" ]]; then
+        rm -rf "${extract_dir}"
+    fi
 
     if [[ -d "${extract_dir}" ]]; then
         log "Using existing extracted archive at ${extract_dir}"

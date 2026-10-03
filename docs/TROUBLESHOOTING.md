@@ -563,10 +563,10 @@ xattr -d com.apple.quarantine /path/to/libpdfium.dylib
 
 ### Docker
 
-**Recommended Dockerfile for .NET 8:**
+**Recommended Dockerfile for .NET 10:**
 
 ```dockerfile
-FROM mcr.microsoft.com/dotnet/aspnet:8.0 AS base
+FROM mcr.microsoft.com/dotnet/aspnet:10.0 AS base
 WORKDIR /app
 
 # Install dependencies for PDFium
@@ -576,7 +576,7 @@ RUN apt-get update && apt-get install -y \
     fonts-dejavu-core \
     && rm -rf /var/lib/apt/lists/*
 
-FROM mcr.microsoft.com/dotnet/sdk:8.0 AS build
+FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build
 WORKDIR /src
 COPY . .
 RUN dotnet restore

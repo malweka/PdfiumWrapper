@@ -90,10 +90,10 @@ Before ending a session, always update `/ai/current-state.md` with:
 
 ## Project Overview
 
-PdfiumWrapper is a .NET 8 library wrapping Google's PDFium for PDF manipulation and native libtiff for TIFF export. It targets high-throughput document processing services handling thousands of files.
+PdfiumWrapper is a .NET 10 library wrapping Google's PDFium for PDF manipulation and native libtiff for TIFF export. It targets high-throughput document processing services handling thousands of files.
 
 **Version:** 2.0.0 (the raw `PDFium.*` imports are `internal`; all native work goes through `PdfiumRuntime`)
-**Target framework:** `net8.0` with `AllowUnsafeBlocks=true`
+**Target framework:** `net10.0` with `AllowUnsafeBlocks=true`
 **Dependencies:** Native PDFium, libtiff + tiff_shim (TIFF), libjpeg-turbo (JPEG), pdfium_png (PNG; statically links libpng + zlib-ng)
 
 ## Architecture
@@ -257,6 +257,7 @@ Rules for pool code:
 - `PixelConverter` uses pre-scaled threshold comparison to avoid per-pixel division in bilevel conversion
 - PNG encoding uses zlib-ng (SIMD: NEON/AVX2) + `PNG_FILTER_SUB` for ~40% faster than SkiaSharp
 - JPEG encoding uses libjpeg-turbo (SIMD) for ~2x faster than SkiaSharp
+- Document-level renders add `FPDF_NO_NATIVETEXT` so macOS draws text with PDFium's own rasterizer instead of CoreGraphics (heavier glyphs), matching Windows/Linux and the gray TIFF render
 - For TIFF: render flags include `FPDF_PRINTING | FPDF_ANNOT` (vs just `FPDF_ANNOT` for other formats), and pages are rendered into an 8-bit gray bitmap instead of BGRA (26-39% faster on text documents)
 - `StreamImageBytes` uses eager validation + private core pattern to throw immediately on bad input while deferring iteration
 

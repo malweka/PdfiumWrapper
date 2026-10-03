@@ -62,6 +62,7 @@ public class PdfFormTests
         // Arrange
         using var doc = new PdfDocument(FormW2Path);
         using var form = doc.GetForm();
+        Assert.NotNull(form);
 
         // Act
         var fields = form.GetAllFormFields();
@@ -86,6 +87,7 @@ public class PdfFormTests
 
         using var doc = new PdfDocument(FormW2Path);
         using var form = doc.GetForm();
+        Assert.NotNull(form);
 
         string firstName = W2FieldMapping.CopyA["employee_first_name"];
         string lastName = W2FieldMapping.CopyA["employee_last_name"];
@@ -97,6 +99,7 @@ public class PdfFormTests
 
         using var verifyDoc = new PdfDocument(outputPath);
         using var verifyForm = verifyDoc.GetForm();
+        Assert.NotNull(verifyForm);
 
         // Act
         var firstNameValue = verifyForm.GetFormFieldValue(firstName);
@@ -115,6 +118,7 @@ public class PdfFormTests
         // Arrange
         using var doc = new PdfDocument(FormW2Path);
         using var form = doc.GetForm();
+        Assert.NotNull(form);
 
         // Act
         var fieldsPage0 = form.GetFormFieldsOnPage(0);
@@ -133,6 +137,7 @@ public class PdfFormTests
         // Arrange
         using var doc = new PdfDocument(FormW2Path);
         using var form = doc.GetForm();
+        Assert.NotNull(form);
         string fieldName = W2FieldMapping.CopyA["employer_ein"];
 
         // Act
@@ -149,6 +154,7 @@ public class PdfFormTests
         // Arrange
         using var doc = new PdfDocument(FormW2Path);
         using var form = doc.GetForm();
+        Assert.NotNull(form);
         string fieldName = "nonexistent_field_12345";
 
         // Act & Assert
@@ -207,6 +213,7 @@ public class PdfFormTests
         // Arrange
         using var doc = new PdfDocument(FormW2Path);
         using var form = doc.GetForm();
+        Assert.NotNull(form);
         string fieldName = W2FieldMapping.CopyA["box13_retirement_plan"];
 
         // Act
@@ -248,6 +255,7 @@ public class PdfFormTests
 
         using var doc = new PdfDocument(outputPath);
         using var form = doc.GetForm();
+        Assert.NotNull(form);
         string fieldName = "nonexistent_field_12345";
 
         // Act & Assert
@@ -261,6 +269,7 @@ public class PdfFormTests
         // Arrange
         using var doc = new PdfDocument(FormW2Path);
         using var form = doc.GetForm();
+        Assert.NotNull(form);
 
         // Act
         var allFields = form.GetAllFormFields();
@@ -276,7 +285,7 @@ public class PdfFormTests
         });
 
         // Log some field details
-        var sampleField = allFields.FirstOrDefault(f => f.Name.Contains("f1_"));
+        var sampleField = allFields.FirstOrDefault(f => f.Name != null && f.Name.Contains("f1_"));
         if (sampleField != null)
         {
             _testOutputHelper.WriteLine($"Sample Field Details:");
@@ -295,6 +304,7 @@ public class PdfFormTests
         // Arrange
         using var doc = new PdfDocument(FormW2Path);
         using var form = doc.GetForm();
+        Assert.NotNull(form);
 
         // Act
         var allFields = form.GetAllFormFields();
@@ -316,6 +326,7 @@ public class PdfFormTests
         // Arrange
         using var doc = new PdfDocument(FormW2Path);
         using var form = doc.GetForm();
+        Assert.NotNull(form);
 
         // Act
         var allFields = form.GetAllFormFields();
@@ -337,6 +348,7 @@ public class PdfFormTests
         // Arrange
         using var doc = new PdfDocument(FormW2Path);
         using var form = doc.GetForm();
+        Assert.NotNull(form);
 
         var fieldNames = new[]
         {
@@ -404,6 +416,7 @@ public class PdfFormTests
         // Arrange
         using var doc = new PdfDocument(FormW2Path);
         using var form = doc.GetForm();
+        Assert.NotNull(form);
         int invalidPageIndex = 999;
 
         // Act
@@ -440,6 +453,7 @@ public class PdfFormTests
         // Arrange
         using var doc = new PdfDocument(FormW2Path);
         using var form = doc.GetForm();
+        Assert.NotNull(form);
 
         var checkboxFields = new[]
         {
