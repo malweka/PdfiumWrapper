@@ -1534,6 +1534,8 @@ Output files are written to a temporary name and renamed when complete, so a cra
 - **Memory retirement** (`MaxWorkerMemoryBytes`): the worker takes no new job, finishes the ones it is running (each within its `JobTimeout`), then shuts down and is replaced.
 - **Cancellation:** a cancelled job that has not started is dropped; one in flight is asked to stop between pages and its partial output removed. Either way the result is `Cancelled`.
 - **`DisposeAsync`:** stops accepting jobs, cancels queued ones, lets in-flight ones finish (up to `JobTimeout`), then stops every worker. Submitting afterwards throws `ObjectDisposedException`.
+- **Workers never outlive the application.** If the process that owns the pool ends without disposing it (a crash, a kill), its workers end too. On Windows every worker is in a job object that Windows kills with the owning process. On every platform a worker whose standard input closes asks its jobs to stop and exits; if a job does not stop within 5 seconds (hung in native code, for example), the worker exits anyway with exit code 5.
+- **Large text results** (above 4 MB as UTF-16, about two million characters) travel through a file in the pool's own temp directory under `TempDirectory`. The pool reads such a file only from there, deletes it once read, and deletes it as well when nobody will read it (the job was cancelled, timed out or its worker died).
 
 #### Properties
 
@@ -1602,7 +1604,7 @@ public static class PdfWorkerHost
 }
 ```
 
-`TryRun()` returns `false` immediately in a normal process. In a worker it runs the job loop until the pool shuts it down and then returns `true`; the process should exit. A worker writes protocol frames to its standard output, so nothing else in the process may write there; calling `TryRun()` first in `Main` guarantees that.
+`TryRun()` returns `false` immediately in a normal process. In a worker it runs the job loop until the pool shuts it down, or until its standard input closes, and then returns `true`; the process should exit. A worker writes protocol frames to its standard output, so nothing else in the process may write there; calling `TryRun()` first in `Main` guarantees that.
 
 ### Events and Statistics
 
@@ -1610,6 +1612,6 @@ public static class PdfWorkerHost
 pool.Events += (sender, e) => logger.LogInformation("{Kind} worker={Pid} job={JobId} {Detail}", e.Kind, e.WorkerPid, e.JobId, e.Detail);
 ```
 
-`PdfPoolEventKind`: `WorkerStarting`, `WorkerReady`, `WorkerStopped`, `WorkerCrashed`, `WorkerStartFailed`, `WorkerRetiredForMemory`, `ScaledUp`, `ScaledDown`, `JobDispatched`, `JobCompleted`, `JobFailed`, `JobTimedOut`, `JobRetried`, `JobCancelled`, `QueueFull`. A worker's standard error arrives as `WorkerStopped` events whose detail starts with `stderr:`. Handlers run on pool threads and must be quick and must not throw.
+`PdfPoolEventKind`: `WorkerStarting`, `WorkerReady`, `WorkerStopped`, `WorkerCrashed`, `WorkerStartFailed`, `WorkerRetiredForMemory`, `ScaledUp`, `ScaledDown`, `JobDispatched`, `JobCompleted`, `JobFailed`, `JobTimedOut`, `JobRetried`, `JobCancelled`, `QueueFull`, `WorkerMessage`. A worker's standard error arrives as `WorkerMessage` events, one per line, with the line as the detail; a line longer than 4,096 characters is cut there and ends with ` [truncated]`. Malformed protocol data from a worker is reported the same way. Handlers run on pool threads and must be quick and must not throw.
 
 `PdfPoolStatistics` counts jobs submitted, succeeded, failed, timed out, cancelled, crashed and retried, and workers started, stopped, crashed and retired for memory, plus scale-ups and scale-downs.

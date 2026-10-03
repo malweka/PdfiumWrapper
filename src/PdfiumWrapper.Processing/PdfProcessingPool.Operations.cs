@@ -92,6 +92,10 @@ public sealed partial class PdfProcessingPool
                 return r.Text;
             if (r.TextFile == null)
                 return Array.Empty<string>();
+            // Read and deleted only where the pool told the worker to write it, never at any path a
+            // worker names.
+            if (!IsPoolTextFile(r.TextFile))
+                throw new InvalidDataException("The worker reported a text file outside the pool's temp directory.");
             try
             {
                 return JsonSerializer.Deserialize<string[]>(File.ReadAllText(r.TextFile)) ?? Array.Empty<string>();

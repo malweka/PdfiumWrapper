@@ -75,6 +75,11 @@ public enum PdfPoolEventKind
     JobRetried,
     JobCancelled,
     QueueFull,
+    /// <summary>
+    /// A line the worker wrote to standard error (at most 4,096 characters; a longer one is cut and
+    /// ends with <c>[truncated]</c>), or a problem the pool saw on the worker's protocol stream.
+    /// </summary>
+    WorkerMessage,
 }
 
 /// <summary>Something the pool did or observed. Raised on a pool thread; handlers must be quick and must not throw.</summary>

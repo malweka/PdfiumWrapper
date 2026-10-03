@@ -13,7 +13,9 @@ namespace PdfiumWrapper.Tests.Host;
 /// <c>sleep-after-page-MS:&lt;substring&gt;</c> sleeps MS milliseconds after every page of such jobs;
 /// <c>pause-while-marked:&lt;substring&gt;</c> holds such a job after each page while <c>&lt;input&gt;.pause</c> exists.
 /// <c>slow-start:&lt;milliseconds&gt;</c> delays the worker's ready report;
-/// <c>fail-start-if-exists:&lt;path&gt;</c> makes the worker exit before reporting ready while that file exists.
+/// <c>fail-start-if-exists:&lt;path&gt;</c> makes the worker exit before reporting ready while that file exists;
+/// <c>exit-after-hello-if-exists:&lt;path&gt;</c> makes it exit right after reporting ready while that file exists;
+/// <c>stderr-line:&lt;length&gt;</c> writes a short line and one of that length to standard error at start.
 /// Several faults combine with <c>;</c>.
 /// </summary>
 internal static class WorkerFaults
@@ -34,6 +36,7 @@ internal static class WorkerFaults
             combined = combined == null ? hooks : new WorkerHooks
             {
                 BeforeHello = combined.BeforeHello + hooks.BeforeHello,
+                AfterHello = combined.AfterHello + hooks.AfterHello,
                 BeforeJob = combined.BeforeJob + hooks.BeforeJob,
                 AfterPage = combined.AfterPage + hooks.AfterPage,
             };
@@ -73,6 +76,33 @@ internal static class WorkerFaults
                 {
                     if (File.Exists(match))
                         Environment.Exit(4);
+                },
+            };
+        }
+
+        if (fault == "exit-after-hello-if-exists")
+        {
+            // A worker that reports ready and dies at once, while that file exists.
+            return new WorkerHooks
+            {
+                AfterHello = () =>
+                {
+                    if (File.Exists(match))
+                        Environment.Exit(4);
+                },
+            };
+        }
+
+        if (fault == "stderr-line")
+        {
+            // A short line, then one of this many characters, on standard error before reporting ready.
+            return new WorkerHooks
+            {
+                BeforeHello = () =>
+                {
+                    Console.Error.WriteLine("short line");
+                    Console.Error.WriteLine(new string('x', int.Parse(match)));
+                    Console.Error.Flush();
                 },
             };
         }
