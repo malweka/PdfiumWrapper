@@ -117,12 +117,16 @@ public class PdfPage : IDisposable
     {
         PdfiumRuntime.AssertHeld();
         ThrowIfDisposed();
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(width);
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(height);
+        RenderLimits.Check(width, height, PageIndex);
 
         var bitmap = gray
             ? PDFium.FPDFBitmap_CreateEx(width, height, PDFium.FPDFBitmap_Gray, IntPtr.Zero, 0)
             : PDFium.FPDFBitmap_Create(width, height, 0);
         if (bitmap == IntPtr.Zero)
-            throw new OutOfMemoryException("Failed to create bitmap");
+            throw new InvalidOperationException(
+                $"PDFium could not create a {width} x {height} bitmap to render page index {PageIndex}.");
 
         try
         {
@@ -132,8 +136,9 @@ public class PdfPage : IDisposable
             using (PdfiumDiagnostics.NativeInterval(NativeOp.Render))
                 PDFium.FPDF_RenderPageBitmap(bitmap, _page, 0, 0, width, height, 0, flags);
 
+            // FPDFBitmap_Create with alpha 0 makes a BGRx bitmap.
             return new BitmapLease(bitmap, PDFium.FPDFBitmap_GetBuffer(bitmap), width, height,
-                PDFium.FPDFBitmap_GetStride(bitmap), gray);
+                PDFium.FPDFBitmap_GetStride(bitmap), gray ? PDFium.FPDFBitmap_Gray : PDFium.FPDFBitmap_BGRx);
         }
         catch
         {
@@ -142,6 +147,15 @@ public class PdfPage : IDisposable
         }
     }
 
+    /// <summary>
+    /// Renders the page into a <paramref name="width"/> x <paramref name="height"/> BGRx bitmap and
+    /// returns its pixels, rows of <c>width * 4</c> bytes.
+    /// </summary>
+    /// <exception cref="ArgumentOutOfRangeException"><paramref name="width"/> or <paramref name="height"/> is not positive.</exception>
+    /// <exception cref="InvalidOperationException">
+    /// The bitmap would exceed the render pixel limit (268,435,456 pixels by default; see the
+    /// <c>PdfiumWrapper.MaxRenderPixels</c> AppContext data key), or PDFium could not allocate it.
+    /// </exception>
     public byte[] RenderToBytes(int width, int height, int flags = 0)
     {
         // Render inside the gate, copy the pixels out with the gate free.
@@ -196,8 +210,13 @@ public class PdfPage : IDisposable
     }
 
     /// <summary>
-    /// Check if this page has an embedded thumbnail
+    /// Whether the page has an embedded thumbnail (a <c>/Thumb</c> image with data).
     /// </summary>
+    /// <remarks>
+    /// This only measures the thumbnail's stream as stored; it neither decompresses nor decodes it,
+    /// so a crafted thumbnail cannot make the check expensive. A thumbnail that is present but
+    /// damaged reports true here while <see cref="GetEmbeddedThumbnail"/> returns null.
+    /// </remarks>
     public bool HasEmbeddedThumbnail
     {
         get
@@ -205,51 +224,47 @@ public class PdfPage : IDisposable
             using var _ = PdfiumRuntime.Enter();
             ThrowIfDisposed();
 
-            var thumbnail = PDFium.FPDFPage_GetThumbnailAsBitmap(_page);
-            if (thumbnail != IntPtr.Zero)
-            {
-                PDFium.FPDFBitmap_Destroy(thumbnail);
-                return true;
-            }
-            return false;
+            return PDFium.FPDFPage_GetRawThumbnailData(_page, IntPtr.Zero, default).Value != 0;
         }
     }
 
     /// <summary>
-    /// Get the embedded thumbnail as raw BGRA bytes (if it exists)
-    /// Returns null if no embedded thumbnail exists
+    /// Get the page's embedded thumbnail as BGRA pixels, with its size and stride, in one decode.
     /// </summary>
-    public byte[] GetEmbeddedThumbnailBytes()
+    /// <remarks>
+    /// Gray and RGB thumbnails are expanded to BGRA with full opacity, as
+    /// <see cref="PdfImageObject.GetBitmap"/> does. The native bitmap is copied and released
+    /// before this returns.
+    /// </remarks>
+    /// <returns>The thumbnail, or null if the page has none or it cannot be decoded.</returns>
+    public RawBitmap? GetEmbeddedThumbnail()
     {
-        using var _ = PdfiumRuntime.Enter();
-        ThrowIfDisposed();
-
-        var thumbnail = PDFium.FPDFPage_GetThumbnailAsBitmap(_page);
-        if (thumbnail == IntPtr.Zero)
-            return null!;
-
-        try
+        BitmapLease? lease;
+        using (PdfiumRuntime.Enter())
         {
-            var height = PDFium.FPDFBitmap_GetHeight(thumbnail);
-            var stride = PDFium.FPDFBitmap_GetStride(thumbnail);
-            var buffer = PDFium.FPDFBitmap_GetBuffer(thumbnail);
-
-            var size = stride * height;
-            var result = new byte[size];
-            Marshal.Copy(buffer, result, 0, size);
-
-            return result;
+            ThrowIfDisposed();
+            lease = BitmapLease.Adopt(PDFium.FPDFPage_GetThumbnailAsBitmap(_page));
         }
-        finally
-        {
-            PDFium.FPDFBitmap_Destroy(thumbnail);
-        }
+
+        // Converted with the gate free; disposing the lease reenters it to destroy the bitmap.
+        return BitmapLease.ToBgraAndRelease(lease);
+    }
+
+    /// <summary>
+    /// Get the embedded thumbnail as BGRA bytes, rows of <c>width * 4</c> bytes.
+    /// Returns null if no embedded thumbnail exists.
+    /// </summary>
+    [Obsolete("Use GetEmbeddedThumbnail(), which returns the BGRA pixels together with their size and stride in one decode.")]
+    public byte[]? GetEmbeddedThumbnailBytes()
+    {
+        return GetEmbeddedThumbnail()?.Pixels;
     }
 
     /// <summary>
     /// Get the embedded thumbnail dimensions (if it exists)
     /// Returns null if no embedded thumbnail exists
     /// </summary>
+    [Obsolete("Use GetEmbeddedThumbnail(), which returns the BGRA pixels together with their size and stride in one decode.")]
     public (int width, int height)? GetEmbeddedThumbnailSize()
     {
         using var _ = PdfiumRuntime.Enter();
@@ -282,10 +297,19 @@ public class PdfPage : IDisposable
         ThrowIfDisposed();
 
         var textObj = PdfTextObject.Create(_owner.Document, font, fontSize);
-        textObj.Text = text;
+        try
+        {
+            textObj.Text = text;
 
-        // Position the text object
-        textObj.SetMatrix(1, 0, 0, 1, x, y);
+            // Position the text object
+            textObj.SetMatrix(1, 0, 0, 1, x, y);
+        }
+        catch
+        {
+            // Not inserted yet, so nothing else owns it
+            textObj.Dispose();
+            throw;
+        }
 
         // Insert into page
         PDFium.FPDFPage_InsertObject(_page, textObj.Handle);
@@ -303,8 +327,17 @@ public class PdfPage : IDisposable
         ThrowIfDisposed();
 
         var imageObj = PdfImageObject.Create(_owner.Document);
-        imageObj.SetImage(imageBytes, _page);
-        imageObj.SetPositionAndSize(x, y, width, height);
+        try
+        {
+            imageObj.SetImage(imageBytes, _page);
+            imageObj.SetPositionAndSize(x, y, width, height);
+        }
+        catch
+        {
+            // Not inserted yet, so nothing else owns it: an undecodable image must not leak the object.
+            imageObj.Dispose();
+            throw;
+        }
 
         // Insert into page
         PDFium.FPDFPage_InsertObject(_page, imageObj.Handle);

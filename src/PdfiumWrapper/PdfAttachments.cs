@@ -120,10 +120,18 @@ public class PdfAttachments
         if (!Directory.Exists(outputDirectory))
             Directory.CreateDirectory(outputDirectory);
 
+        // Names that differ only in case, or that Windows would reduce to the same file, would
+        // overwrite each other; later ones get "_2", "_3" before the extension.
+        var used = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         for (int i = 0; i < attachments.Count; i++)
         {
-            string filePath = Path.Combine(outputDirectory, SafeFileName(attachments[i].Name, i));
-            File.WriteAllBytes(filePath, attachments[i].Data ?? []);
+            string fileName = SafeFileName(attachments[i].Name, i);
+            string stem = Path.GetFileNameWithoutExtension(fileName);
+            string extension = Path.GetExtension(fileName);
+            for (int suffix = 2; !used.Add(fileName); suffix++)
+                fileName = $"{stem}_{suffix}{extension}";
+
+            File.WriteAllBytes(Path.Combine(outputDirectory, fileName), attachments[i].Data ?? []);
         }
     }
 
@@ -142,8 +150,29 @@ public class PdfAttachments
         foreach (char c in Path.GetInvalidFileNameChars())
             fileName = fileName.Replace(c, '_');
 
-        // Empty, ".", ".." and names of only dots or spaces (which Windows trims to
-        // nothing) would name the directory itself or its parent.
-        return fileName.Trim('.', ' ').Length == 0 ? $"attachment_{index + 1}" : fileName;
+        // Windows drops trailing dots and spaces, so "a." and "a " would both write "a".
+        // Empty, ".", ".." and names of only dots or spaces would name the directory itself
+        // or its parent.
+        fileName = fileName.TrimEnd('.', ' ');
+        if (fileName.Trim('.', ' ').Length == 0)
+            return $"attachment_{index + 1}";
+
+        // A device name ("CON", "nul.txt", "COM1.log") opens the device instead of a file on Windows
+        return IsReservedDeviceName(fileName) ? "_" + fileName : fileName;
+    }
+
+    private static bool IsReservedDeviceName(string fileName)
+    {
+        int dot = fileName.IndexOf('.');
+        string stem = (dot < 0 ? fileName : fileName[..dot]).TrimEnd(' ');
+        if (stem.Equals("CON", StringComparison.OrdinalIgnoreCase)
+            || stem.Equals("PRN", StringComparison.OrdinalIgnoreCase)
+            || stem.Equals("AUX", StringComparison.OrdinalIgnoreCase)
+            || stem.Equals("NUL", StringComparison.OrdinalIgnoreCase))
+            return true;
+
+        return stem.Length == 4
+            && (stem.StartsWith("COM", StringComparison.OrdinalIgnoreCase) || stem.StartsWith("LPT", StringComparison.OrdinalIgnoreCase))
+            && (char.IsAsciiDigit(stem[3]) || stem[3] is '¹' or '²' or '³');
     }
 }

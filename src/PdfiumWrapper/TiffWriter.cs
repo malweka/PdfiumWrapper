@@ -1,3 +1,4 @@
+using System.Runtime.ExceptionServices;
 using System.Runtime.InteropServices;
 
 namespace PdfiumWrapper;
@@ -12,8 +13,11 @@ internal sealed class TiffWriter : IDisposable
     private int _pageIndex;
     private bool _disposed;
 
-    // For Stream-based writing: prevent GC of the stream and callback delegates
-    private GCHandle _streamHandle;
+    // For Stream-based writing: the callbacks reach this writer through a GCHandle, and the
+    // delegates are kept alive while libtiff holds their function pointers.
+    private Stream? _stream;
+    private ExceptionDispatchInfo? _streamFailure;
+    private GCHandle _selfHandle;
     private LibTiff.TIFFReadWriteProc? _readDelegate;
     private LibTiff.TIFFReadWriteProc? _writeDelegate;
     private LibTiff.TIFFSeekProc? _seekDelegate;
@@ -30,16 +34,11 @@ internal sealed class TiffWriter : IDisposable
     private static readonly IntPtr s_warningHandlerPtr = Marshal.GetFunctionPointerForDelegate(s_warningHandler);
     private static bool s_handlersInstalled;
 
-    public TiffWriter(string outputPath)
-    {
-        _tiff = LibTiff.TIFFOpen(outputPath, "w");
-        if (_tiff == IntPtr.Zero)
-            throw new IOException($"libtiff: failed to open '{outputPath}' for writing.");
-    }
-
     /// <summary>
     /// Creates a TiffWriter that writes to a Stream via TIFFClientOpen.
-    /// The stream must be writable and seekable.
+    /// The stream must be writable and seekable. File output goes through a managed
+    /// <see cref="FileStream"/> as well: libtiff's TIFFOpen reads the path in the ANSI code page
+    /// on Windows, so non-ASCII paths would break.
     /// </summary>
     public TiffWriter(Stream stream)
     {
@@ -47,9 +46,10 @@ internal sealed class TiffWriter : IDisposable
         if (!stream.CanWrite) throw new ArgumentException("Stream must be writable.", nameof(stream));
         if (!stream.CanSeek) throw new ArgumentException("Stream must be seekable.", nameof(stream));
 
-        // Pin the stream so we can retrieve it from the IntPtr clientdata in callbacks
-        _streamHandle = GCHandle.Alloc(stream);
-        var clientdata = GCHandle.ToIntPtr(_streamHandle);
+        // The callbacks get this writer back from the clientdata pointer
+        _stream = stream;
+        _selfHandle = GCHandle.Alloc(this);
+        var clientdata = GCHandle.ToIntPtr(_selfHandle);
 
         // Create and pin callback delegates (prevent GC while libtiff holds the pointers)
         _readDelegate = StreamReadProc;
@@ -69,42 +69,75 @@ internal sealed class TiffWriter : IDisposable
 
         if (_tiff == IntPtr.Zero)
         {
-            _streamHandle.Free();
-            throw new IOException("libtiff: failed to open stream for writing via TIFFClientOpen.");
+            _selfHandle.Free();
+            ThrowStreamFailureOr("libtiff: failed to open stream for writing via TIFFClientOpen.");
         }
     }
 
     #region Stream I/O Callbacks
 
+    // libtiff calls these from native code. An exception must not unwind through native frames
+    // (on Linux and macOS that terminates the process), so each callback catches, records the
+    // first failure, and returns libtiff's error value. The libtiff call that fails as a result
+    // rethrows the recorded exception (ThrowStreamFailureOr).
+
+    private static TiffWriter Writer(IntPtr clientdata) => (TiffWriter)GCHandle.FromIntPtr(clientdata).Target!;
+
+    private void Fail(Exception ex) => _streamFailure ??= ExceptionDispatchInfo.Capture(ex);
+
     private static nint StreamReadProc(IntPtr clientdata, IntPtr data, nint size)
     {
-        var stream = (Stream)GCHandle.FromIntPtr(clientdata).Target!;
-        var buffer = new byte[(int)size];
-        int bytesRead = stream.Read(buffer, 0, (int)size);
-        Marshal.Copy(buffer, 0, data, bytesRead);
-        return bytesRead;
+        var writer = Writer(clientdata);
+        try
+        {
+            var buffer = new byte[(int)size];
+            int bytesRead = writer._stream!.Read(buffer, 0, (int)size);
+            Marshal.Copy(buffer, 0, data, bytesRead);
+            return bytesRead;
+        }
+        catch (Exception ex)
+        {
+            writer.Fail(ex);
+            return -1;
+        }
     }
 
     private static nint StreamWriteProc(IntPtr clientdata, IntPtr data, nint size)
     {
-        var stream = (Stream)GCHandle.FromIntPtr(clientdata).Target!;
-        var buffer = new byte[(int)size];
-        Marshal.Copy(data, buffer, 0, (int)size);
-        stream.Write(buffer, 0, (int)size);
-        return size;
+        var writer = Writer(clientdata);
+        try
+        {
+            var buffer = new byte[(int)size];
+            Marshal.Copy(data, buffer, 0, (int)size);
+            writer._stream!.Write(buffer, 0, (int)size);
+            return size;
+        }
+        catch (Exception ex)
+        {
+            writer.Fail(ex);
+            return -1;
+        }
     }
 
     private static ulong StreamSeekProc(IntPtr clientdata, ulong offset, int whence)
     {
-        var stream = (Stream)GCHandle.FromIntPtr(clientdata).Target!;
-        var origin = whence switch
+        var writer = Writer(clientdata);
+        try
         {
-            0 => SeekOrigin.Begin,
-            1 => SeekOrigin.Current,
-            2 => SeekOrigin.End,
-            _ => SeekOrigin.Begin
-        };
-        return (ulong)stream.Seek((long)offset, origin);
+            var origin = whence switch
+            {
+                0 => SeekOrigin.Begin,
+                1 => SeekOrigin.Current,
+                2 => SeekOrigin.End,
+                _ => SeekOrigin.Begin
+            };
+            return (ulong)writer._stream!.Seek((long)offset, origin);
+        }
+        catch (Exception ex)
+        {
+            writer.Fail(ex);
+            return ulong.MaxValue; // (toff_t)-1
+        }
     }
 
     private static int StreamCloseProc(IntPtr clientdata)
@@ -115,8 +148,27 @@ internal sealed class TiffWriter : IDisposable
 
     private static ulong StreamSizeProc(IntPtr clientdata)
     {
-        var stream = (Stream)GCHandle.FromIntPtr(clientdata).Target!;
-        return (ulong)stream.Length;
+        var writer = Writer(clientdata);
+        try
+        {
+            return (ulong)writer._stream!.Length;
+        }
+        catch (Exception ex)
+        {
+            writer.Fail(ex);
+            return 0;
+        }
+    }
+
+    /// <summary>
+    /// Throws the exception a stream callback recorded, which is why libtiff failed, or an
+    /// <see cref="IOException"/> with <paramref name="message"/> when there is none.
+    /// </summary>
+    [System.Diagnostics.CodeAnalysis.DoesNotReturn]
+    private void ThrowStreamFailureOr(string message)
+    {
+        _streamFailure?.Throw();
+        throw new IOException(message);
     }
 
     #endregion
@@ -172,7 +224,7 @@ internal sealed class TiffWriter : IDisposable
                 {
                     var rowPtr = (IntPtr)(ptr + row * bytesPerRow);
                     if (LibTiff.TIFFWriteScanline(_tiff, rowPtr, row, 0) < 0)
-                        throw new IOException($"libtiff: TIFFWriteScanline failed at row {row}.");
+                        ThrowStreamFailureOr($"libtiff: TIFFWriteScanline failed at row {row}.");
                 }
             }
         }
@@ -208,7 +260,7 @@ internal sealed class TiffWriter : IDisposable
     private void FinalizePage()
     {
         if (LibTiff.TIFFWriteDirectory(_tiff) == 0)
-            throw new IOException("libtiff: TIFFWriteDirectory failed.");
+            ThrowStreamFailureOr("libtiff: TIFFWriteDirectory failed.");
         _pageIndex++;
     }
 
@@ -236,6 +288,20 @@ internal sealed class TiffWriter : IDisposable
         System.Diagnostics.Debug.WriteLine("[libtiff WARN]");
     }
 
+    /// <summary>
+    /// Closes the TIFF, which flushes what libtiff still buffers, and throws if a stream callback
+    /// failed while doing so. Call it on success; <see cref="Dispose"/> closes without throwing,
+    /// for the failure paths, where an exception is already on its way out.
+    /// </summary>
+    public void Close()
+    {
+        if (_disposed)
+            return;
+
+        Dispose();
+        _streamFailure?.Throw();
+    }
+
     public void Dispose()
     {
         if (!_disposed)
@@ -246,9 +312,9 @@ internal sealed class TiffWriter : IDisposable
                 LibTiff.TIFFClose(_tiff);
                 _tiff = IntPtr.Zero;
             }
-            if (_streamHandle.IsAllocated)
+            if (_selfHandle.IsAllocated)
             {
-                _streamHandle.Free();
+                _selfHandle.Free();
             }
         }
     }

@@ -205,6 +205,21 @@ This guide covers common issues and their solutions when using PdfiumWrapper.
 // Remember: byte order is Blue, Green, Red, Alpha
 ```
 
+### "... exceeds the render limit of 268,435,456 pixels"
+
+**Symptom:** `InvalidOperationException` such as `Rendering page index 4 at 60000 x 60000 pixels (3,600,000,000 pixels) exceeds the render limit ...` from `RenderPages`, `SaveAsTiff`, `SaveAsPngs`, `StreamImageBytes`, `RenderToBytes` or a worker pool image job
+
+**Cause:** The page is very large (its page box comes from the file), the DPI is very high, or both. Each render is capped at 2^28 pixels (1 GiB as BGRA). The cap stops one crafted PDF from forcing a multi-GiB allocation. It is checked before PDFium allocates anything, and a partly written TIFF file is deleted.
+
+**Solutions:**
+- Lower the DPI for that document. `GetPageSize(i)` returns the page size in points, so the pixel size is points / 72 × DPI.
+- If you trust the input and have the memory, raise the cap before rendering:
+  ```csharp
+  AppContext.SetData("PdfiumWrapper.MaxRenderPixels", 1L << 30); // pixels
+  ```
+
+A DPI, width or height of zero or less throws `ArgumentOutOfRangeException` instead.
+
 ---
 
 ## Form Filling Issues
@@ -503,7 +518,9 @@ form.GetAllFormFields(); // ObjectDisposedException: the document is gone
 
 **Cause:** Synchronous methods, including constructors, block the calling thread while they wait for the gate. Calling them from many thread-pool threads at once leaves no threads for other work. With 192 concurrent conversions on a pool pinned to 24 threads, a heartbeat work item waited 1.6 ms (p99) when the conversions used the async API and about 2.5 s when they called the synchronous API from pool threads.
 
-**Solution:** Use the async methods (`SaveAsTiffAsync`, `RenderPagesAsync`, `StreamImageBytesAsync`, `SaveAsJpegsAsync`, `SaveAsImagesAsync`, `ProcessAllPagesAsync`). They wait for the gate without blocking a thread. Also bound how many conversions run at once.
+**Solution:** Use the async methods (`SaveAsTiffAsync`, `RenderPagesAsync`, `StreamImageBytesAsync`, `SaveAsPngsAsync`, `SaveAsJpegsAsync`, `SaveAsImagesAsync`, `ProcessAllPagesAsync`). They wait for the gate without blocking a thread. Also bound how many conversions run at once.
+
+The async methods run their page work on the thread pool and never post to the caller's `SynchronizationContext`. So blocking on one from a WinForms, WPF or classic ASP.NET thread (`.Result`, `.Wait()`) does not deadlock, although it still blocks that thread until the work is done.
 
 ```csharp
 using var document = new PdfDocument(path);

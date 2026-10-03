@@ -215,6 +215,10 @@ public static partial class PDFium
         // Version 2 additions (for XFA support)
         public IntPtr m_pJsPlatform;  // IPDF_JSPLATFORM* - JavaScript platform interface
 
+        // Whether the XFA module is disabled (ignored if version < 2). Without this field every
+        // version 2 callback below sits 8 bytes early and the struct is 8 bytes short.
+        public int xfa_disabled;  // FPDF_BOOL xfa_disabled;
+
         // Display caret callback
         public IntPtr FFI_DisplayCaret;  // void (*FFI_DisplayCaret)(struct _FPDF_FORMFILLINFO* pThis, FPDF_PAGE page, FPDF_BOOL bVisible, double left, double top, double right, double bottom);
 

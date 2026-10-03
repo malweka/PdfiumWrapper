@@ -245,10 +245,12 @@ public void ConvertPdfToImages(string pdfPath, string outputDirectory, int dpi =
     // Save all pages as PNG
     doc.SaveAsPngs(outputDirectory, "page", dpi);
     
-    // Or save as JPEG with quality setting
+    // Or save as JPEG with quality setting (90 is also the default)
     doc.SaveAsJpegs(outputDirectory, "page", quality: 90, dpi);
 }
 ```
+
+Pages are written as `{prefix}_001.png`, `{prefix}_002.png`, and so on. Every output file, TIFF included, is opened by .NET, so non-ASCII directories, prefixes and document names behave the same on Windows, Linux and macOS. The worker pool's image jobs use the same names.
 
 ### Streaming Image Bytes Without Saving to Disk
 
@@ -259,19 +261,19 @@ public void ProcessPdfPageImages(string pdfPath, ImageFormat format, int dpi = 3
 {
     using var doc = new PdfDocument(pdfPath);
     int i = 0;
-    foreach (var bytes in doc.StreamImageBytes(format, quality: 100, dpi))
+    foreach (var bytes in doc.StreamImageBytes(format, quality: 90, dpi))
     {
         File.WriteAllBytes($"page_{i++}.png", bytes);
         // Previous page's bytes are now eligible for GC
     }
 }
 
-// Async version — yields between pages for UI responsiveness
+// Async version: renders and encodes on the thread pool, never on the caller's context
 public async Task ProcessPdfPageImagesAsync(string pdfPath, ImageFormat format, int dpi = 300)
 {
     using var doc = new PdfDocument(pdfPath);
     int i = 0;
-    await foreach (var bytes in doc.StreamImageBytesAsync(format, quality: 100, dpi))
+    await foreach (var bytes in doc.StreamImageBytesAsync(format, quality: 90, dpi))
     {
         await File.WriteAllBytesAsync($"page_{i++}.png", bytes);
     }
@@ -635,7 +637,7 @@ What it gives you over the patterns above:
 
 - **Parallel rendering.** Each worker is a separate process with its own PDFium, so workers render at the same time. The pool reaches the throughput of the replica table above from inside one application.
 - **Dynamic size.** Workers are added when every worker is busy and jobs are waiting (after `ScaleUpAfter`, 500 ms) and removed when idle (after `IdleTimeout`, 60 s), between `MinWorkers` and `MaxWorkers`. A burst scales up within seconds; quiet periods cost only `MinWorkers` of memory.
-- **Crash isolation.** A native abort on a damaged PDF kills one worker, which is replaced; the job is reported as `WorkerCrashed` (after a retry) and every other job proceeds. In-process, that abort would take the service down.
+- **Crash isolation.** A native abort on a damaged PDF kills one worker, which is replaced; the job is reported as `WorkerCrashed` (after a retry) and every other job proceeds. A job that shared the worker runs again without using one of its attempts. In-process, that abort would take the service down.
 - **Backpressure, timeouts, retries, cancellation**, and a typed API: `GetPageCountAsync`, `ConvertToPngAsync`, `ConvertToJpegAsync`, `ConvertToTiffAsync`, `ExtractTextAsync`, single or batch. See the [API reference](API-REFERENCE.md#pdfprocessingpool-pdfiumwrapperprocessing).
 
 What it costs: about 120 to 140 MB per worker on the mix above, and a few hundred milliseconds of process start when the pool grows.
@@ -665,7 +667,15 @@ Most memory used while processing PDFs is native: PDFium's document and font dat
 
 - Dispose every document, page, form and merger. If one is dropped without `Dispose()`, its finalizer does not call PDFium; it queues the native handles and the next PdfiumWrapper operation on any thread closes them (`PdfiumRuntime.ReleasePending()` does so on demand). That delays the release of native memory, so treat it as a safety net.
 - Do not force garbage collection between documents or batches. It does not release PDF memory and only pauses the process.
-- `RenderPages` returns every page as a managed `byte[]` at once. For large documents prefer `StreamImageBytes` / `StreamImageBytesAsync` or the `SaveAs...` methods, which hold one page at a time.
+- `RenderPages` / `RenderPagesAsync` buffer the whole document: every page is held as a managed `byte[]` until the call returns, so a 100-page document at 300 DPI needs about 3.3 GB. For large documents prefer `StreamImageBytes` / `StreamImageBytesAsync` or the `SaveAs...` methods, which hold one page at a time.
+- Every render is capped at 268,435,456 pixels (1 GiB as BGRA). The cap is checked before PDFium allocates the bitmap, so a PDF with a huge page box, or a mistaken DPI, fails fast with an `InvalidOperationException` that names the page and its pixel size. Without the cap, such a file could force a multi-GiB allocation per caller. A DPI of zero or less throws `ArgumentOutOfRangeException`. The cap applies to each bitmap: with N concurrent callers, up to N bitmaps of that size can exist at once. Raise or lower it with the `PdfiumWrapper.MaxRenderPixels` `AppContext` data key (pixels):
+
+  ```csharp
+  // A service that only renders ordinary pages can afford a tighter bound per caller.
+  AppContext.SetData("PdfiumWrapper.MaxRenderPixels", 64L * 1024 * 1024);
+  ```
+
+  The worker pool's `MaxWorkerMemoryBytes` bounds a whole worker process. This cap also protects in-process callers and bounds each render inside a worker.
 - Saving a PDF (`Save`, `SaveToStream`, `PdfMerger.Save`, `PdfMerger.ToBytes`) serializes the whole output into a pooled in-memory buffer and writes it to the file or stream afterwards. Peak memory includes the full output size.
 - Bound the number of concurrent callers: each one in flight holds a rendered page.
 
@@ -717,10 +727,10 @@ public async Task ProcessWithMemoryMonitoringAsync(string[] pdfPaths, string out
 
 ### Consideration: Large Input Streams
 
-`new PdfDocument(stream)` and `new PdfMerger(stream)` read the stream from its current position to its end during construction, before any native work starts, and leave it positioned at its end. A slow stream therefore delays only its own caller, and the source stream can be closed as soon as the constructor returns.
+`new PdfDocument(stream)` and `new PdfMerger(stream)` read the stream from its current position to its end during construction, before any native work starts, and leave it positioned at its end. A slow stream therefore delays only its own caller, and the source stream can be closed, reset or reused as soon as the constructor returns.
 
-- If the stream is a `MemoryStream` with an exposable buffer, the wrapper uses and pins that buffer in place, without a copy.
-- Other streams of up to 64 MB are read into a managed `byte[]` that is pinned for the lifetime of the document.
+- Streams of up to 64 MB are copied into a buffer the document owns, pinned for the lifetime of the document. For a seekable stream (a `MemoryStream` included) the buffer is rented from `ArrayPool<byte>.Shared` and returned once the document is closed.
+- A `MemoryStream`'s own buffer is never used in place. PDFium reads pages from its input lazily for as long as the document is open, so a pooled or reused stream overwritten after construction would otherwise change, or break, the pages of a document that is still open.
 - Larger inputs are copied to a temporary file that PDFium reads directly. The file is deleted when the document or merger is disposed.
 
 The threshold can be changed before loading:
@@ -731,9 +741,9 @@ AppContext.SetData("PdfiumWrapper.SpoolThreshold", 16L * 1024 * 1024); // bytes
 
 For very large PDFs or high-volume stream ingestion pipelines, consider these tradeoffs:
 
-- If you already have the full PDF in memory, prefer a `MemoryStream` with an exposable buffer or pass a `byte[]` directly.
+- If you already have the full PDF in a `byte[]` that you will not modify until the document is disposed, pass it directly: it is used in place, without a copy.
 - If the PDF is already a file, open it by path. PDFium then reads it from disk as needed and nothing is copied into managed memory.
-- Inputs under the threshold that are not an exposable `MemoryStream` are copied once into managed memory.
+- Stream inputs under the threshold, `MemoryStream` included, are copied once into memory the document owns.
 
 ### Large Stream Examples
 
@@ -756,12 +766,12 @@ public void ProcessPdfBytes(byte[] pdfBytes)
 Why use this:
 
 - No extra copy inside the wrapper
-- Clear ownership
 - Good when your upstream already gives you a `byte[]`
+- The array is pinned and read for as long as the document is open: do not modify, reuse or return it to a pool before disposing the document
 
-#### 2. If You Control the In-Memory Stream
+#### 2. If the PDF Is in a Stream You Will Reuse
 
-If you receive or build the PDF in memory yourself, prefer an exposable `MemoryStream`:
+If the PDF arrives in a `MemoryStream` (or any stream) that you reset or return to a pool after loading, pass the stream:
 
 ```csharp
 public void ProcessPdfMemoryStream(byte[] pdfBytes)
@@ -782,8 +792,8 @@ public void ProcessPdfMemoryStream(byte[] pdfBytes)
 
 Why use this:
 
-- `PdfDocument` can reuse the `MemoryStream` backing buffer when it is exposable
-- Avoids an extra managed copy compared with a generic stream
+- The document copies the bytes into a pooled buffer it owns, so the stream can be reset, reused or returned to a pool as soon as the constructor returns
+- The copy is one `memcpy` into a rented array, returned to the pool when the document is disposed
 
 #### 3. For Very Large Streams, Spool to a Temporary File
 
@@ -860,8 +870,8 @@ public async Task<IActionResult> ProcessUpload(IFormFile file, CancellationToken
 
 Rule of thumb:
 
-- Small payload already in memory: use `byte[]`
-- In-memory stream you control: use `MemoryStream`
+- Small payload already in memory, left untouched while the document is open: use `byte[]`
+- In-memory stream that is reused or pooled: pass the stream (its bytes are copied)
 - Any other stream: pass it to the constructor (read up front; spooled to a temporary file above 64 MB)
 - Large or slow stream in async code: copy it to a file asynchronously, then open by path
 

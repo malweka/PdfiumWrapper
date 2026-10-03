@@ -129,6 +129,54 @@ public class PdfPageEditingTests : IDisposable
         Assert.Throws<ObjectDisposedException>(() => image.GetBitmap());
     }
 
+    [Fact]
+    public void AddImage_JpegWithOversizedHeader_ThrowsBeforeDecoding()
+    {
+        // Arrange: a real JPEG whose SOF0 header claims 32768 x 32769. In 32-bit arithmetic the BGRA
+        // buffer size wraps to 128 KB, and the decoder would write 4 GB into it.
+        byte[] jpeg;
+        using (var sourceDoc = new PdfDocument(ContractPdfPath))
+            jpeg = sourceDoc.StreamImageBytes(ImageFormat.Jpeg, 90, 20).First();
+
+        int sof = -1;
+        for (int i = 0; i < jpeg.Length - 1; i++)
+        {
+            if (jpeg[i] == 0xFF && jpeg[i + 1] == 0xC0)
+            {
+                sof = i;
+                break;
+            }
+        }
+
+        Assert.True(sof > 0, "the encoder writes a baseline SOF0 marker");
+        jpeg[sof + 5] = 0x80; // height 32769
+        jpeg[sof + 6] = 0x01;
+        jpeg[sof + 7] = 0x80; // width 32768
+        jpeg[sof + 8] = 0x00;
+
+        using var doc = new PdfDocument();
+        using var page = doc.AddPage();
+        long liveBefore = PdfiumRuntime.LiveHandleCount;
+        int objectsBefore = page.ObjectCount;
+
+        // Act / Assert
+        Assert.Throws<InvalidDataException>(() => page.AddImage(jpeg, 0, 0, 100, 100));
+        Assert.Equal(objectsBefore, page.ObjectCount);
+        Assert.Equal(liveBefore, PdfiumRuntime.LiveHandleCount);
+
+        // 20000 x 20000 fits an array (1.6 GB) but not the render limit: rejected before allocating
+        jpeg[sof + 5] = 0x4E; // height 20000
+        jpeg[sof + 6] = 0x20;
+        jpeg[sof + 7] = 0x4E; // width 20000
+        jpeg[sof + 8] = 0x20;
+        long allocatedBefore = GC.GetAllocatedBytesForCurrentThread();
+        var limit = Assert.Throws<InvalidOperationException>(() => page.AddImage(jpeg, 0, 0, 100, 100));
+        Assert.Contains(RenderLimits.MaxPixelsKey, limit.Message);
+        Assert.True(GC.GetAllocatedBytesForCurrentThread() - allocatedBefore < 16 * 1024 * 1024);
+        Assert.Equal(objectsBefore, page.ObjectCount);
+        Assert.Equal(liveBefore, PdfiumRuntime.LiveHandleCount);
+    }
+
     #endregion
 
     #region AddPage Tests
@@ -262,6 +310,58 @@ public class PdfPageEditingTests : IDisposable
     #endregion
 
     #region Page Content Editing Tests
+
+    [Fact]
+    public void FontSize_Set_IsWrittenToTheDocument()
+    {
+        // Arrange / Act: the same text added at 12 pt and resized to 24, added at 24, and left at 12
+        static byte[] Render(float addedAt, float? resizeTo)
+        {
+            using var stream = new MemoryStream();
+            using (var doc = new PdfDocument())
+            using (var page = doc.AddPage(300, 100))
+            {
+                var text = page.AddText("Hello World", 10, 40, fontSize: addedAt);
+                if (resizeTo is float size)
+                {
+                    text.FontSize = size;
+                    Assert.Equal(size, text.FontSize);
+                    Assert.Throws<ArgumentOutOfRangeException>(() => text.FontSize = -1);
+                }
+
+                page.GenerateContent();
+                doc.SaveToStream(stream);
+            }
+
+            using var saved = new PdfDocument(stream.ToArray());
+            return saved.RenderPages(72)[0].Pixels;
+        }
+
+        var resized = Render(12, 24);
+        var added = Render(24, null);
+        var unchanged = Render(12, null);
+
+        // Assert: the size is applied to the object, not only remembered
+        Assert.Equal(added, resized);
+        Assert.NotEqual(unchanged, resized);
+    }
+
+    [Fact]
+    public void TextObject_OutlivingItsDocument_CanStillBeDisposed()
+    {
+        // Arrange: the documented pattern, where the text object is never disposed explicitly
+        var doc = new PdfDocument();
+        var page = doc.AddPage();
+        var text = page.AddText("Hello", 50, 500, "Times-Roman", 14);
+        Assert.Equal(14f, text.FontSize);
+
+        // Act
+        doc.Dispose();
+
+        // Assert
+        Assert.Throws<ObjectDisposedException>(() => text.FontSize);
+        text.Dispose();
+    }
 
     [Fact]
     public void AddText_ShouldIncreaseObjectCount()

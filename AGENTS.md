@@ -131,7 +131,11 @@ Resolution order: `libs/{rid}/{file}` -> `runtimes/{rid}/native/{file}` -> syste
 
 All image output uses native libraries directly — no managed image dependencies.
 
-Every pipeline renders inside the native gate and returns a `BitmapLease` (bitmap handle, buffer pointer, size, stride). Conversion, encoding and output read the lease's buffer with the gate free; disposing the lease reenters the gate to destroy the bitmap.
+Every pipeline renders inside the native gate and returns a `BitmapLease` (bitmap handle, buffer pointer, size, stride, PDFium format). Conversion, encoding and output read the lease's buffer with the gate free; disposing the lease reenters the gate to destroy the bitmap. A caller-owned bitmap that PDFium hands out (thumbnail, image object) is taken over with `BitmapLease.Adopt` under the gate and turned into a BGRA `RawBitmap` with `BitmapLease.ToBgraAndRelease` outside it.
+
+Every render size is checked by `RenderLimits.Check` before `FPDFBitmap_Create*`, in double arithmetic, against `PdfiumWrapper.MaxRenderPixels` (`AppContext` data, default 2^28 pixels); it throws `InvalidOperationException` naming the page, size and key. DPI, width and height must be positive (`ArgumentOutOfRangeException`). A new path that allocates a PDFium bitmap from a page box or caller size must call it too.
+
+JPEG/PNG output in `PdfDocument` has one sync loop (`StreamImageBytesCore`) and one async loop (`StreamImageBytesCoreAsync`), each encoding through the private `PageEncoder` (`Create(format, quality)`, `Encode(lease)`). Every sink (enumerable, files, streams) is "encode, then write". Page files are named only by `PdfDocument.PageFileName(prefix, pageNumber, format)` (`{prefix}_{n:D3}.{ext}`), which the worker pool uses too. Every output file is opened in managed code (`File.WriteAllBytes`, `FileStream` + `TiffWriter(Stream)`): native `fopen`/`TIFFOpen` read `char*` paths in the ANSI code page on Windows, so never pass a path to a native library. The default JPEG quality is `PdfDocument.DefaultJpegQuality` (90) everywhere.
 
 **TIFF:**
 ```
@@ -139,7 +143,7 @@ PdfPage.RenderToBitmapLeaseCore(gray: true) → BitmapLease (native 8-bit gray b
     → PixelConverter (unsafe pointer math, no managed copy)                    [outside the gate]
         → TiffWriter (pinned write, zero per-row allocation)                   [outside the gate]
 ```
-TIFF output is bilevel or grayscale, so its pages are rendered straight into an 8-bit gray PDFium bitmap (`FPDFBitmap_Gray`): a quarter of the memory of BGRA and one byte per pixel to threshold or copy. PDFium anti-aliases text with plain grayscale smoothing at that depth and with LCD-style smoothing at 32 bits, so TIFF glyph edges differ slightly from the PNG/JPEG render of the same page. `PixelConverter.cs` reads directly from the native IntPtr. `TiffWriter.cs` pins the output array once and writes all scanlines via pointer offsets. Stream-based TIFF output uses `TIFFClientOpen` with GCHandle-pinned callback delegates.
+TIFF output is bilevel or grayscale, so its pages are rendered straight into an 8-bit gray PDFium bitmap (`FPDFBitmap_Gray`): a quarter of the memory of BGRA and one byte per pixel to threshold or copy. PDFium anti-aliases text with plain grayscale smoothing at that depth and with LCD-style smoothing at 32 bits, so TIFF glyph edges differ slightly from the PNG/JPEG render of the same page. `PixelConverter.cs` reads directly from the native IntPtr. `TiffWriter.cs` pins the output array once and writes all scanlines via pointer offsets. All TIFF output, file and stream, uses `TIFFClientOpen` with GCHandle-pinned callback delegates; `SaveAsTiff(path)` opens a read/write `FileStream` (libtiff reads back while closing) and deletes the file if the export fails.
 
 **JPEG:**
 ```
@@ -151,7 +155,7 @@ BitmapLease (native BGRA buffer) → JpegEncoder (libjpeg-turbo, accepts BGRA na
 ```
 BitmapLease (native BGRA buffer) → PngEncoder (pdfium_png shim, uses png_set_bgr() internally)
 ```
-`PngEncoder` is stateless/static. The C shim (`src/native/pdfium_png.c`) handles setjmp/longjmp error recovery, BGRA↔RGBA conversion via `png_set_bgr()`, and memory I/O. Both libpng and zlib-ng (SIMD-accelerated) are statically linked into the shim binary.
+`PngEncoder` is stateless/static and encodes to memory only; files are written by managed code. The C shim (`src/native/pdfium_png.c`) handles setjmp/longjmp error recovery, BGRA↔RGBA conversion via `png_set_bgr()`, and memory I/O (its file-path functions are not imported). Both libpng and zlib-ng (SIMD-accelerated) are statically linked into the shim binary.
 
 ### Why pdfium_png Shim Exists
 
@@ -159,7 +163,7 @@ libpng uses `setjmp`/`longjmp` for error handling, which corrupts .NET's managed
 
 ### RawBitmap
 
-`RawBitmap` is a lightweight record (`byte[] Pixels, int Width, int Height, int Stride`) returned by `RenderPages()` / `RenderPagesAsync()`. It gives callers raw BGRA pixel data they can use with any framework. Not disposable — the `byte[]` is a managed array.
+`RawBitmap` is a lightweight record (`byte[] Pixels, int Width, int Height, int Stride`) returned by `RenderPages()` / `RenderPagesAsync()`, `PdfPage.GetEmbeddedThumbnail()` and `PdfImageObject.GetBitmap()` / `GetRenderedBitmap()`. It gives callers raw BGRA pixel data they can use with any framework. Not disposable — the `byte[]` is a managed array.
 
 ## Critical Rules
 
@@ -176,6 +180,7 @@ Rules for any code you add or change:
 - A non-async method that returns a `Task` or `IAsyncEnumerable` must not call `Enter()`: do managed validation there (disposed check, argument checks) and await the gate inside the async body. `StreamImageBytesAsync` checks the page count when enumeration starts for this reason.
 - Never hand a caller-owned native handle out of the public API (the raw destroy functions are internal). Copy to managed memory, or wrap it in a tracked disposable. `PdfImageObject.GetBitmap()` returns a `RawBitmap` for this reason.
 - Awaits inside the library use `ConfigureAwait(false)` (`EnterAsync()` already never resumes on a captured context). The gate is handed to an async waiter before its continuation runs; posted to a UI thread that is blocked in a synchronous call, that continuation would never run.
+- Never `await Task.Yield()`: it posts to the caller's `SynchronizationContext`, so `.Wait()` on a UI thread deadlocks. A public async method that does page work starts with `await new ThreadPoolHop();` (a no-op when already on a context-free pool thread), and an async iterator hops at the top of each page, because its consumer resumes it on its own thread.
 - Finalizers never call PDFium, never take a lock and never wait on the gate. They only call `PdfiumRuntime.EnqueueRelease(kind, handle)` in ascending `NativeHandleKind` order (page objects, forms, pages, document, then pinned buffers and native memory). A document's finalizer enqueues its pages, forms and detached page objects itself so none can be closed after the document.
 - No user I/O inside the gate. Read caller streams before entering (`SpooledInput`); serialize saves into a pooled buffer inside the gate (`PooledFileWriter`) and write to the caller's stream after leaving it.
 - Render inside the gate, encode outside it: return a `BitmapLease` from the gated scope and convert/encode/write from its buffer with the gate free.
@@ -191,6 +196,10 @@ Rules for any code you add or change:
 All PDF and TIFF objects implement `IDisposable`. Always use `using`. Pages from `GetPage()` must be disposed by the caller. `ProcessAllPages()` handles disposal automatically and does not hold the gate while the caller's delegate runs.
 
 A document owns its pages, the forms returned by `GetForm()` (a new form per call), and page objects removed from its pages with `RemoveObject`; disposing the document disposes them. An object dropped without `Dispose()` has its handles queued by its finalizer and closed by the next gated operation or `PdfiumRuntime.ReleasePending()`.
+
+`PdfMerger` wraps a private `PdfDocument` (`_target`), built by the matching `PdfDocument` constructor. That document owns the native handle, the pinned input buffer or spool file, saving, disposal and the finalizer; the merger has no finalizer or load code of its own. Make document lifecycle changes in `PdfDocument` only.
+
+Loaded input: the `byte[]` constructors pin and read the caller's array in place (documented: it must not be modified while the document is open). Stream constructors never alias caller memory: `SpooledInput` copies every stream, a `MemoryStream` included, into memory the document owns: a buffer rented from `ArrayPool<byte>.Shared` for a seekable stream, a private `MemoryStream` for a non-seekable one, a temp file above the threshold. The document returns a rented buffer to the pool only after `FPDF_CloseDocument` (or a failed load); on the finalizer path the pin is queued and the array is left to the GC.
 
 ### Page Editing Workflow
 
@@ -215,23 +224,31 @@ Rules for pool code:
 - Only file paths, options and small results cross the process boundary. Never pixels, handles or delegates. Large text goes through a temp file.
 - A worker writes nothing to stdout except protocol frames; diagnostics go to stderr, which the pool forwards as events.
 - A job failure never fails the pool: crash, hang, malformed frame and memory limit all end with the worker replaced and the job given a status (`WorkerCrashed`, `TimedOut`, `Failed`) and retried up to `MaxAttempts`.
+- An attempt is charged only to the job that ended it. A worker killed for a job's timeout or cancel records that job (`Worker.KilledFor`); its other jobs are bystanders and are retried with `charged: false`. A worker that dies with several jobs on it marks them all `RunAlone` and retries them uncharged; a `RunAlone` job is dispatched only to an empty worker, which then takes nothing else (`Worker.Exclusive`). It waits at the head of its queue and nothing behind it is dispatched meanwhile, so a busy worker drains for it; the sizer counts that wait (`_headWaitsForEmptyWorker`, no empty worker) as saturation and starts a worker when below `MaxWorkers`. Free retries are capped at `MaxAttempts` per job.
+- An attempt belongs to one worker. `Dispatch` registers it (`job.Worker`, `Worker.Active`, `_inFlight`) under the worker lock. A result frame always gives back its own worker's slot (from that worker's `Active`), but completes the job only if `job.Worker` is that worker and the `_inFlight` entry is that job; timeouts and exits end an attempt the same way (`TryEndAttempt`), so a late frame or old timer never takes a later attempt. A job ended where it waits (cancelled, or failed because no worker starts) is `Withdrawn` under the lock (`TryWithdraw`) and never dispatched; one already in flight is cancelled through its worker instead.
+- Memory retirement never kills: `RetireForMemory` marks the worker `Retiring` and `StopWhenDrained`, and `StopIfDrained` sends `Shutdown` once it has no job and no claim. Its running jobs stay bounded by their own `JobTimeout`; `KillWorkerAsync` kills a retiring worker too. `MaxWorkers` bounds processes, so a retiree counts until it exits: its replacement starts then (`EnsureMinimumWorkers` from the exit handler), and the sizer never starts one past the limit. `MinWorkers` counts only workers that take jobs. Every start is reserved (`ReserveStarts`, which adds to `_startingWorkers`) under `_workersLock` in the same step as the capacity check that allowed it, so concurrent exit handlers and the sizer cannot count the same free place; `StartWorkerAsync` releases the reservation.
+- A job whose attempt the pool ends itself (cancel grace, dispatcher failure) is taken out of flight first, then its worker is killed and its staged output removed, and only then is its result completed: a caller never holds a final status while a worker can still write that job's output. `DisposeAsync` waits for the dispatcher-failure sequence (`_failing`).
+- Every job ends with a status, whatever happens to the pool's machinery. After `MaxConsecutiveStartFailures` failed starts in a row with no worker alive, jobs waiting in the queues (tracked in `_waiting`) are `Failed` with the start error and dropped by the dispatcher when they reach the head. If the dispatcher loop throws, `FailAll` fails every queued, in-flight and later job and kills the workers. A requeue whose channel is closed (`Requeue`) ends the job as `Cancelled` instead of losing it.
+- Every `TimeSpan` that becomes a timer (`JobTimeout`, `WorkerStartTimeout`) is validated against `PdfPoolOptions.MaxTimeout`.
 - The dispatcher takes a job out of its queue only once a worker has a free slot, so `QueueCapacity` is exact. Retries go through their own unbounded channel, ahead of new jobs.
 - A worker runs `JobsPerWorker` jobs at once (default 2) so encoding overlaps rendering inside the worker, as it does for concurrent callers in one process. Slots are tracked per worker (`Worker.Slots`, `InUse`, `Active`); the sizer counts free slots, not idle workers.
 - Output files are written as `<name>.<jobId>.tmp` and renamed on success (image jobs: all pages staged first, then all renamed).
 - Sizing decisions happen on one 250 ms timer; every decision raises an event. Workers are replaced, never recycled on a schedule.
 - Image jobs stage every page as `<final>.<jobId>.tmp` and move them to their final names only once all are staged, after a `Progress` frame with `CommittingPages` set. A job that does not succeed leaves no output and never deletes a file it did not write: the worker removes its staged and moved files on a managed failure or an observed cancel; the coordinator (`RemovePartialOutput`) runs only for an attempt whose worker crashed or was killed, and removes that job's `.tmp` files plus, if the worker had reported committing, the final names it had claimed. Jobs that never reached a worker remove nothing.
-- A batch (`IEnumerable<PdfInput>`) bounds documents in any stage, spooled through unread, to `QueueCapacity + MaxWorkers x JobsPerWorker`, and keeps no per-job task: outstanding jobs are counted. Batch output names are reserved against originals and generated names alike.
+- A batch (`IEnumerable<PdfInput>`) bounds documents in any stage, spooled through unread, to `QueueCapacity + MaxWorkers x JobsPerWorker`, and keeps no per-job task: outstanding jobs are counted. Its jobs run on a batch-scoped linked token, cancelled in a `finally` when the caller stops enumerating, which also stops the submitter. Batch output paths are reserved as canonical full paths (case-insensitive) against originals and generated names alike; unsafe stems (empty, `.`, `..`, trailing dot or space) become `document`, and every path's parent must be the root.
 - Cancellation is always a status, never an exception: before spooling, while spooling, while waiting for a queue slot, while queued, or in flight.
-- A worker whose start is cancelled or times out is killed inside `Worker.StartAsync`; the caller's cancellation propagates out of `CreateAsync`. A worker's exit is acted on only after its stdout is drained.
-- Fault injection for tests lives in `PdfiumWrapper.Tests.Host/WorkerFaults.cs` (`PDFIUMWRAPPER_TEST_FAULT=crash|hang|garbage:<input substring>`, `crash-after-page-N:<input substring>`, `slow-start:<ms>` with `PDFIUMWRAPPER_TEST_PIDFILE`), passed through `PdfPoolOptions.WorkerEnvironment`.
+- A worker whose start does not succeed (cancelled, timed out, or any exception after `Process.Start`) is killed inside `Worker.StartAsync`; the caller's cancellation propagates out of `CreateAsync`. A worker's exit is acted on only after its stdout is drained, also when the pool killed it (`Worker.KillAsync`).
+- Fault injection for tests lives in `PdfiumWrapper.Tests.Host/WorkerFaults.cs` (`PDFIUMWRAPPER_TEST_FAULT=crash|hang|garbage:<input substring>`, `crash-after-page-N:`, `hang-after-page-N:`, `sleep-after-page-MS:<input substring>`, `pause-while-marked:<input substring>` (holds the job after each page while `<input>.pause` exists, so tests decide when it may go on), `slow-start:<ms>` with `PDFIUMWRAPPER_TEST_PIDFILE`, `fail-start-if-exists:<path>`; several combine with `;`), passed through `PdfPoolOptions.WorkerEnvironment`. Tests of jobs sharing a worker use `PoolFixture.SharedWorkerOptions` (`JobsPerWorker = 2`); `PdfProcessingPool.DispatchHookForTests` injects a dispatcher failure.
 
 ## Key APIs
 
 **Image output (streaming, memory-efficient):**
 - `StreamImageBytes()` / `StreamImageBytesAsync()` — `IEnumerable<byte[]>` / `IAsyncEnumerable<byte[]>`, one page at a time
 - `SaveAsTiff()` / `SaveAsTiffAsync()` — multi-page TIFF to file or stream, bilevel (CCITT G4) or grayscale (LZW)
-- `SaveAsPngs()`, `SaveAsJpegs()`, `SaveAsImages()` — save to directory or streams
-- `RenderPages()` / `RenderPagesAsync()` — returns `RawBitmap[]` (BGRA pixel data, no disposal needed)
+- `SaveAsPngs()`, `SaveAsJpegs()`, `SaveAsImages()` and their `...Async` versions — save to directory (`PageFileName`) or streams
+- `RenderPages()` / `RenderPagesAsync()` — returns `RawBitmap[]` (BGRA pixel data, no disposal needed); holds every page at once
+- `PdfPage.GetEmbeddedThumbnail()` — `RawBitmap?` in one decode (`GetEmbeddedThumbnailBytes`/`Size` are obsolete); `HasEmbeddedThumbnail` measures the stream without decoding
+- JPEG quality defaults to 90 on every entry point, the pool included
 
 **PDF operations:**
 - `PdfDocument` — load from file/bytes/stream, create new, save to file/stream
@@ -252,8 +269,10 @@ Rules for pool code:
 
 - Native work is serialized process-wide; only conversion, encoding and output overlap between callers. More throughput than one process gives comes from more processes, not more threads
 - `RenderToBitmapLease()` exposes the native pixel buffer — encoders read it directly, avoiding the managed `byte[]` copy that `RenderToBytes()` makes
-- `RenderPages()` copies each lease into a managed `byte[]` with a single `Marshal.Copy`, outside the gate
-- Stream inputs are spooled before the gate (in memory up to 64 MB, then a temp file; `PdfiumWrapper.SpoolThreshold` overrides); PDF saves are buffered in a pooled array and written after the gate is released
+- `RenderPages()` copies each lease into a managed `byte[]` with a single `Marshal.Copy`, outside the gate, and keeps every page until it returns
+- Each bitmap is capped at `PdfiumWrapper.MaxRenderPixels` (default 2^28 pixels, 1 GiB BGRA), checked before PDFium allocates; concurrent callers each hold one bitmap while encoding
+- PNG and TIFF files are written by managed code (PNG: in-memory encode then `File.WriteAllBytes`, one extra copy per page; TIFF: libtiff callbacks into a buffered `FileStream`)
+- Stream inputs are spooled before the gate (copied into memory the document owns up to 64 MB, pooled for seekable streams, then a temp file; `PdfiumWrapper.SpoolThreshold` overrides); PDF saves are buffered in a pooled array and written after the gate is released
 - `PixelConverter` uses pre-scaled threshold comparison to avoid per-pixel division in bilevel conversion
 - PNG encoding uses zlib-ng (SIMD: NEON/AVX2) + `PNG_FILTER_SUB` for ~40% faster than SkiaSharp
 - JPEG encoding uses libjpeg-turbo (SIMD) for ~2x faster than SkiaSharp
@@ -269,7 +288,7 @@ Rules for pool code:
 - Tests implement `IDisposable` and use `CreateTempDirectory()` for file output
 - `src/PdfiumWrapper.Tests/Concurrency/` — gate coverage (`GateCoverageTests`), concurrent callers against a sequential oracle with an independent detector (`PdfiumConcurrencyTests`), and child-process scenarios (`PdfiumHostTests`)
 - `src/PdfiumWrapper.Tests.Host` — console host for tests that change process-global state, need a fresh process, or may abort natively (init race, cold start, thread-pool starvation, deferred release, shared gate across load contexts, shutdown, crash probe). Launched through `HostRunner`. It is also the worker executable for the pool tests (`PdfWorkerHost.TryRun()` at the top of its `Main`)
-- `src/PdfiumWrapper.Tests/Processing/` — protocol framing, pool behaviour (correctness against in-process output, crash/hang/garbage workers, cancellation, backpressure, disposal), sizing policy, cross-process render overlap, damaged inputs
+- `src/PdfiumWrapper.Tests/Processing/` — protocol framing, pool behaviour (correctness against in-process output, crash/hang/garbage workers, cancellation, backpressure, disposal), jobs sharing a worker (`SharedWorkerTests`), failures of the pool's own machinery (`PoolFailureTests`), sizing policy, cross-process render overlap, damaged inputs
 - A new public PDFium-touching member needs no test registration: `GateCoverageTests` discovers it. If it takes an argument type the fixture does not know, add it to `GateCoverageTests.Fixture.Argument`
 - Run: `dotnet test src/PdfiumWrapper.Tests/PdfiumWrapper.Tests.csproj`
 

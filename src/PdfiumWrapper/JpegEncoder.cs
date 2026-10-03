@@ -33,7 +33,7 @@ internal sealed class JpegEncoder : IDisposable
     /// <returns>Compressed JPEG data.</returns>
     public byte[] Encode(IntPtr pixelBuffer, int width, int height, int stride,
         LibTurboJpeg.TJPixelFormat pixelFormat = LibTurboJpeg.TJPixelFormat.BGRA,
-        int quality = 85,
+        int quality = PdfDocument.DefaultJpegQuality,
         LibTurboJpeg.TJSubsampling subsampling = LibTurboJpeg.TJSubsampling.Samp420,
         LibTurboJpeg.TJFlag flags = LibTurboJpeg.TJFlag.None)
     {
@@ -69,34 +69,6 @@ internal sealed class JpegEncoder : IDisposable
             if (jpegBuf != IntPtr.Zero)
                 LibTurboJpeg.tjFree(jpegBuf);
         }
-    }
-
-    /// <summary>
-    /// Encode a raw pixel buffer and write directly to a file.
-    /// </summary>
-    public void EncodeToFile(IntPtr pixelBuffer, int width, int height, int stride,
-        string outputPath,
-        LibTurboJpeg.TJPixelFormat pixelFormat = LibTurboJpeg.TJPixelFormat.BGRA,
-        int quality = 85,
-        LibTurboJpeg.TJSubsampling subsampling = LibTurboJpeg.TJSubsampling.Samp420,
-        LibTurboJpeg.TJFlag flags = LibTurboJpeg.TJFlag.None)
-    {
-        var data = Encode(pixelBuffer, width, height, stride, pixelFormat, quality, subsampling, flags);
-        File.WriteAllBytes(outputPath, data);
-    }
-
-    /// <summary>
-    /// Encode a raw pixel buffer and write to a stream.
-    /// </summary>
-    public void EncodeToStream(IntPtr pixelBuffer, int width, int height, int stride,
-        Stream output,
-        LibTurboJpeg.TJPixelFormat pixelFormat = LibTurboJpeg.TJPixelFormat.BGRA,
-        int quality = 85,
-        LibTurboJpeg.TJSubsampling subsampling = LibTurboJpeg.TJSubsampling.Samp420,
-        LibTurboJpeg.TJFlag flags = LibTurboJpeg.TJFlag.None)
-    {
-        var data = Encode(pixelBuffer, width, height, stride, pixelFormat, quality, subsampling, flags);
-        output.Write(data, 0, data.Length);
     }
 
     private void ThrowTurboJpegError(string function)

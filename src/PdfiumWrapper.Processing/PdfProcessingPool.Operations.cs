@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Runtime.CompilerServices;
+using System.Text;
 using System.Text.Json;
 using System.Threading.Channels;
 using PdfiumWrapper.Processing.Protocol;
@@ -134,29 +135,72 @@ public sealed partial class PdfProcessingPool
     /// Per-document output paths under <paramref name="outputRoot"/>: the document name without its
     /// extension, made unique within the batch. Null when there is no output root.
     /// </summary>
-    private static string?[] OutputsFor(string? outputRoot, IReadOnlyList<PdfInput> inputs)
+    internal static string?[] OutputsFor(string? outputRoot, IReadOnlyList<PdfInput> inputs)
     {
         var outputs = new string?[inputs.Count];
         if (outputRoot == null)
             return outputs;
 
-        string root = RequireOutput(outputRoot);
-        // Every name handed out, original or generated, so "report", "report" and "report-2" get three paths.
+        string root = Path.TrimEndingDirectorySeparator(RequireOutput(outputRoot));
+        // Every path handed out, original or generated, as the file system will see it: normalized
+        // (Windows drops trailing dots and spaces) and ignoring case. So "report", "REPORT" and
+        // "report-2" get three paths, and no two names can resolve to the same directory.
         var used = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         for (int i = 0; i < inputs.Count; i++)
         {
-            string stem = Path.GetFileNameWithoutExtension(inputs[i].Name);
-            if (stem.Length == 0)
-                stem = "document";
+            string stem = OutputStem(inputs[i].Name);
+            for (int suffix = 1; ; suffix++)
+            {
+                string path = Path.GetFullPath(Path.Combine(root, suffix == 1 ? stem : $"{stem}-{suffix}"));
 
-            string name = stem;
-            for (int suffix = 2; !used.Add(name); suffix++)
-                name = $"{stem}-{suffix}";
+                // Never anywhere but directly under the root, whatever the name resolves to.
+                if (!string.Equals(Path.GetDirectoryName(path), root, StringComparison.OrdinalIgnoreCase))
+                {
+                    if (stem == DefaultOutputStem)
+                        throw new InvalidOperationException($"Cannot place batch output under '{root}'.");
+                    stem = DefaultOutputStem;
+                    suffix = 0;
+                    continue;
+                }
 
-            outputs[i] = Path.Combine(root, name);
+                if (used.Add(path))
+                {
+                    outputs[i] = path;
+                    break;
+                }
+            }
         }
 
         return outputs;
+    }
+
+    private const string DefaultOutputStem = "document";
+
+    /// <summary>
+    /// The document name without its extension, made safe as a single path segment: characters the
+    /// file system rejects become '_', Unicode is composed (macOS treats NFC and NFD names as one), and
+    /// a name the file system would change or treat as a path ("", ".", "..", or one ending in a dot or
+    /// a space) becomes <see cref="DefaultOutputStem"/>.
+    /// </summary>
+    private static string OutputStem(string name)
+    {
+        string stem = Path.GetFileNameWithoutExtension(name);
+        try
+        {
+            stem = stem.Normalize(NormalizationForm.FormC);
+        }
+        catch (ArgumentException)
+        {
+            return DefaultOutputStem; // not valid Unicode
+        }
+
+        char[] invalid = Path.GetInvalidFileNameChars();
+        if (stem.IndexOfAny(invalid) >= 0)
+            stem = string.Concat(stem.Select(c => Array.IndexOf(invalid, c) >= 0 ? '_' : c));
+
+        if (stem.Length == 0 || stem is "." or ".." || stem[^1] is '.' or ' ')
+            return DefaultOutputStem;
+        return stem;
     }
 
     private async IAsyncEnumerable<PdfJobResult<T>> Batch<T>(IEnumerable<PdfInput> inputs, string? outputRoot,
@@ -182,20 +226,27 @@ public sealed partial class PdfProcessingPool
                 results.Writer.TryComplete();
         }
 
+        // The batch's own token: cancelled with the caller's, and also when the caller stops
+        // enumerating early (break, an exception, disposal of the enumerator), so every job already
+        // submitted ends as Cancelled and the submitter stops instead of waiting for reads that will
+        // never come.
+        using var batch = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        var token = batch.Token;
+
         var submitter = Task.Run(async () =>
         {
             try
             {
                 for (int i = 0; i < list.Count; i++)
                 {
-                    await inFlight.WaitAsync(ct).ConfigureAwait(false);
+                    await inFlight.WaitAsync(token).ConfigureAwait(false);
                     Interlocked.Increment(ref outstanding);
-                    _ = run(list[i], outputs[i], ct).ContinueWith(t =>
+                    _ = run(list[i], outputs[i], token).ContinueWith(t =>
                     {
                         if (t.IsCompletedSuccessfully)
                             results.Writer.TryWrite(t.Result);
                         else
-                            results.Writer.TryComplete(t.Exception?.GetBaseException() ?? new OperationCanceledException(ct));
+                            results.Writer.TryComplete(t.Exception?.GetBaseException() ?? new OperationCanceledException(token));
                         OneDone();
                     }, CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
                 }
@@ -208,13 +259,20 @@ public sealed partial class PdfProcessingPool
             }
         }, CancellationToken.None);
 
-        await foreach (var result in results.Reader.ReadAllAsync(ct).ConfigureAwait(false))
+        try
         {
-            inFlight.Release();
-            yield return result;
+            await foreach (var result in results.Reader.ReadAllAsync(ct).ConfigureAwait(false))
+            {
+                inFlight.Release();
+                yield return result;
+            }
         }
-
-        await submitter.ConfigureAwait(false);
+        finally
+        {
+            // Reached on normal completion too, when everything has finished and this is a no-op.
+            batch.Cancel();
+            await submitter.ConfigureAwait(false); // never throws: it reports through the results channel
+        }
     }
 
     // ---- Plumbing ----

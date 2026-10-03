@@ -339,5 +339,14 @@ public static partial class PDFium
     [LibraryImport(LibraryName)]
     internal static partial IntPtr FPDFPage_GetThumbnailAsBitmap(IntPtr page);
 
+    /// <summary>
+    /// Get the raw data of a page's thumbnail stream, as stored (still compressed). With a null
+    /// buffer it only returns the size, 0 when there is no thumbnail; unlike
+    /// FPDFPage_GetDecodedThumbnailData it does not run the stream's filters.
+    /// C <c>unsigned long</c>, hence <see cref="CULong"/>.
+    /// </summary>
+    [LibraryImport(LibraryName)]
+    internal static partial CULong FPDFPage_GetRawThumbnailData(IntPtr page, IntPtr buffer, CULong buflen);
+
     #endregion
 }

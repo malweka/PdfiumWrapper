@@ -28,15 +28,11 @@ using var document = new PdfDocument();
 using var page = document.AddPage(width: 612, height: 792); // US Letter
 
 // Add title
-var title = page.AddText("Hello World", x: 100, y: 700);
-title.Font = "Helvetica";
-title.FontSize = 24;
+var title = page.AddText("Hello World", x: 100, y: 700, font: "Helvetica", fontSize: 24);
 title.Color = Color.Black;
 
 // Add body text
-var body = page.AddText("This is a sample PDF.", x: 100, y: 650);
-body.Font = "Helvetica";
-body.FontSize = 12;
+var body = page.AddText("This is a sample PDF.", x: 100, y: 650, font: "Helvetica", fontSize: 12);
 body.Color = Color.Gray;
 
 page.GenerateContent();
@@ -83,9 +79,7 @@ using var document = new PdfDocument();
 using var page = document.AddPage();
 
 // Add title
-var title = page.AddText("Document with Image", x: 100, y: 700);
-title.Font = "Helvetica-Bold";
-title.FontSize = 18;
+var title = page.AddText("Document with Image", x: 100, y: 700, font: "Helvetica-Bold", fontSize: 18);
 title.Color = Color.Black;
 
 // Add image from file
@@ -93,9 +87,7 @@ var imageBytes = File.ReadAllBytes("logo.png");
 var image = page.AddImage(imageBytes, x: 100, y: 500, width: 200, height: 100);
 
 // Add caption below image
-var caption = page.AddText("Figure 1: Company Logo", x: 100, y: 480);
-caption.Font = "Helvetica-Oblique";
-caption.FontSize = 10;
+var caption = page.AddText("Figure 1: Company Logo", x: 100, y: 480, font: "Helvetica-Oblique", fontSize: 10);
 caption.Color = Color.Gray;
 
 page.GenerateContent();
@@ -109,9 +101,7 @@ using var document = new PdfDocument();
 using var page = document.AddPage();
 
 // Title
-var title = page.AddText("Shapes Demo", x: 250, y: 750);
-title.Font = "Helvetica-Bold";
-title.FontSize = 20;
+var title = page.AddText("Shapes Demo", x: 250, y: 750, font: "Helvetica-Bold", fontSize: 20);
 title.Color = Color.Black;
 
 // Filled rectangle
@@ -157,9 +147,7 @@ for (int i = 0; i < 5; i++)
     using var page = document.AddPage();
     
     // Page header
-    var header = page.AddText($"Page {i + 1} of 5", x: 250, y: 750);
-    header.Font = "Helvetica-Bold";
-    header.FontSize = 18;
+    var header = page.AddText($"Page {i + 1} of 5", x: 250, y: 750, font: "Helvetica-Bold", fontSize: 18);
     header.Color = Color.DarkBlue;
     
     // Page border
@@ -173,19 +161,15 @@ for (int i = 0; i < 5; i++)
     // Page content
     var content = page.AddText(
         $"This is the content of page {i + 1}.", 
-        x: 100, y: 600
+        x: 100, y: 600, font: "Times-Roman", fontSize: 12
     );
-    content.Font = "Times-Roman";
-    content.FontSize = 12;
     content.Color = Color.Black;
     
     // Footer
     var footer = page.AddText(
         "Generated with PdfiumWrapper", 
-        x: 200, y: 30
+        x: 200, y: 30, font: "Helvetica", fontSize: 8
     );
-    footer.Font = "Helvetica";
-    footer.FontSize = 8;
     footer.Color = Color.Gray;
     
     page.GenerateContent();
@@ -205,40 +189,28 @@ float pageHeight = 792;
 float margin = 50;
 
 // Company header
-var companyName = page.AddText("ACME Corporation", margin, pageHeight - 50);
-companyName.Font = "Helvetica-Bold";
-companyName.FontSize = 24;
+var companyName = page.AddText("ACME Corporation", margin, pageHeight - 50, font: "Helvetica-Bold", fontSize: 24);
 companyName.Color = Color.DarkBlue;
 
-var tagline = page.AddText("Quality Products Since 1990", margin, pageHeight - 75);
-tagline.Font = "Helvetica";
-tagline.FontSize = 10;
+var tagline = page.AddText("Quality Products Since 1990", margin, pageHeight - 75, font: "Helvetica", fontSize: 10);
 tagline.Color = Color.Gray;
 
 // Invoice title
-var invoiceTitle = page.AddText("INVOICE", pageWidth - 150, pageHeight - 50);
-invoiceTitle.Font = "Helvetica-Bold";
-invoiceTitle.FontSize = 28;
+var invoiceTitle = page.AddText("INVOICE", pageWidth - 150, pageHeight - 50, font: "Helvetica-Bold", fontSize: 28);
 invoiceTitle.Color = Color.Black;
 
 // Invoice details
-var invoiceNum = page.AddText("Invoice #: INV-2024-001", pageWidth - 200, pageHeight - 100);
-invoiceNum.Font = "Helvetica";
-invoiceNum.FontSize = 10;
+var invoiceNum = page.AddText("Invoice #: INV-2024-001", pageWidth - 200, pageHeight - 100, font: "Helvetica", fontSize: 10);
 invoiceNum.Color = Color.Black;
 
-var invoiceDate = page.AddText("Date: January 15, 2024", pageWidth - 200, pageHeight - 115);
-invoiceDate.Font = "Helvetica";
-invoiceDate.FontSize = 10;
+var invoiceDate = page.AddText("Date: January 15, 2024", pageWidth - 200, pageHeight - 115, font: "Helvetica", fontSize: 10);
 invoiceDate.Color = Color.Black;
 
 // Horizontal line
 var line = page.AddRectangle(margin, pageHeight - 140, pageWidth - 2 * margin, 1, Color.Gray, null);
 
 // Bill To section
-var billTo = page.AddText("Bill To:", margin, pageHeight - 170);
-billTo.Font = "Helvetica-Bold";
-billTo.FontSize = 12;
+var billTo = page.AddText("Bill To:", margin, pageHeight - 170, font: "Helvetica-Bold", fontSize: 12);
 billTo.Color = Color.Black;
 
 var customerName = page.AddText("John Smith", margin, pageHeight - 190);
@@ -249,21 +221,13 @@ var customerCity = page.AddText("Anytown, ST 12345", margin, pageHeight - 220);
 var tableHeader = page.AddRectangle(margin, pageHeight - 280, pageWidth - 2 * margin, 25, Color.LightGray, null);
 
 // Table headers
-var descHeader = page.AddText("Description", margin + 10, pageHeight - 270);
-descHeader.Font = "Helvetica-Bold";
-descHeader.FontSize = 10;
+var descHeader = page.AddText("Description", margin + 10, pageHeight - 270, font: "Helvetica-Bold", fontSize: 10);
 
-var qtyHeader = page.AddText("Qty", 350, pageHeight - 270);
-qtyHeader.Font = "Helvetica-Bold";
-qtyHeader.FontSize = 10;
+var qtyHeader = page.AddText("Qty", 350, pageHeight - 270, font: "Helvetica-Bold", fontSize: 10);
 
-var priceHeader = page.AddText("Price", 420, pageHeight - 270);
-priceHeader.Font = "Helvetica-Bold";
-priceHeader.FontSize = 10;
+var priceHeader = page.AddText("Price", 420, pageHeight - 270, font: "Helvetica-Bold", fontSize: 10);
 
-var totalHeader = page.AddText("Total", 500, pageHeight - 270);
-totalHeader.Font = "Helvetica-Bold";
-totalHeader.FontSize = 10;
+var totalHeader = page.AddText("Total", 500, pageHeight - 270, font: "Helvetica-Bold", fontSize: 10);
 
 // Table row
 var item1 = page.AddText("Widget Pro", margin + 10, pageHeight - 300);
@@ -278,17 +242,11 @@ var subtotalValue = page.AddText("$499.95", 500, pageHeight - 350);
 var taxLabel = page.AddText("Tax (8%):", 420, pageHeight - 370);
 var taxValue = page.AddText("$40.00", 500, pageHeight - 370);
 
-var grandTotalLabel = page.AddText("Total:", 420, pageHeight - 400);
-grandTotalLabel.Font = "Helvetica-Bold";
-grandTotalLabel.FontSize = 14;
-var grandTotalValue = page.AddText("$539.95", 500, pageHeight - 400);
-grandTotalValue.Font = "Helvetica-Bold";
-grandTotalValue.FontSize = 14;
+var grandTotalLabel = page.AddText("Total:", 420, pageHeight - 400, font: "Helvetica-Bold", fontSize: 14);
+var grandTotalValue = page.AddText("$539.95", 500, pageHeight - 400, font: "Helvetica-Bold", fontSize: 14);
 
 // Footer
-var thankYou = page.AddText("Thank you for your business!", margin, 80);
-thankYou.Font = "Helvetica-Oblique";
-thankYou.FontSize = 12;
+var thankYou = page.AddText("Thank you for your business!", margin, 80, font: "Helvetica-Oblique", fontSize: 12);
 thankYou.Color = Color.Gray;
 
 page.GenerateContent();

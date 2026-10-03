@@ -47,16 +47,9 @@ internal static partial class LibPdfiumPng
     public const int PngFilterPaeth = 0x80;
     public const int PngAllFilters  = 0xF8;
 
-    [LibraryImport(LibraryName, StringMarshalling = StringMarshalling.Utf8)]
-    public static partial int pdfium_png_encode_to_file(
-        string outputPath,
-        IntPtr pixelData,
-        int width,
-        int height,
-        int stride,
-        PngPixelFormat format,
-        int compressionLevel,
-        int filterFlags);
+    // The shim's file-path functions (pdfium_png_encode_to_file, _decode_from_file, _read_header)
+    // are not imported: on Windows their fopen reads the char* path in the ANSI code page, so
+    // non-ASCII paths break. Files are opened in managed code and the in-memory functions used.
 
     [LibraryImport(LibraryName)]
     public static partial int pdfium_png_encode_to_memory(
@@ -70,25 +63,11 @@ internal static partial class LibPdfiumPng
         out IntPtr outData,
         out nuint outSize);
 
-    [LibraryImport(LibraryName, StringMarshalling = StringMarshalling.Utf8)]
-    public static partial int pdfium_png_read_header(
-        string inputPath,
-        out PngInfo info);
-
     [LibraryImport(LibraryName)]
     public static partial int pdfium_png_read_header_from_memory(
         IntPtr pngData,
         nuint pngSize,
         out PngInfo info);
-
-    [LibraryImport(LibraryName, StringMarshalling = StringMarshalling.Utf8)]
-    public static partial int pdfium_png_decode_from_file(
-        string inputPath,
-        PngPixelFormat outputFormat,
-        out IntPtr outData,
-        out int outWidth,
-        out int outHeight,
-        out int outStride);
 
     [LibraryImport(LibraryName)]
     public static partial int pdfium_png_decode_from_memory(

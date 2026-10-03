@@ -627,7 +627,7 @@ libtiff's `TIFFSetField` is a **variadic C function** (`uint32_t tag, ...`). On 
 
 The shim provides non-variadic wrappers (`TIFFSetFieldInt`, `TIFFSetFieldDouble`) that take fixed parameters and forward to the real variadic `TIFFSetField` inside C, where the compiler handles the calling convention correctly.
 
-All other libtiff functions (`TIFFOpen`, `TIFFWriteScanline`, `TIFFClose`, etc.) are non-variadic and work directly via `LibraryImport` without the shim.
+All other libtiff functions (`TIFFClientOpen`, `TIFFWriteScanline`, `TIFFClose`, etc.) are non-variadic and work directly via `LibraryImport` without the shim. The wrapper does not use `TIFFOpen`: on Windows it reads its `char*` path in the ANSI code page, so TIFF files are opened as a managed `FileStream` and written through `TIFFClientOpen`. The PNG shim's file-path functions (`pdfium_png_encode_to_file`, `pdfium_png_decode_from_file`, `pdfium_png_read_header`) are still built but not imported, for the same reason.
 
 ## Why the PNG Shim Exists
 

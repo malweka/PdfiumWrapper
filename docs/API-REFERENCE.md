@@ -93,6 +93,8 @@ byte[] pdfBytes = File.ReadAllBytes("sample.pdf");
 using var document = new PdfDocument(pdfBytes);
 ```
 
+The array is used in place, without a copy: it is pinned, and PDFium reads pages from it for as long as the document is open. Do not modify, reuse or return the array to a pool until the document is disposed; pass a copy (or use the `Stream` constructor) if you need the array back sooner.
+
 **Parameters:**
 - `data` — PDF file contents as byte array
 - `password` — Optional password for encrypted PDFs
@@ -106,10 +108,9 @@ using var stream = File.OpenRead("sample.pdf");
 using var document = new PdfDocument(stream);
 ```
 
-The stream is read from its current position to its end during construction, before any native work starts, and is left positioned at its end. The document does not use the stream afterwards, so it can be closed immediately.
+The stream is read from its current position to its end during construction, before any native work starts, and is left positioned at its end. The document does not use the stream afterwards, so it can be closed, reset or reused immediately.
 
-- A `MemoryStream` with an exposable buffer is used in place, without a copy.
-- Other inputs of up to 64 MB are held in memory.
+- Inputs of up to 64 MB are copied into a buffer the document owns (rented from `ArrayPool<byte>.Shared` when the stream is seekable, and returned after the document is closed). This includes a `MemoryStream`: its own buffer is never used in place, so overwriting it after construction cannot change the document.
 - Larger inputs are copied to a temporary file that is deleted when the document is disposed.
 
 The threshold can be changed with `AppContext.SetData("PdfiumWrapper.SpoolThreshold", bytes)` (a `long`) before loading.
@@ -261,26 +262,53 @@ foreach (var bitmap in bitmaps)
 
 **Returns:** Array of `RawBitmap` records (with `Pixels`, `Width`, `Height`, `Stride` properties). Not disposable.
 
+**Memory:** every page's pixels are held at once until the call returns (a US Letter page at 300 DPI is about 33 MB of BGRA), so a long document needs one bitmap per page in memory. For large documents use `StreamImageBytes`, the `SaveAs*` methods, or render one page at a time.
+
 #### RenderPages(int dpiWidth, int dpiHeight)
 
 Renders all pages to bitmaps with different horizontal and vertical DPI.
 
 #### RenderPagesAsync(int dpi = 300)
 
-Async version. Waits for the native gate without blocking a thread and yields between pages.
+Async version. Waits for the native gate without blocking a thread.
 
 ```csharp
 RawBitmap[] bitmaps = await document.RenderPagesAsync(dpi: 300);
 ```
 
-**Note:** This applies to every async method on `PdfDocument` (`RenderPagesAsync`, `StreamImageBytesAsync`, `SaveAsTiffAsync`, `SaveAsJpegsAsync`, `SaveAsImagesAsync`, `ProcessAllPagesAsync`): pages are processed sequentially, `Task.Yield()` is used between pages, and waiting for the gate does not block a thread. The synchronous methods, including constructors, block the calling thread while they wait. Neither form renders one document's pages in parallel.
+**Note:** This applies to every async method on `PdfDocument` (`RenderPagesAsync`, `StreamImageBytesAsync`, `StreamJpegBytesAsync`, `SaveAsTiffAsync`, `SaveAsPngsAsync`, `SaveAsJpegsAsync`, `SaveAsImagesAsync`, `ProcessAllPagesAsync`): pages are processed sequentially on thread-pool threads, and waiting for the gate does not block a thread. They never post work to the caller's `SynchronizationContext`, so a UI thread is not used for rendering, and a caller that blocks on the task (`.Wait()`, `.Result`) does not deadlock. For the same reason, the delegate passed to `ProcessAllPagesAsync` runs on a thread-pool thread. The synchronous methods, including constructors, block the calling thread while they wait. Neither form renders one document's pages in parallel.
 
-#### StreamImageBytes(ImageFormat format, int quality = 100, int dpi = 300)
+#### Render size limit and DPI validation
+
+Every render is checked before PDFium allocates its bitmap. This applies to the document-level methods (`RenderPages`, `StreamImageBytes`, `StreamJpegBytes`, `SaveAsPngs`, `SaveAsJpegs`, `SaveAsImages`, `SaveAsTiff` and their async versions) and to `PdfPage.RenderToBytes`:
+
+- A DPI of zero or less throws `ArgumentOutOfRangeException`, before any page is rendered or any output is created. So does a `RenderToBytes` width or height of zero or less.
+- A page's pixel size is its size in points / 72 × DPI. It comes from the file's page box, so a crafted PDF can ask for a huge bitmap. A render larger than **268,435,456 pixels** (2^28, 1 GiB as BGRA, for example 16,384 × 16,384) throws `InvalidOperationException`. The message names the page index, the pixel size and the setting below. A US Letter page at 1,200 DPI is about 134 million pixels, well inside the limit.
+- If PDFium still cannot allocate a bitmap, the error is an `InvalidOperationException`, not an `OutOfMemoryException`.
+- A page smaller than one pixel at the chosen DPI renders as one pixel.
+
+To change the limit, set the `PdfiumWrapper.MaxRenderPixels` `AppContext` data key (a number of pixels, as `long`, `int` or a numeric string) before rendering. The setting works like `PdfiumWrapper.SpoolThreshold`:
+
+```csharp
+AppContext.SetData("PdfiumWrapper.MaxRenderPixels", 512L * 1024 * 1024); // 2^29 pixels
+```
+
+or in the project file:
+
+```xml
+<ItemGroup>
+  <RuntimeHostConfigurationOption Include="PdfiumWrapper.MaxRenderPixels" Value="536870912" />
+</ItemGroup>
+```
+
+A value that is missing, zero, negative or not a number means the default. The limit is per bitmap. Concurrent callers each hold one bitmap while they encode, and `RenderPages` holds one per page.
+
+#### StreamImageBytes(ImageFormat format, int quality = 90, int dpi = 300)
 
 Streams encoded image bytes one page at a time. Only one page's data is in memory at any point.
 
 ```csharp
-foreach (var bytes in document.StreamImageBytes(ImageFormat.Png, quality: 100, dpi: 300))
+foreach (var bytes in document.StreamImageBytes(ImageFormat.Png, dpi: 300))
 {
     File.WriteAllBytes($"page.png", bytes);
     // Previous page's bytes are eligible for GC
@@ -288,17 +316,19 @@ foreach (var bytes in document.StreamImageBytes(ImageFormat.Png, quality: 100, d
 ```
 
 **Parameters:**
-- `format` — Image format (`ImageFormat.Png`, `ImageFormat.Jpeg`, `ImageFormat.Tiff`)
-- `quality` — Quality for lossy formats (1-100)
+- `format` — `ImageFormat.Png` or `ImageFormat.Jpeg`. `ImageFormat.Tiff` throws `ArgumentOutOfRangeException`; use `SaveAsTiff`
+- `quality` — JPEG quality, 1-100 (default 90). Ignored for PNG
 - `dpi` — Resolution
 
 **Returns:** `IEnumerable<byte[]>` — one byte array per page
 
-#### StreamImageBytesAsync(ImageFormat format, int quality = 100, int dpi = 300)
+**JPEG quality default:** every JPEG entry point uses quality **90** when the caller passes none: `StreamImageBytes`, `StreamImageBytesAsync`, `StreamJpegBytes`, `StreamJpegBytesAsync`, `SaveAsJpegs`, `SaveAsJpegsAsync`, `SaveAsImages`, `SaveAsImagesAsync`, and the worker pool's `ConvertToJpegAsync`. A page therefore produces the same bytes whichever of these you call. **Changed in 2.0:** `StreamImageBytes`, `StreamImageBytesAsync` and `SaveAsImages` used to default to 100.
 
-Async streaming version. Waits for the native gate without blocking a thread and uses `Task.Yield()` between pages.
+#### StreamImageBytesAsync(ImageFormat format, int quality = 90, int dpi = 300)
 
-The call itself returns at once and never waits for the gate. It throws immediately if the document is disposed or the format cannot be streamed (`ImageFormat.Tiff`). An empty document is reported (`InvalidOperationException`) when enumeration starts, because reading the page count is native work. The same holds for `StreamJpegBytesAsync`.
+Async streaming version. Waits for the native gate without blocking a thread. Each page is rendered and encoded on the thread pool, not on the thread that resumes the enumeration.
+
+The call itself returns at once and never waits for the gate. It throws immediately if the document is disposed, the format cannot be streamed (`ImageFormat.Tiff`), or a DPI is not positive. An empty document is reported (`InvalidOperationException`) when enumeration starts, because reading the page count is native work. The same holds for `StreamJpegBytesAsync`.
 
 ```csharp
 await foreach (var bytes in document.StreamImageBytesAsync(ImageFormat.Jpeg, 85, 200))
@@ -332,6 +362,8 @@ document.SaveAsTiff("output.tiff", dpiWidth: 200, dpiHeight: 300);
 - `colorMode` — `TiffColorMode.Bilevel` (1-bit CCITT G4) or `TiffColorMode.Grayscale` (8-bit LZW). Default: Bilevel
 - `threshold` — Luminance threshold 0-255 for bilevel mode. Ignored for grayscale. Default: 128
 
+The file is opened as a managed `FileStream` and written through libtiff's stream interface. Any path .NET accepts therefore works, including non-ASCII directories and names on Windows. If the export fails (for example, a page over the render size limit), the partly written file is deleted.
+
 #### SaveAsTiff(Stream output, int dpi = 200, TiffColorMode colorMode = TiffColorMode.Bilevel, byte threshold = 128)
 
 Saves all pages as a multi-page TIFF to a writable, seekable stream.
@@ -343,12 +375,16 @@ document.SaveAsTiff(stream, dpi: 200);
 
 #### SaveAsTiffAsync(...)
 
-Async versions of both file and stream overloads. They wait for the native gate without blocking a thread and use `Task.Yield()` between pages.
+Async versions of both file and stream overloads. They wait for the native gate without blocking a thread and run on the thread pool.
 
 ```csharp
 await document.SaveAsTiffAsync("output.tiff", dpi: 200);
 await document.SaveAsTiffAsync(stream, dpi: 200, colorMode: TiffColorMode.Grayscale);
 ```
+
+#### Page file names
+
+The directory methods (`SaveAsPngs`, `SaveAsJpegs`, `SaveAsImages` and their async versions) name page *n* (1-based) `{fileNamePrefix}_{n:D3}.png` or `.jpg`: `page_001.png`, `page_002.png`, …, `page_1000.png`. They create the directory if needed, and replace files that already have those names. Every argument (format, DPI, page count) is checked before the directory is created. All output files are opened by .NET, so non-ASCII directories and prefixes (`Rechnung_März`, `café`) are written exactly as given on every platform. The worker pool's image jobs use the same names.
 
 #### SaveAsPngs(string outputDirectory, string fileNamePrefix = "page", int dpi = 300)
 
@@ -359,38 +395,59 @@ document.SaveAsPngs("output", fileNamePrefix: "invoice", dpi: 300);
 // Creates: output/invoice_001.png, output/invoice_002.png, etc.
 ```
 
+#### SaveAsPngsAsync(string outputDirectory, string fileNamePrefix = "page", int dpi = 300)
+
+Async version of `SaveAsPngs`.
+
+```csharp
+await document.SaveAsPngsAsync("output", fileNamePrefix: "invoice", dpi: 300);
+```
+
 #### SaveAsJpegs(string outputDirectory, string fileNamePrefix = "page", int quality = 90, int dpi = 300)
 
-Saves all pages as JPEG files.
+Saves all pages as JPEG files. `SaveAsJpegsAsync` takes the same arguments.
 
 ```csharp
 document.SaveAsJpegs("output", fileNamePrefix: "page", quality: 85, dpi: 200);
 ```
 
-#### SaveAsImages(string outputDirectory, string fileNamePrefix, ImageFormat format, int quality, int dpiWidth, int dpiHeight)
+#### SaveAsImages(string outputDirectory, string fileNamePrefix, ImageFormat format, int quality = 90, int dpi = 300)
 
-Saves all pages in the specified image format.
+Saves all pages as PNG or JPEG files. An overload takes `dpiWidth` and `dpiHeight` separately.
 
 ```csharp
-document.SaveAsImages("output", "page", ImageFormat.Png, quality: 100, dpiWidth: 300, dpiHeight: 300);
+document.SaveAsImages("output", "page", ImageFormat.Png, dpi: 300);
+document.SaveAsImages("output", "page", ImageFormat.Jpeg, quality: 80, dpiWidth: 300, dpiHeight: 300);
 ```
 
-**Note:** Supported formats are `ImageFormat.Png`, `ImageFormat.Jpeg`, and `ImageFormat.Tiff`.
+**Note:** Supported formats are `ImageFormat.Png` and `ImageFormat.Jpeg`. `ImageFormat.Tiff` throws `ArgumentOutOfRangeException` before the directory is created; use `SaveAsTiff` for TIFF output. `quality` is ignored for PNG.
 
-#### SaveAsImagesAsync(...)
+#### SaveAsImagesAsync(string outputDirectory, string fileNamePrefix, ImageFormat format, int quality = 90, int dpi = 300)
 
-Async version of `SaveAsImages`.
+Async version of `SaveAsImages`. As with the synchronous method, an overload takes `dpiWidth` and `dpiHeight` separately.
+
+```csharp
+await document.SaveAsImagesAsync("output", "page", ImageFormat.Jpeg, quality: 85, dpi: 200);
+```
 
 #### SaveAsImages(Stream[] outputStreams, ImageFormat format, int quality, int dpiWidth, int dpiHeight)
 
-Saves pages to provided streams.
+Saves page *i* to `outputStreams[i]`. There must be exactly one non-null stream per page. An empty document throws `InvalidOperationException`, as the other image methods do. The streams are written with the native gate free and are left open.
 
 ```csharp
 var streams = new Stream[document.PageCount];
 for (int i = 0; i < streams.Length; i++)
     streams[i] = new MemoryStream();
 
-document.SaveAsImages(streams, ImageFormat.Png, 100, 300, 300);
+document.SaveAsImages(streams, ImageFormat.Png, 90, 300, 300);
+```
+
+#### SaveAsImagesAsync(Stream[] outputStreams, ImageFormat format, int quality, int dpiWidth, int dpiHeight)
+
+Async version. Each page is written with `Stream.WriteAsync`.
+
+```csharp
+await document.SaveAsImagesAsync(streams, ImageFormat.Jpeg, 90, 200, 200);
 ```
 
 #### Save(string filePath, uint flags = 0)
@@ -442,7 +499,7 @@ public class PdfPage : IDisposable
 | `PageIndex` | `int` | Zero-based index of this page |
 | `Width` | `double` | Page width in points |
 | `Height` | `double` | Page height in points |
-| `HasEmbeddedThumbnail` | `bool` | Whether the page has an embedded thumbnail |
+| `HasEmbeddedThumbnail` | `bool` | Whether the page has an embedded thumbnail (checks the stream without decoding it; see `GetEmbeddedThumbnail()`) |
 
 ### Page Editing Methods
 
@@ -451,9 +508,7 @@ public class PdfPage : IDisposable
 Adds a text object to the page.
 
 ```csharp
-var text = page.AddText("Hello World", x: 100, y: 700);
-text.Font = "Helvetica-Bold";
-text.FontSize = 24;
+var text = page.AddText("Hello World", x: 100, y: 700, font: "Helvetica-Bold", fontSize: 24);
 text.Color = Color.Black;
 ```
 
@@ -563,38 +618,36 @@ byte[] pixels = page.RenderToBytes(1920, 1080);
 ```
 
 **Parameters:**
-- `width` — Output width in pixels
-- `height` — Output height in pixels
+- `width` — Output width in pixels, greater than zero
+- `height` — Output height in pixels, greater than zero
 - `flags` — Render flags (e.g., `PDFium.FPDF_ANNOT` to include annotations)
 
 **Returns:** BGRA byte array
 
-#### GetEmbeddedThumbnailBytes()
+**Throws:** `ArgumentOutOfRangeException` for a width or height of zero or less. `InvalidOperationException` when `width × height` exceeds the render size limit (268,435,456 pixels by default; see [Render size limit and DPI validation](#render-size-limit-and-dpi-validation)), or when PDFium cannot create the bitmap.
 
-Gets the embedded thumbnail as raw BGRA bytes.
+#### GetEmbeddedThumbnail()
+
+Gets the page's embedded thumbnail (its `/Thumb` image) as BGRA pixels, with its size and stride, in one decode.
 
 ```csharp
-if (page.HasEmbeddedThumbnail)
+RawBitmap? thumbnail = page.GetEmbeddedThumbnail();
+if (thumbnail != null)
 {
-    byte[] thumbnail = page.GetEmbeddedThumbnailBytes();
+    Console.WriteLine($"Thumbnail: {thumbnail.Width} x {thumbnail.Height}");
+    byte[] bgra = thumbnail.Pixels; // Stride == Width * 4
 }
 ```
 
-**Returns:** BGRA byte array or `null` if no thumbnail exists
+Gray and RGB thumbnails are expanded to BGRA with full opacity, as `PdfImageObject.GetBitmap()` does. The native bitmap is copied and released before the method returns.
 
-#### GetEmbeddedThumbnailSize()
+**Returns:** `RawBitmap`, or `null` if the page has no thumbnail or it cannot be decoded
 
-Gets the dimensions of the embedded thumbnail.
+`HasEmbeddedThumbnail` only measures the thumbnail stream and does not decode the image. A page whose thumbnail is present but damaged reports `true` there, while `GetEmbeddedThumbnail()` returns `null`. To get the pixels, call `GetEmbeddedThumbnail()` directly and check for `null`; there is no need to check `HasEmbeddedThumbnail` first.
 
-```csharp
-var size = page.GetEmbeddedThumbnailSize();
-if (size.HasValue)
-{
-    Console.WriteLine($"Thumbnail: {size.Value.width} x {size.Value.height}");
-}
-```
+#### GetEmbeddedThumbnailBytes() / GetEmbeddedThumbnailSize() (obsolete)
 
-**Returns:** Tuple of (width, height) or `null`
+**Obsolete:** use `GetEmbeddedThumbnail()`, which returns the pixels and the size from a single decode. `GetEmbeddedThumbnailBytes()` now returns the same BGRA pixels as `GetEmbeddedThumbnail().Pixels`; before 2.0 it returned PDFium's raw format, often 3 bytes per pixel. `GetEmbeddedThumbnailSize()` returns `(width, height)`. Both return `null` when there is no thumbnail.
 
 ---
 
@@ -638,16 +691,17 @@ public class PdfTextObject : PdfPageObject
 
 | Property | Type | Description |
 |----------|------|-------------|
-| `Font` | `string` | Font name (e.g., "Helvetica", "Times-Roman") |
-| `FontSize` | `float` | Font size in points |
-| `Color` | `Color` | Text color |
+| `Text` | `string` | Text content (set only) |
+| `FontSize` | `float` | Font size in points (get and set) |
+| `Color` | `Color` | Fill color (set only) |
+| `StrokeColor` | `Color` | Stroke color (set only) |
+
+The font is chosen when the text is added (`PdfPage.AddText(text, x, y, font, fontSize)`); PDFium cannot change a text object's font afterwards.
 
 #### Example
 
 ```csharp
-var text = page.AddText("Hello World", x: 100, y: 700);
-text.Font = "Helvetica-Bold";
-text.FontSize = 24;
+var text = page.AddText("Hello World", x: 100, y: 700, font: "Helvetica-Bold", fontSize: 24);
 text.Color = Color.DarkBlue;
 ```
 
@@ -955,13 +1009,15 @@ using var merger = new PdfMerger("existing.pdf");
 
 #### PdfMerger(byte[] data, string password = null)
 
-Starts with an existing PDF from byte array.
+Starts with an existing PDF from byte array. As with [`PdfDocument(byte[])`](#pdfdocumentbyte-data-string-password--null), the array is used in place and must not be modified until the merger is disposed.
 
 #### PdfMerger(Stream pdfStream, string password = null)
 
 Starts with an existing PDF from stream.
 
-The stream is read from its current position to its end during construction and is left positioned at its end, with the same in-memory and temporary-file rules as [`PdfDocument(Stream)`](#pdfdocumentstream-pdfstream-string-password--null). The merger does not use the stream afterwards, so it can be closed immediately. (Before 2.0 a seekable stream had to stay open for the lifetime of the merger.)
+The stream is read from its current position to its end during construction and is left positioned at its end, with the same copy and temporary-file rules as [`PdfDocument(Stream)`](#pdfdocumentstream-pdfstream-string-password--null). The merger does not use the stream afterwards, so it can be closed, reset or reused immediately. (Before 2.0 a seekable stream had to stay open for the lifetime of the merger.)
+
+Each constructor builds the merger on a private `PdfDocument` loaded through the matching `PdfDocument` constructor, so loading, error messages, saving and disposal behave exactly as they do for `PdfDocument`. A merger dropped without `Dispose()` is released by that document's finalizer.
 
 ### Thread Safety
 
@@ -1292,7 +1348,7 @@ if (attachment != null)
 
 #### ExtractAll(string outputDirectory)
 
-Extracts all attachments to a directory, creating it if needed. Attachment names come from the document, so each file is named after the last path component of its attachment name (`/` and `\` separate components everywhere; on macOS `:` does too, because PDFium returns `/` in a name as `:` there), with characters the file system rejects replaced by `_`; nothing is written outside `outputDirectory`. An attachment with no usable name (empty, `.`, `..`) is written as `attachment_N`, numbered from 1 by its position. Attachments that reduce to the same name overwrite each other.
+Extracts all attachments to a directory, creating it if needed. Attachment names come from the document, so each file is named after the last path component of its attachment name (`/` and `\` separate components everywhere; on macOS `:` does too, because PDFium returns `/` in a name as `:` there), with characters the file system rejects replaced by `_`; nothing is written outside `outputDirectory`. Trailing dots and spaces are removed (Windows drops them), and a Windows device name such as `CON`, `NUL.txt` or `COM1.log` gets a leading `_`, on every platform. An attachment with no usable name (empty, `.`, `..`) is written as `attachment_N`, numbered from 1 by its position. Attachments whose names are then equal, ignoring case, are not overwritten: later ones get `_2`, `_3` before the extension (`report.txt`, `report_2.txt`).
 
 ```csharp
 document.Attachments.ExtractAll("extracted_files");
@@ -1450,7 +1506,9 @@ Each call is one job on one worker. Inputs are `PdfInput` values; a `string` pat
 | `ConvertToTiffAsync(PdfInput input, string outputPath, int dpi = 200, TiffColorMode colorMode = TiffColorMode.Bilevel, byte threshold = 128, CancellationToken ct = default)` | `Task<PdfJobResult<TiffFile>>`: one multi-page file |
 | `ExtractTextAsync(PdfInput input, CancellationToken ct = default)` | `Task<PdfJobResult<string[]>>`: one string per page |
 
-Batch overloads take `IEnumerable<PdfInput>` and return `IAsyncEnumerable<PdfJobResult<T>>`, yielding results **in completion order** as they finish. Image and TIFF batches take an `outputRoot` and write each document to `{outputRoot}/{document name without extension}` (`.tiff` appended for TIFF); a name that repeats within the batch gets `-2`, `-3`, ... appended so documents never overwrite each other.
+Batch overloads take `IEnumerable<PdfInput>` and return `IAsyncEnumerable<PdfJobResult<T>>`, yielding results **in completion order** as they finish. Image and TIFF batches take an `outputRoot` and write each document to `{outputRoot}/{document name without extension}` (`.tiff` appended for TIFF); a name that repeats within the batch gets `-2`, `-3`, ... appended so documents never overwrite each other. Names are compared as the file system resolves them, ignoring case, so `a.pdf`, `A.pdf` and (on Windows) `a .pdf` never share a directory. Characters a file name cannot hold become `_`, and a name that is empty, `.` or `..`, or ends in a dot or a space, becomes `document`; every output lies directly under `outputRoot`.
+
+Leaving a batch early (`break`, an exception, or disposing the enumerator) cancels the jobs it has already submitted, which end as `Cancelled`, and submits no more.
 
 ```csharp
 await foreach (var r in pool.ConvertToPngAsync(files, "out", dpi: 150, ct: ct))
@@ -1471,6 +1529,9 @@ Output files are written to a temporary name and renamed when complete, so a cra
 
 - **Backpressure:** at most `QueueCapacity` jobs wait for a worker; a submission beyond that awaits a slot. No exception, no unbounded growth.
 - **Failures never fail the pool.** A worker that crashes (for example a native abort on a damaged PDF), hangs past `JobTimeout` or sends malformed data is killed and replaced. Its job is reported as `WorkerCrashed` or `TimedOut` and retried on a fresh worker up to `MaxAttempts`. A job the document itself rejects (bad file, wrong password) is `Failed` and not retried. Other jobs are unaffected.
+- **Neighbours on a worker are not charged.** With `JobsPerWorker` above 1, a worker killed for one job's timeout or cancellation takes its other jobs down too; they run again without using an attempt. When a worker running several jobs crashes, which one caused it is unknown: each runs again alone on a worker without using an attempt, and only the one that crashes again is charged. A job gets at most `MaxAttempts` such free runs.
+- **Workers that cannot start.** Once `MaxConsecutiveStartFailures` starts in a row have failed and no worker is alive, the jobs waiting for a worker end as `Failed` with the start error instead of waiting forever. A job submitted later waits for one more start attempt; the first successful start resets the count.
+- **Memory retirement** (`MaxWorkerMemoryBytes`): the worker takes no new job, finishes the ones it is running (each within its `JobTimeout`), then shuts down and is replaced.
 - **Cancellation:** a cancelled job that has not started is dropped; one in flight is asked to stop between pages and its partial output removed. Either way the result is `Cancelled`.
 - **`DisposeAsync`:** stops accepting jobs, cancels queued ones, lets in-flight ones finish (up to `JobTimeout`), then stops every worker. Submitting afterwards throws `ObjectDisposedException`.
 
@@ -1491,15 +1552,16 @@ Validated when the pool is created (`ArgumentOutOfRangeException`, or `PdfPoolEx
 | Property | Default | Description |
 |----------|---------|-------------|
 | `MinWorkers` | 1 | Workers kept alive and warm. Started when the pool is created |
-| `MaxWorkers` | `DefaultMaxWorkers` (half the logical processors, at least 1) | Upper bound. A worker is one core, so beyond the fast cores extra workers add memory and little throughput |
+| `MaxWorkers` | `DefaultMaxWorkers` (half the logical processors, at least 1) | Upper bound on worker processes, including a worker retired for memory that is still finishing its jobs (its replacement starts when it exits). A worker is one core, so beyond the fast cores extra workers add memory and little throughput |
 | `JobsPerWorker` | 2 | Jobs a worker runs at once. PDFium serializes rendering inside a process, so a second job lets one document encode and write while the other renders. More mostly adds memory (one rendered page per job in flight) |
 | `ScaleUpAfter` | 500 ms | A worker is added when every slot of every worker has been busy and jobs have been waiting for this long. A burst reaches `MaxWorkers` in seconds; a single stray job never starts a process |
 | `IdleTimeout` | 60 s | A worker idle for this long is stopped, down to `MinWorkers` |
-| `JobTimeout` | 2 min | Per attempt. On expiry the worker is killed and replaced |
-| `MaxAttempts` | 2 | Attempts for a job whose worker crashed or timed out |
+| `JobTimeout` | 2 min | Per attempt. On expiry the worker is killed and replaced. At most `PdfPoolOptions.MaxTimeout` (about 49.7 days, the limit of .NET timers); there is no infinite timeout |
+| `MaxAttempts` | 2 | Attempts for a job whose worker crashed or timed out. Only the job that ended the attempt is charged (see Behavior) |
 | `QueueCapacity` | 1,000 | Jobs that may wait. Submissions beyond this wait for a slot |
-| `MaxWorkerMemoryBytes` | null | When set, a worker whose working set exceeds this after a job is retired and replaced |
-| `WorkerStartTimeout` | 30 s | Time a new worker gets to report ready |
+| `MaxWorkerMemoryBytes` | null | When set, a worker whose working set exceeds this after a job is retired: it finishes its running jobs, then is replaced |
+| `WorkerStartTimeout` | 30 s | Time a new worker gets to report ready. At most `PdfPoolOptions.MaxTimeout` |
+| `MaxConsecutiveStartFailures` | 3 | Worker starts that may fail in a row, with no worker alive, before the jobs waiting for a worker end as `Failed` with the start error |
 | `WorkerPath` | null | Executable (or `.dll`, run through `dotnet`) to start as a worker. Null re-launches this process |
 | `WorkerArguments` | empty | Arguments for `WorkerPath` |
 | `WorkerEnvironment` | empty | Extra environment variables for workers |
@@ -1520,10 +1582,12 @@ public sealed record PdfJobResult<T>(string Input, PdfJobStatus Status, T? Value
 | `PdfJobStatus` | Meaning |
 |---|---|
 | `Succeeded` | `Value` is set |
-| `Failed` | The document or request was rejected (bad file, wrong password, missing output path). Not retried |
+| `Failed` | The document or request was rejected (bad file, wrong password, missing output path). Not retried. Also the status when no worker could be started (`MaxConsecutiveStartFailures`) or the pool's dispatcher stopped on an unexpected error; `Error` says which |
 | `TimedOut` | The last attempt exceeded `JobTimeout` |
 | `Cancelled` | Cancelled by the caller, or the pool was disposed while the job waited |
 | `WorkerCrashed` | The worker process died during the last attempt |
+
+`Attempts` counts the attempts charged to the job: 1 unless its own worker crashed or it timed out, and 0 for a job that never reached a worker. A run ended only because a neighbour on the same worker brought it down is not counted.
 
 `PdfJobTimings` has `Queued` (submission to dispatch), `Processing` (dispatch to result, last attempt) and `Total`. `ImageFiles` is `(int PageCount, IReadOnlyList<string> Files, long TotalBytes)`; `TiffFile` is `(int PageCount, string Path, long Bytes)`.
 
