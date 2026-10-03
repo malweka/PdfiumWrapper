@@ -198,8 +198,8 @@ public class PdfMetadata
     /// <summary>
     /// Set all common metadata fields at once
     /// </summary>
-    public void SetAllMetadata(string title = null, string author = null, string subject = null,
-        string keywords = null, string creator = null, string producer = null)
+    public void SetAllMetadata(string? title = null, string? author = null, string? subject = null,
+        string? keywords = null, string? creator = null, string? producer = null)
     {
         using var _ = PdfiumRuntime.Enter();
         if (title != null) Title = title;

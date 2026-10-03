@@ -1292,7 +1292,7 @@ if (attachment != null)
 
 #### ExtractAll(string outputDirectory)
 
-Extracts all attachments to a directory.
+Extracts all attachments to a directory, creating it if needed. Attachment names come from the document, so each file is named after the last path component of its attachment name, with characters the file system rejects replaced by `_`; nothing is written outside `outputDirectory`. An attachment with no usable name (empty, `.`, `..`) is written as `attachment_N`, numbered from 1 by its position. Attachments that reduce to the same name overwrite each other.
 
 ```csharp
 document.Attachments.ExtractAll("extracted_files");

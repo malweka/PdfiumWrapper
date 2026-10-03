@@ -1290,7 +1290,54 @@ public class PdfDocumentTests : IDisposable
         // Assert
         Assert.Same(attachments1, attachments2);
     }
-    
+
+    [Fact]
+    public void ExtractAll_WritesEveryAttachmentInsideTheOutputDirectory()
+    {
+        // Arrange: attachment names are read from the document, so they can be hostile
+        var root = CreateTempDirectory();
+        var outputDir = Path.Combine(root, "out");
+        var absoluteName = Path.Combine(root, "absolute.txt");
+
+        using var doc = new PdfDocument();
+        using (PdfiumRuntime.Enter())
+        {
+            AddAttachment(doc, "../parent.txt", "parent");
+            AddAttachment(doc, "..\\backslash.txt", "backslash");
+            AddAttachment(doc, absoluteName, "absolute");
+            AddAttachment(doc, "..", "dots");
+            AddAttachment(doc, "stream.txt:hidden", "colon");
+            AddAttachment(doc, "plain.txt", "plain");
+            // No contents: the attachment's Data stays null
+            Assert.NotEqual(IntPtr.Zero, PDFium.FPDFDoc_AddAttachment(doc.Document, "empty.txt"));
+        }
+
+        // Act
+        doc.Attachments.ExtractAll(outputDir);
+
+        // Assert
+        Assert.Equal(new[] { outputDir }, Directory.GetFileSystemEntries(root));
+        var written = Directory.GetFiles(outputDir).Select(f => Path.GetFileName(f)).ToArray();
+        Assert.Equal(7, written.Length);
+        Assert.Equal("parent", File.ReadAllText(Path.Combine(outputDir, "parent.txt")));
+        Assert.Equal("backslash", File.ReadAllText(Path.Combine(outputDir, "backslash.txt")));
+        Assert.Equal("absolute", File.ReadAllText(Path.Combine(outputDir, "absolute.txt")));
+        Assert.Equal("plain", File.ReadAllText(Path.Combine(outputDir, "plain.txt")));
+        var colonName = OperatingSystem.IsWindows() ? "stream.txt_hidden" : "stream.txt:hidden";
+        Assert.Equal("colon", File.ReadAllText(Path.Combine(outputDir, colonName)));
+        Assert.Empty(File.ReadAllBytes(Path.Combine(outputDir, "empty.txt")));
+        var unnamed = Assert.Single(written, name => name.StartsWith("attachment_"));
+        Assert.Equal("dots", File.ReadAllText(Path.Combine(outputDir, unnamed)));
+    }
+
+    private static void AddAttachment(PdfDocument doc, string name, string contents)
+    {
+        var attachment = PDFium.FPDFDoc_AddAttachment(doc.Document, name);
+        Assert.NotEqual(IntPtr.Zero, attachment);
+        var bytes = System.Text.Encoding.UTF8.GetBytes(contents);
+        Assert.True(PDFium.FPDFAttachment_SetFile(attachment, doc.Document, bytes, new CULong((uint)bytes.Length)));
+    }
+
     #endregion
     
     #region Permissions Tests

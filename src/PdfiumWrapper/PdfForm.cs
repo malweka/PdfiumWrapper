@@ -399,7 +399,7 @@ public class PdfForm : IDisposable
         for (int pageIndex = 0; pageIndex < _pageCount; pageIndex++)
         {
             var pageFields = GetFormFieldsOnPageInternal(pageIndex);
-            var field = pageFields.FirstOrDefault(f => f.Name.Equals(fieldName, StringComparison.OrdinalIgnoreCase));
+            var field = pageFields.FirstOrDefault(f => string.Equals(f.Name, fieldName, StringComparison.OrdinalIgnoreCase));
             if (field != null)
                 return field;
         }

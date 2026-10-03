@@ -495,7 +495,7 @@ public class PdfMergerTests : IDisposable
         using var sourceDoc = new PdfDocument((byte[])Doc3PagesBytes.Clone());
 
         // Act
-        merger.AppendPages(sourceDoc, (string)null);
+        merger.AppendPages(sourceDoc, (string?)null);
 
         // Assert
         Assert.Equal(3, merger.PageCount);

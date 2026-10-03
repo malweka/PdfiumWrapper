@@ -218,6 +218,19 @@ public static partial class PDFium
     internal static partial bool FPDFAttachment_GetFile(IntPtr attachment, IntPtr buffer, ulong buflen, out ulong out_buflen);
 
     /// <summary>
+    /// Add an empty attachment named <paramref name="name"/>; returns IntPtr.Zero if the name is empty or already used
+    /// </summary>
+    [LibraryImport(LibraryName)]
+    internal static partial IntPtr FPDFDoc_AddAttachment(IntPtr document, [MarshalAs(UnmanagedType.LPWStr)] string name);
+
+    /// <summary>
+    /// Set the contents of an attachment
+    /// </summary>
+    [LibraryImport(LibraryName)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static partial bool FPDFAttachment_SetFile(IntPtr attachment, IntPtr document, byte[] contents, CULong len);
+
+    /// <summary>
     /// Get attachment string value
     /// </summary>
     [LibraryImport(LibraryName)]

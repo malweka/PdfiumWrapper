@@ -2,6 +2,10 @@
 
 ## Current focus
 
+.NET 10 and dependency upgrade (2026-10-03), branch `feature/net10-upgrade` from `main` at `4497749`, uncommitted. Every project targets `net10.0`; win-x64 and linux-x64 natives are rebuilt at the new versions; 274 tests pass on win-x64 and on linux-x64 (.NET 10 SDK container). **macOS natives (osx-arm64, osx-x64) are still the old versions** and must be rebuilt on a Mac before a release: `bash src/native/build-natives.sh --target osx-arm64` and `--target osx-x64`, then run the tests.
+
+### Earlier focus (2026-10-03, before the upgrade)
+
 Follow-up verification of the local, uncommitted PR #18 fixes is complete (2026-10-03). GitHub and local HEAD remain `7080c0377551a0f4f572f3ba8ba1a259c2099ba8`; the fixes are in the working tree. All 273 Windows tests pass, including the six added regression tests, and the comparison project builds. Two findings remain: Critical deletion of pre-existing image output by cleanup for a job that wrote nothing (`PdfProcessingPool.cs:568`), and Moderate retention of every completed batch continuation despite the new admission bound (`PdfProcessingPool.Operations.cs:184`). Verdict remains request changes. No implementation edits were made during this verification.
 
 PR #18 architecture review is complete at head `7080c0377551a0f4f572f3ba8ba1a259c2099ba8` (merge base `5930c8606bac014c81ee0b6f8b7da4bc4bd12d3f`). Verdict: request changes for five reproduced findings: batch output-name collisions, unbounded batch submissions/spooling, cancellation while waiting for admission throwing instead of returning a status, incomplete output cleanup after failure, and cancellation during worker startup leaking a child and returning a pool. No implementation fixes were requested or made.
@@ -23,6 +27,23 @@ Follow-up verification of PR #15 commit `f3b15a1130567dc00f604c61b5aab9bc98a9e24
 Release 1 of `ai/plans/plan-pdfium-concurrency.md` is implemented on `feature/pdfium-concurrency-plan` (version 2.0.0); Release 2 remains deferred pending the owner's capacity/deployment inputs. The global `ai-pr-review` skill is installed and available.
 
 ## Completed
+
+### Latest task: resolve the compiler warnings (2026-10-03, same branch)
+
+- The build had 28 distinct warnings (9 library, 19 tests); it now has none on win-x64 and linux-x64. 275 tests pass on both (one new).
+- Three were real defects: `PdfAttachments.ExtractAll` threw on an attachment with no name or no contents, and wrote outside the output directory for names such as `../x`, `..\x` or an absolute path (attachment names come from the document). It now keeps the last path component, replaces invalid file-name characters (":" would open an NTFS alternate data stream), falls back to `attachment_N`, and writes empty attachments as empty files. `PdfForm.FindFormField` threw on a field with no name. New test `ExtractAll_WritesEveryAttachmentInsideTheOutputDirectory` (PdfDocumentTests) with internal imports `FPDFDoc_AddAttachment` and `FPDFAttachment_SetFile` (length as `CULong`). `docs/API-REFERENCE.md` describes the naming.
+- Annotation-only: `PdfMetadata.SetAllMetadata` parameters are `string?`; tests assert `GetForm()` is not null before use, cast `(string?)null`, suppress CS0618 around the deliberate `GetAllPages()` disposed check, and `FailingOperations_AlwaysReleaseTheGate` awaits its probe instead of blocking (xUnit1031).
+- Found, not changed: the attachment/metadata imports declare C `unsigned long` as `ulong` (8 bytes) although it is 4 bytes on Windows (32 such `ulong`s across the PDFium partials; `out ulong` relies on the local starting at zero). `FPDFAttachment_HasKey` passes its key as UTF-16 where PDFium takes a byte string (`FPDF_BYTESTRING`).
+
+### Earlier task: upgrade to .NET 10, native and NuGet dependencies (2026-10-03)
+
+- .NET: `net8.0` to `net10.0` in all seven projects; CI (`pr-build.yml`, `release.yml`) uses `10.0.x`; README, AGENTS.md, package description and the TROUBLESHOOTING Dockerfile say .NET 10. Measured figures in `benchmark.md` and `docs/HIGH-THROUGHPUT-PROCESSING.md` still name .NET 8.0.31 because that is what they were measured on.
+- NuGet: removed `Microsoft.SourceLink.GitHub` 8.0.0 from the core and Processing projects (Source Link is built into the SDK; the package pulled in `Microsoft.Build.Tasks.Git` 8.0.0, which has advisory GHSA-23fw-v26w-5fgq). Verified a packed nupkg still carries the repository commit and the snupkg PDB maps to raw.githubusercontent.com. Tests: Magick.NET-Q16-AnyCPU 14.9.1 to 14.17.2 (clears all its NU190x advisories), Microsoft.NET.Test.Sdk 17.8.0 to 18.10.1, xunit 2.5.3 to 2.9.3 (still v2), xunit.runner.visualstudio 2.5.3 to 4.0.0, coverlet.collector 6.0.0 to 10.1.0. BenchmarkDotNet 0.14.0 to 0.15.8 (both benchmark projects). Aspose.PDF in the comparison project left at 25.9.0: a newer version may be outside the license's subscription date. `dotnet list package --vulnerable --include-transitive` is now clean.
+- Natives: PDFium chromium/7869 to 8076 (156.0.8076.0), libtiff 4.7.1 to 4.7.2, libjpeg-turbo 3.1.4.1 to 3.2.0, zlib-ng 2.2.4 to 2.3.3, libpng 1.6.56 to 1.6.59. PDFium public headers 7869 to 8076 are additive only (new functions, `FPDF_LIBRARY_CONFIG` versions 6 and 7; the wrapper calls `FPDF_InitLibrary`). Windows built with NASM (`WITH_SIMD = 1`); Linux built in Docker (ubuntu:22.04, `WITH_SIMD = 1`); `libtiff.so` still needs only system `libz.so.1`, as before. `libtiff_shim.so` rebuilt byte-identical.
+- Build scripts: PDFium pinned to 8076 instead of `latest`; the extracted PDFium archive is cached per version (`_native_build/pdfium-<version>-<rid>`), so a version change downloads again and `latest` always does (before, an existing `pdfium-win-x64` folder kept the old build silently). `build-natives.sh` now accepts a bare build number like the Windows script (`chromium/` prefix optional). `docs/BUILDING-NATIVE-LIBS.md` version table includes PDFium.
+- Running `build-natives.sh --target linux-x64` from Git Bash on Windows needs `MSYS2_ARG_CONV_EXCL="<repo path>:;/src"` so the docker `-v`/`-w` arguments are not path-converted while host `curl` still is; `MSYS_NO_PATHCONV=1` breaks host curl.
+- Verified: build 0 errors, same compiler/analyzer warnings as net8.0; 274/274 tests on win-x64 with the old natives, 274/274 with the new ones; 274/274 on linux-x64 in `mcr.microsoft.com/dotnet/sdk:10.0` with the new natives; comparison project builds.
+- Not done: macOS natives (needs a Mac), commit, PR. A `git stash` entry (`stash@{0}`) duplicating these csproj edits was left from a warning comparison and can be dropped.
 
 ### Latest task: verify the PR #18 review fixes (2026-10-03)
 
@@ -230,6 +251,8 @@ Key measurements (one machine: i7-13700F, 24 logical processors, win-x64):
 
 ## In progress
 
+- .NET 10 upgrade on `feature/net10-upgrade`: done for win-x64 and linux-x64, uncommitted. macOS natives not rebuilt.
+
 - Follow-up review is finished. The two remaining findings await implementation by the owner; no code corrections were requested in this verification turn.
 
 - PR #18 review finished; implementation corrections have not been requested. Older status notes below are historical.
@@ -237,6 +260,8 @@ Key measurements (one machine: i7-13700F, 24 logical processors, win-x64):
 - Nothing active. Verification is complete; the stride overflow edge case awaits correction. The four original review reproductions are resolved.
 
 ## Next recommended step
+
+- On a Mac: `bash src/native/build-natives.sh --target osx-arm64` and `--target osx-x64` (versions pinned in the script), run the tests on osx-arm64, check the osx-x64 dylibs with `file`/`otool -L`. Then commit the upgrade on `feature/net10-upgrade`, open a PR and confirm CI on the .NET 10 SDK. Bump the package version (2.0.0 has not been released) if the TFM change should be called out.
 
 - Correct artifact ownership in `RemovePartialOutput` (`PdfProcessingPool.cs:568`) so undispatched/rejected jobs cannot delete existing files, and remove completed task history from `Batch` (`PdfProcessingPool.Operations.cs:184`). Add preservation and task-retention regressions, rerun tests, then commit/push the fixes and verify CI for that exact commit. Earlier recommendations below are historical.
 
@@ -252,6 +277,9 @@ Earlier list (items 1 and 2 still apply; item 3 is done):
 3. Decide whether to commit `src/PdfiumWrapper.Benchmarks.Comparison` (code only, no results), the `.gitignore` entries and the updated `benchmark.db`. 2.0.0 is merged but not released: the release workflow takes its version from a `release/<version>` branch.
 
 ## Blockers or open questions
+
+- macOS natives are still PDFium 7869 / libtiff 4.7.1 / libjpeg-turbo 3.1.4.1 / zlib-ng 2.2.4 / libpng 1.6.56 until rebuilt on a Mac; a release from this branch before that would ship mixed versions.
+- Dropping `net8.0` means .NET 8 and 9 consumers can no longer use the package (both reach end of support on 2026-11-10). Multi-targeting `net8.0;net10.0` is the alternative if that matters.
 
 - The local PR #18 fixes still have one Critical output-loss regression and one Moderate batch-memory issue. GitHub CI has not evaluated these uncommitted changes. The review itself is complete.
 
@@ -282,6 +310,9 @@ Earlier notes:Earlier notes:
 - Shell commands required escalation because the Windows sandbox shell failed with `windows sandbox: spawn setup refresh`.
 
 ## Recently changed files
+
+- Warning cleanup (2026-10-03): `src/PdfiumWrapper/PdfAttachments.cs`, `PdfForm.cs`, `PdfMetadata.cs`, `PDFium.Metadata.cs`; `src/PdfiumWrapper.Tests/PdfDocumentTests.cs`, `PdfFormTests.cs`, `PdfMergerTests.cs`, `LifetimeCoordinationTests.cs`, `Concurrency/PdfiumConcurrencyTests.cs`; `docs/API-REFERENCE.md`.
+- .NET 10 upgrade (2026-10-03): all seven `*.csproj`; `.github/workflows/pr-build.yml`, `release.yml`; `src/native/build-natives.cmd`, `build-natives.sh`; `src/libs/win-x64/*` (5), `src/libs/linux-x64/*` (4; `libtiff_shim.so` unchanged); `README.md`, `AGENTS.md`, `docs/BUILDING-NATIVE-LIBS.md`, `docs/TROUBLESHOOTING.md`, `ai/current-state.md`.
 
 - Follow-up verification (2026-10-03): `ai/current-state.md` only. All pre-existing code and documentation edits were preserved. Temporary xUnit probes are under `%TEMP%/PdfiumPr18Followup_f8bfa9bdd893413980dd7dcdc936ed1f/`.
 

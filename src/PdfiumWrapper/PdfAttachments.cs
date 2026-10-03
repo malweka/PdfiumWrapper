@@ -108,7 +108,9 @@ public class PdfAttachments
     }
 
     /// <summary>
-    /// Extract all attachments to a directory
+    /// Extract all attachments to a directory. Each file is named after the last path
+    /// component of its attachment name, so nothing is written outside the directory;
+    /// an attachment without a usable name is written as attachment_N (N from 1).
     /// </summary>
     public void ExtractAll(string outputDirectory)
     {
@@ -118,10 +120,25 @@ public class PdfAttachments
         if (!Directory.Exists(outputDirectory))
             Directory.CreateDirectory(outputDirectory);
 
-        foreach (var attachment in attachments)
+        for (int i = 0; i < attachments.Count; i++)
         {
-            string filePath = Path.Combine(outputDirectory, attachment.Name);
-            File.WriteAllBytes(filePath, attachment.Data);
+            string filePath = Path.Combine(outputDirectory, SafeFileName(attachments[i].Name, i));
+            File.WriteAllBytes(filePath, attachments[i].Data ?? []);
         }
+    }
+
+    // Attachment names come from the document. Path.Combine would follow "..\" segments
+    // and return an absolute name unchanged, so keep only the last component of either
+    // separator style and replace characters the file system rejects (":" would open an
+    // alternate data stream on Windows).
+    private static string SafeFileName(string? name, int index)
+    {
+        string fileName = Path.GetFileName((name ?? string.Empty).Replace('\\', '/'));
+        foreach (char c in Path.GetInvalidFileNameChars())
+            fileName = fileName.Replace(c, '_');
+
+        // Empty, ".", ".." and names of only dots or spaces (which Windows trims to
+        // nothing) would name the directory itself or its parent.
+        return fileName.Trim('.', ' ').Length == 0 ? $"attachment_{index + 1}" : fileName;
     }
 }
