@@ -288,6 +288,20 @@ internal sealed class TiffWriter : IDisposable
         System.Diagnostics.Debug.WriteLine("[libtiff WARN]");
     }
 
+    /// <summary>
+    /// Closes the TIFF, which flushes what libtiff still buffers, and throws if a stream callback
+    /// failed while doing so. Call it on success; <see cref="Dispose"/> closes without throwing,
+    /// for the failure paths, where an exception is already on its way out.
+    /// </summary>
+    public void Close()
+    {
+        if (_disposed)
+            return;
+
+        Dispose();
+        _streamFailure?.Throw();
+    }
+
     public void Dispose()
     {
         if (!_disposed)

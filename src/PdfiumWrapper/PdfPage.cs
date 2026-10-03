@@ -296,10 +296,19 @@ public class PdfPage : IDisposable
         ThrowIfDisposed();
 
         var textObj = PdfTextObject.Create(_owner.Document, font, fontSize);
-        textObj.Text = text;
+        try
+        {
+            textObj.Text = text;
 
-        // Position the text object
-        textObj.SetMatrix(1, 0, 0, 1, x, y);
+            // Position the text object
+            textObj.SetMatrix(1, 0, 0, 1, x, y);
+        }
+        catch
+        {
+            // Not inserted yet, so nothing else owns it
+            textObj.Dispose();
+            throw;
+        }
 
         // Insert into page
         PDFium.FPDFPage_InsertObject(_page, textObj.Handle);

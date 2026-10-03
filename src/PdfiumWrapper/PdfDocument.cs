@@ -1183,6 +1183,7 @@ public class PdfDocument : IDisposable
             using (var writer = new TiffWriter(file))
             {
                 WriteAllPagesToTiff(writer, pageCount, dpiWidth, dpiHeight, colorMode, threshold);
+                writer.Close();
             }
         }
         catch
@@ -1213,6 +1214,7 @@ public class PdfDocument : IDisposable
 
         using var writer = new TiffWriter(output);
         WriteAllPagesToTiff(writer, pageCount, dpiWidth, dpiHeight, colorMode, threshold);
+        writer.Close();
     }
 
     /// <summary>
@@ -1244,6 +1246,7 @@ public class PdfDocument : IDisposable
             using (var writer = new TiffWriter(file))
             {
                 await WriteAllPagesToTiffAsync(writer, pageCount, dpiWidth, dpiHeight, colorMode, threshold).ConfigureAwait(false);
+                writer.Close();
             }
         }
         catch
@@ -1275,6 +1278,7 @@ public class PdfDocument : IDisposable
 
         using var writer = new TiffWriter(output);
         await WriteAllPagesToTiffAsync(writer, pageCount, dpiWidth, dpiHeight, colorMode, threshold).ConfigureAwait(false);
+        writer.Close();
     }
 
     private void WriteAllPagesToTiff(TiffWriter writer, int pageCount, int dpiWidth, int dpiHeight,

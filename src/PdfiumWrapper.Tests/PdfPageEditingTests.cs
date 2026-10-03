@@ -163,6 +163,18 @@ public class PdfPageEditingTests : IDisposable
         Assert.Throws<InvalidDataException>(() => page.AddImage(jpeg, 0, 0, 100, 100));
         Assert.Equal(objectsBefore, page.ObjectCount);
         Assert.Equal(liveBefore, PdfiumRuntime.LiveHandleCount);
+
+        // 20000 x 20000 fits an array (1.6 GB) but not the render limit: rejected before allocating
+        jpeg[sof + 5] = 0x4E; // height 20000
+        jpeg[sof + 6] = 0x20;
+        jpeg[sof + 7] = 0x4E; // width 20000
+        jpeg[sof + 8] = 0x20;
+        long allocatedBefore = GC.GetAllocatedBytesForCurrentThread();
+        var limit = Assert.Throws<InvalidOperationException>(() => page.AddImage(jpeg, 0, 0, 100, 100));
+        Assert.Contains(RenderLimits.MaxPixelsKey, limit.Message);
+        Assert.True(GC.GetAllocatedBytesForCurrentThread() - allocatedBefore < 16 * 1024 * 1024);
+        Assert.Equal(objectsBefore, page.ObjectCount);
+        Assert.Equal(liveBefore, PdfiumRuntime.LiveHandleCount);
     }
 
     #endregion

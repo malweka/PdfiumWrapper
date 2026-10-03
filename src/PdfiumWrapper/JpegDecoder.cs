@@ -77,6 +77,9 @@ internal sealed class JpegDecoder : IDisposable
         if (info.Width <= 0 || info.Height <= 0 || size > Array.MaxLength)
             throw new InvalidDataException(
                 $"JPEG dimensions {info.Width} x {info.Height} are not supported: the decoded image would need {size:N0} bytes.");
+        // Below that, the bitmap PDFium gets is held to the render limit, so check it before allocating
+        // as well: otherwise a few hundred bytes of JPEG could still allocate up to 2 GB here first.
+        RenderLimits.Check(info.Width, info.Height, -1);
         var destBuffer = new byte[size];
 
         unsafe
