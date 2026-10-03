@@ -11,6 +11,8 @@ This guide covers efficient patterns for processing large volumes of PDF documen
 - [Merging PDF Documents](#merging-pdf-documents)
 - [Parallel Processing Strategies](#parallel-processing-strategies)
 - [Measured Capacity and Sizing](#measured-capacity-and-sizing)
+  - [Worker Pool](#worker-pool)
+  - [Pool Events and Lifecycle](#pool-events-and-lifecycle)
 - [Memory Management for Long-Running Processes](#memory-management-for-long-running-processes)
 - [Complete Examples](#complete-examples)
 
@@ -95,7 +97,7 @@ public static async Task RunAsync(string inputDirectory, string outputRoot)
             Directory.CreateDirectory(outputDirectory);
 
             int page = 0;
-            await foreach (var png in doc.StreamImageBytesAsync(ImageFormat.Png, 100, 150))
+            await foreach (var png in doc.StreamImageBytesAsync(ImageFormat.Png, 100, 150).WithCancellation(ct))
                 await File.WriteAllBytesAsync(Path.Combine(outputDirectory, $"page_{++page:D3}.png"), png, ct);
 
             Console.WriteLine($"{file}: {doc.PageCount} pages");
@@ -122,32 +124,34 @@ public static async Task<int> Main(string[] args)
 
     var files = Directory.EnumerateFiles(args[0], "*.pdf").Select(f => PdfInput.FromFile(f));
 
-    // Results arrive as they complete; submission waits when QueueCapacity jobs are queued
+    // Results arrive as they complete; submission waits while QueueCapacity + MaxWorkers x JobsPerWorker documents are in flight
     await foreach (var r in pool.ConvertToPngAsync(files, args[1], dpi: 150))
     {
         if (r.IsSuccess)
-            Console.WriteLine($"{r.Input}: {r.Value.PageCount} pages");
+            Console.WriteLine($"{r.Input}: {r.Value!.PageCount} pages");
         else
-            Console.WriteLine($"{r.Input}: {r.Status}: {r.Error}");   // Failed, TimedOut or WorkerCrashed; never an exception
+            Console.WriteLine($"{r.Input}: {r.Status}: {r.Error}");   // Failed, TimedOut, Cancelled or WorkerCrashed
     }
 
     return 0;
 }
 ```
 
-Both write `page_001.png`, `page_002.png`, ... into one directory per document. The pool adds one line to `Main`, and it reports failures as a status on the result instead of throwing.
+Both write `page_001.png`, `page_002.png`, ... into one directory per document. The pool adds one line to `Main`, and it reports the outcome of each document as a status on the result instead of throwing. The pool still throws for misuse and setup problems: `ArgumentException` for an empty input or output path, `ArgumentOutOfRangeException` for invalid `PdfPoolOptions`, `ObjectDisposedException` after the pool is disposed, `PdfPoolException` from `CreateAsync` when a worker cannot be started, and `OperationCanceledException` from a batch whose `CancellationToken` is cancelled (see [Pool Events and Lifecycle](#pool-events-and-lifecycle)).
 
 For a single document the difference is smaller still:
 
 ```csharp
 // In-process
-using var doc = new PdfDocument("invoice.pdf");
-doc.SaveAsPngs("out/invoice", "page", dpi: 150);
-string[] text = doc.ProcessAllPages(page => page.ExtractText());
+using (var doc = new PdfDocument("invoice.pdf"))
+{
+    doc.SaveAsPngs("out/invoice", "page", dpi: 150);
+    string[] pageTexts = doc.ProcessAllPages(page => page.ExtractText());
+}
 
-// Pool
-var png  = await pool.ConvertToPngAsync("invoice.pdf", "out/invoice", dpi: 150);
-var text = await pool.ExtractTextAsync("invoice.pdf");
+// Pool (pool created as above; a string converts to PdfInput)
+PdfJobResult<ImageFiles> png = await pool.ConvertToPngAsync("invoice.pdf", "out/invoice", dpi: 150);
+PdfJobResult<string[]> text = await pool.ExtractTextAsync("invoice.pdf");
 ```
 
 ### What each path gives you
@@ -155,13 +159,13 @@ var text = await pool.ExtractTextAsync("invoice.pdf");
 | | In-process | Worker pool |
 |---|---|---|
 | Rendering | One page at a time per process (the native gate). Extra callers overlap encoding and output only: about 1.25x over sequential on the mixed corpus. | One page at a time per worker, workers in parallel. 8 workers reached 4.5x one process on the 1,000-request PNG run (10.07 against 2.21 requests/s). |
-| A damaged PDF that aborts PDFium | Takes the process down. | Takes one worker down. It is replaced, the job is retried once and then reported as `WorkerCrashed`; every other job proceeds. |
+| A damaged PDF that aborts PDFium | Takes the process down. | Takes one worker down. It is replaced and the job is retried up to `MaxAttempts` (default 2) before it is reported as `WorkerCrashed`; a job that only shared the crashed worker runs again without using an attempt. Every other job proceeds. |
 | Memory | One process: about 120 to 140 MB plus one rendered page per caller in flight. | The same per worker, so 8 workers is about 1 GB. Idle workers above `MinWorkers` are stopped after `IdleTimeout` (60 s). |
-| First request | Pays native initialization once, a few milliseconds. | `MinWorkers` are started and warmed when the pool is created. A scale-up costs a few hundred milliseconds of process start. |
-| Errors | Exceptions. | A `PdfJobStatus` on every result (`Succeeded`, `Failed`, `TimedOut`, `Cancelled`, `WorkerCrashed`), with attempts, worker id and timings. |
+| First request | Pays native initialization once, a few milliseconds. | `PdfProcessingPool.CreateAsync` starts and warms `MinWorkers` before it returns; the constructor starts them in the background and the first jobs wait for them. A scale-up costs a few hundred milliseconds of process start. |
+| Errors | Exceptions. | A `PdfJobStatus` on every result (`Succeeded`, `Failed`, `TimedOut`, `Cancelled`, `WorkerCrashed`), with attempts, worker id and timings. `Failed` also covers "no worker could be started" (after `MaxConsecutiveStartFailures`) and "the pool's dispatcher stopped"; the error says which. Misuse and setup problems still throw (see above). |
 | Timeouts, retries, backpressure | Yours to write (see the patterns below). | `JobTimeout`, `MaxAttempts`, `QueueCapacity`. |
 | Operations | The whole API: render, images, text, merge, forms, metadata, bookmarks, attachments, page editing. | Page count, PNG, JPEG, TIFF, text. Merge and forms are planned. |
-| Inputs | Path, bytes, stream. | Path, bytes, stream. Bytes and streams are spooled to a temp file for the worker. |
+| Inputs | Path, bytes, stream. | Path, bytes, stream. Bytes and streams are spooled to a temp file under `TempDirectory` for the worker. |
 | Deployment | One package. | Two packages and the `TryRun` line in `Main`, or `WorkerPath` for a dedicated worker executable. Nothing extra to publish per platform. |
 
 ### When to use which
@@ -194,7 +198,7 @@ The two paths expose the same operations, so changing your mind later is a mecha
 | `doc.ProcessAllPages(p => p.ExtractText())` | `pool.ExtractTextAsync(input)` |
 | `try { ... } catch` | `if (result.IsSuccess) ... else result.Status, result.Error` |
 
-Each pool method also takes an `IEnumerable<PdfInput>` and returns results in completion order.
+Each pool method also takes an `IEnumerable<PdfInput>` and returns results in completion order. In the batch form the output argument is a root directory, not a per-document path: image batches write into `{outputRoot}/{document name}/`, and the TIFF batch writes `{outputRoot}/{document name}.tiff`. See [Batches](#batches).
 
 ---
 
@@ -223,15 +227,16 @@ public void ConvertPdfToTiffStream(string pdfPath, Stream output, int dpi = 200)
     doc.SaveAsTiff(output, dpi);
 }
 
-// Async version: waits for the native gate without blocking a thread
-public async Task ConvertPdfToTiffAsync(string pdfPath, string outputPath, int dpi = 200)
+// Async version: waits for the native gate without blocking a thread.
+// The token is checked before each page; a cancelled export deletes the partly written file.
+public async Task ConvertPdfToTiffAsync(string pdfPath, string outputPath, int dpi = 200, CancellationToken ct = default)
 {
     using var doc = new PdfDocument(pdfPath);
-    await doc.SaveAsTiffAsync(outputPath, dpi);
+    await doc.SaveAsTiffAsync(outputPath, dpi, cancellationToken: ct);
 }
 ```
 
-The TIFF pipeline renders each page at native resolution, converts BGRA pixels to the target format (bilevel or grayscale) using optimized unsafe code, and writes scanlines directly to libtiff with pinned buffers — no managed array copies per row.
+The TIFF pipeline renders each page straight into an 8-bit gray PDFium bitmap (a quarter of the memory of a BGRA render), thresholds it to 1 bit (bilevel) or copies it (grayscale) with unsafe code outside the native gate, and writes scanlines directly to libtiff with pinned buffers — no managed array copies per row. Text edges are anti-aliased slightly differently at 8 bits, so a TIFF page is not pixel-identical to the PNG or JPEG render of the same page.
 
 ### Converting to PNG/JPEG (Built-in)
 
@@ -277,6 +282,15 @@ public async Task ProcessPdfPageImagesAsync(string pdfPath, ImageFormat format, 
     {
         await File.WriteAllBytesAsync($"page_{i++}.png", bytes);
     }
+}
+```
+
+`StreamImageBytesAsync` and `StreamJpegBytesAsync` take no `CancellationToken` parameter. Cancel them with `WithCancellation`; the token is checked before each page:
+
+```csharp
+await foreach (var bytes in doc.StreamImageBytesAsync(ImageFormat.Jpeg, 90, 200).WithCancellation(ct))
+{
+    // ...
 }
 ```
 
@@ -407,7 +421,7 @@ public byte[] MergePdfsToBytes(string[] inputPaths)
 PDFium allows **one native call per process at a time**, across all documents. Its fonts, caches and reference counts are shared between documents, so separate documents do not isolate it. PdfiumWrapper serializes native work itself through one process-wide gate (`PdfiumRuntime`):
 
 - **Inside the gate (one caller at a time):** loading, page rendering, text extraction, form access, page import, saving a PDF.
-- **Outside the gate (callers overlap):** BGRA pixel conversion, PNG/JPEG/TIFF encoding, and writing output files or streams.
+- **Outside the gate (callers overlap):** pixel conversion (gray to bilevel or grayscale for TIFF), PNG/JPEG/TIFF encoding, and writing output files or streams.
 
 Consequences for a batch:
 
@@ -415,7 +429,7 @@ Consequences for a batch:
 - Parallel callers gain throughput only from the encode and output share of the work. One caller's encoding runs while another caller renders. Native rendering is not multiplied by adding threads.
 - Work that is almost entirely native (text extraction, merging, form filling) gains little or nothing from more callers in one process.
 - One `PdfDocument`, `PdfPage`, `PdfForm` or `PdfMerger` must still be used by one thread at a time. Splitting one document's pages across threads is not supported.
-- Bound the number of callers. Each caller in flight holds a rendered page (about 32 MiB for US Letter at 300 DPI), and callers beyond what the encode share can use only wait for the gate. Do not set the degree of parallelism to `Environment.ProcessorCount` blindly; see [Measured Capacity and Sizing](#measured-capacity-and-sizing).
+- Bound the number of callers. Each caller in flight holds a rendered page (for US Letter at 300 DPI about 32 MiB as BGRA for PNG/JPEG, about 8 MiB as 8-bit gray for TIFF), and callers beyond what the encode share can use only wait for the gate. Do not set the degree of parallelism to `Environment.ProcessorCount` blindly; see [Measured Capacity and Sizing](#measured-capacity-and-sizing).
 - Async methods wait for the gate without blocking a thread. Synchronous methods, including constructors, block the calling thread while they wait. With 192 concurrent conversions on a thread pool pinned to 24 threads, a heartbeat work item waited 1.6 ms (p99) when the conversions used the async API and about 2.5 s when they called the synchronous API from pool threads.
 
 ### Pattern 1: Bounded Parallel Conversion of Different Files
@@ -436,7 +450,7 @@ public async Task ConvertMultiplePdfsAsync(string[] pdfPaths, string outputDirec
             Path.GetFileNameWithoutExtension(pdfPath) + ".tiff");
         
         // Waits for the native gate without blocking a thread-pool thread
-        await doc.SaveAsTiffAsync(outputPath, 200);
+        await doc.SaveAsTiffAsync(outputPath, 200, cancellationToken: ct);
     });
 }
 ```
@@ -492,7 +506,7 @@ public class PdfProcessor
                 // One encoded page in memory at a time; the gate is awaited, not blocked on
                 var baseName = Path.GetFileNameWithoutExtension(pdfPath);
                 int pageNumber = 0;
-                await foreach (var bytes in doc.StreamImageBytesAsync(ImageFormat.Jpeg, 90, 200))
+                await foreach (var bytes in doc.StreamImageBytesAsync(ImageFormat.Jpeg, 90, 200).WithCancellation(ct))
                 {
                     var outputPath = Path.Combine(_outputDirectory, $"{baseName}_{++pageNumber:D3}.jpg");
                     await File.WriteAllBytesAsync(outputPath, bytes, ct);
@@ -553,7 +567,11 @@ For more throughput on native-only work, scale out across processes (see below).
 
 ## Measured Capacity and Sizing
 
-These figures come from one machine (Intel Core i7-13700F, 8 performance and 8 efficiency cores, 24 logical processors, NVMe SSD, Windows 11, .NET 8.0.31, PDFium 150.0.7869.0) and the repository's five test documents (62 pages). They show the shape of the scaling. They do not size your deployment; measure on your hardware with your documents. The full record is in `benchmark.md`.
+These figures come from one machine (Intel Core i7-13700F, 8 performance and 8 efficiency cores, 24 logical processors, NVMe SSD, Windows 11) and the repository's five test documents (62 pages).
+
+> **Measured before the .NET 10 upgrade.** Every figure in this section was recorded on .NET 8.0.31 with PDFium 150.0.7869.0. The library now targets .NET 10 and ships PDFium chromium/8076, and the figures have not been re-measured. Treat absolute rates as approximate; the shape of the scaling (one gate per process, near-linear across processes) is a property of the design and does not depend on those versions.
+
+They show the shape of the scaling. They do not size your deployment; measure on your hardware with your documents. The full record is in [`benchmark.md`](../benchmark.md).
 
 **One process.** 200 jobs enqueued at once (2,480 pages), half bilevel TIFF, 30% PNG, 20% JPEG, 200 DPI, output written to disk:
 
@@ -566,7 +584,7 @@ These figures come from one machine (Intel Core i7-13700F, 8 performance and 8 e
 | 16 | 1.62 | 20.1 | 387 MB |
 | 24 | 1.62 | 20.1 | 493 MB |
 
-> **Note:** half of this mix is bilevel TIFF, measured before TIFF output switched to 8-bit gray rendering. TIFF conversion is now 27% to 39% faster on text documents (see `benchmark.md`), so a TIFF-heavy workload will measure higher than this table. The ceiling still comes from rendering being serialized in one process, so the shape of the scaling is the same.
+> **Note:** half of this mix is bilevel TIFF, measured before TIFF output switched to 8-bit gray rendering. TIFF conversion is now 27% to 39% faster on text documents (see [`benchmark.md`](../benchmark.md)), so a TIFF-heavy workload will measure higher than this table. The ceiling still comes from rendering being serialized in one process, so the shape of the scaling is the same.
 
 With 8 callers the gate was held 99.8% of the time. Rendering is the serialized part and it dominates, so one process tops out at about 1.25 times its sequential rate. Two to four callers reach that ceiling; more only use memory. By format, the gain from extra callers was 1.11x for bilevel TIFF, 1.09x for JPEG and 1.45x for PNG, whose encoding is the largest share.
 
@@ -626,6 +644,8 @@ public static async Task<int> Main(string[] args)
         MaxWorkers = 8,                    // default: half the logical processors
     });
 
+    var files = Directory.EnumerateFiles(args[0], "*.pdf").Select(f => PdfInput.FromFile(f));
+
     await foreach (var r in pool.ConvertToPngAsync(files, "out", dpi: 150))
         Console.WriteLine($"{r.Input}: {r.Status}");
 
@@ -636,8 +656,8 @@ public static async Task<int> Main(string[] args)
 What it gives you over the patterns above:
 
 - **Parallel rendering.** Each worker is a separate process with its own PDFium, so workers render at the same time. The pool reaches the throughput of the replica table above from inside one application.
-- **Dynamic size.** Workers are added when every worker is busy and jobs are waiting (after `ScaleUpAfter`, 500 ms) and removed when idle (after `IdleTimeout`, 60 s), between `MinWorkers` and `MaxWorkers`. A burst scales up within seconds; quiet periods cost only `MinWorkers` of memory.
-- **Crash isolation.** A native abort on a damaged PDF kills one worker, which is replaced; the job is reported as `WorkerCrashed` (after a retry) and every other job proceeds. A job that shared the worker runs again without using one of its attempts. In-process, that abort would take the service down.
+- **Dynamic size.** Workers are added when every job slot is taken (each worker runs `JobsPerWorker` jobs at once, default 2) and jobs are waiting (after `ScaleUpAfter`, 500 ms), and removed when idle (after `IdleTimeout`, 60 s), between `MinWorkers` and `MaxWorkers`. A burst scales up within seconds; quiet periods cost only `MinWorkers` of memory.
+- **Crash isolation.** A native abort on a damaged PDF kills one worker, which is replaced; the job is retried up to `MaxAttempts` (default 2) and then reported as `WorkerCrashed`, and every other job proceeds. A job that only shared the crashed worker runs again, alone, without using one of its attempts, so a job that crashes every time can run up to three times with the defaults. In-process, that abort would take the service down.
 - **Backpressure, timeouts, retries, cancellation**, and a typed API: `GetPageCountAsync`, `ConvertToPngAsync`, `ConvertToJpegAsync`, `ConvertToTiffAsync`, `ExtractTextAsync`, single or batch. See the [API reference](API-REFERENCE.md#pdfprocessingpool-pdfiumwrapperprocessing).
 
 What it costs: about 120 to 140 MB per worker on the mix above, and a few hundred milliseconds of process start when the pool grows.
@@ -653,9 +673,91 @@ Measured on the machine above with the same 1,000-request scenario (page count p
 | Pool, 16 workers | 12.11 | 1,823 MB |
 | 8 independent processes (replicas) | 10.86 | 953 MB |
 
-A warm pool of 8 is within 7% of 8 replicas; a cold pool reached 8 workers 4.5 s into the burst. Full record in `benchmark.md`.
+A warm pool of 8 is within 7% of 8 replicas; a cold pool reached 8 workers 4.5 s into the burst. Measured on .NET 8 with PDFium 7869, like the tables above. Full record in [`benchmark.md`](../benchmark.md).
 
 When you already run replicas behind a queue, keep doing that; the pool is for the single-deployable case and for applications that want the orchestration done for them.
+
+### Pool Events and Lifecycle
+
+#### Observing the pool
+
+`pool.Events` (`EventHandler<PdfPoolEvent>`) reports everything the pool does. Handlers run on pool threads, must be quick and must not throw. Each event has a `Kind`, the `WorkerPid` and `JobId` involved (0 when none), a `Detail` text and a `Timestamp`.
+
+```csharp
+pool.Events += (_, e) =>
+{
+    if (e.Kind is PdfPoolEventKind.WorkerMessage or PdfPoolEventKind.WorkerCrashed or PdfPoolEventKind.JobRetried)
+        Console.Error.WriteLine(e);   // e.g. "WorkerMessage worker=1234 job=0 <text>"
+};
+```
+
+| Kind | Raised when |
+|---|---|
+| `WorkerStarting`, `WorkerReady`, `WorkerStartFailed` | A worker process is started, reports ready, or fails to start. |
+| `WorkerStopped` | The pool killed a worker: after a job's timeout, after a cancelled job ignored its grace period, or because the dispatcher stopped. `Detail` gives the reason. |
+| `WorkerCrashed` | A worker exited without being asked to, or could not be sent a job, or sent a frame the pool did not expect. |
+| `WorkerRetiredForMemory` | A worker exceeded `MaxWorkerMemoryBytes` and is draining. |
+| `ScaledUp`, `ScaledDown` | The sizer started a worker because jobs were waiting, or stopped one idle for `IdleTimeout`. |
+| `JobDispatched`, `JobCompleted`, `JobFailed`, `JobTimedOut`, `JobRetried`, `JobCancelled` | A job's progress. |
+| `QueueFull` | A submission has to wait because `QueueCapacity` jobs are already queued. |
+| `WorkerMessage` | A line the worker wrote to standard error, or a problem the pool saw on the worker's protocol stream. A line longer than 4,096 characters is cut and ends with ` [truncated]`. |
+
+Worker stderr is reported only as `WorkerMessage`. Write diagnostics from a worker to `Console.Error`; standard output carries the protocol and must not be written to.
+
+For polling, `Workers` (alive, starting included), `BusyWorkers` (at least one job in flight), `RunningJobs`, `QueuedJobs` and `Statistics` (a `PdfPoolStatistics` snapshot of counters since creation: jobs submitted, succeeded, failed, timed out, cancelled, crashed and retried; workers started, stopped, crashed and retired for memory; scale-ups and scale-downs) give the current state.
+
+#### Creating the pool
+
+- `await PdfProcessingPool.CreateAsync(options)` starts `MinWorkers` workers and waits until they are ready. If one cannot start it throws `PdfPoolException`, and the pool is disposed.
+- `new PdfProcessingPool(options)` returns at once and starts `MinWorkers` in the background; the first jobs wait for them, and a start failure surfaces only through job results.
+- Invalid options throw `ArgumentOutOfRangeException` from either: `MinWorkers` at least 0 and at most `MaxWorkers`, `MaxWorkers` at least 1, `JobsPerWorker` between 1 and 16, `MaxAttempts`, `QueueCapacity` and `MaxConsecutiveStartFailures` at least 1. A `WorkerPath` that does not exist throws `PdfPoolException`.
+
+#### Timeouts and start failures
+
+- `JobTimeout` (default 2 minutes) bounds one attempt; the worker is killed and the job retried or reported `TimedOut`. `WorkerStartTimeout` (default 30 s) bounds process start, native initialization and warm-up.
+- Both must be positive and at most `PdfPoolOptions.MaxTimeout`, about 49.7 days (the limit of .NET timers). There is no infinite timeout; use `MaxTimeout` for "practically never".
+- After `MaxConsecutiveStartFailures` (default 3) failed starts in a row with no worker alive, every job waiting for a worker ends `Failed` with the last start error. A successful start resets the count.
+
+#### Workers
+
+- **Executable.** By default a worker is a copy of your own executable, which is why `PdfWorkerHost.TryRun()` must be the first statement of `Main`. Set `WorkerPath` to use a dedicated worker executable instead (its `Main` also calls `TryRun()`). A `.dll` path is started through `dotnet`; `WorkerArguments` and `WorkerEnvironment` are passed to the worker:
+
+  ```csharp
+  var options = new PdfPoolOptions
+  {
+      WorkerPath = Path.Combine(AppContext.BaseDirectory, "MyPdfWorker.dll"),
+  };
+  options.WorkerEnvironment["DOTNET_gcServer"] = "0";
+  await using var pool = await PdfProcessingPool.CreateAsync(options);
+  ```
+
+- **Working directory.** Workers run with `AppContext.BaseDirectory` as their working directory. The pool turns relative input and output paths into absolute paths before it sends them.
+- **Lifetime.** On Windows every worker is placed in a job object that kills it when the host process ends, a crash included. On Linux and macOS (and on Windows if a worker cannot be placed in the job) a worker whose standard input closes cancels its jobs and exits; if they have not stopped within 5 seconds it exits anyway with exit code 5. Workers therefore never outlive the host.
+- **Memory.** With `MaxWorkerMemoryBytes` set, a worker whose working set exceeds it after a job is retired: it takes no new job, the jobs it is running finish (each within its `JobTimeout`), and then it is shut down and replaced. Retirement never kills a running job.
+- **Render limit.** The `PdfiumWrapper.MaxRenderPixels` cap applies inside each worker, but `AppContext.SetData` in the host does not reach worker processes. To change it for workers, call `AppContext.SetData` before `PdfWorkerHost.TryRun()`, or set it in the project file so it is in the runtime config of every process started from that executable (the worker executable's own project when you use `WorkerPath`):
+
+  ```xml
+  <ItemGroup>
+    <RuntimeHostConfigurationOption Include="PdfiumWrapper.MaxRenderPixels" Value="536870912" />
+  </ItemGroup>
+  ```
+
+#### Temporary files
+
+Each pool creates its own folder `pdfium-pool-{pid}-{guid}` under `PdfPoolOptions.TempDirectory` (default: the system temp directory) and deletes it on disposal. Byte-array and stream inputs are spooled there for the worker, and a text extraction result larger than 4 MiB is written there by the worker instead of being sent inline. Workers learn the folder from the `PDFIUMWRAPPER_WORKER_TEMP` environment variable, and the pool reads a text result file only from that folder. Point `TempDirectory` at a volume with room for the inputs in flight.
+
+#### Batches
+
+The batch overloads take an `IEnumerable<PdfInput>` and yield results in completion order.
+
+- **Output layout.** Image batches write each document into `{outputRoot}/{name}/`; the TIFF batch writes `{outputRoot}/{name}.tiff`. `{name}` is the input's file name without its extension. Characters not allowed in file names become `_`, and an empty name, `.`, `..`, or a name ending in a dot or a space becomes `document`. Names are compared ignoring case after normalization, and a name that repeats in the batch gets `-2`, `-3`, ... appended, so documents never write over each other. Every output stays directly under `outputRoot`.
+- **Bounds.** The input sequence is enumerated up front, but inputs are spooled and submitted only as room frees: at most `QueueCapacity + MaxWorkers x JobsPerWorker` documents are in any stage at once (spooled, queued, running, or finished but not yet read by you).
+- **Leaving early.** Breaking out of the `await foreach` (or an exception in its body) cancels every outstanding job of that batch and stops submission. Those jobs end `Cancelled` and leave no output.
+- **Cancelling.** Cancelling the batch's `CancellationToken` makes the enumeration throw `OperationCanceledException`, and the batch's outstanding jobs are cancelled. The single-document methods report a cancelled token as the `Cancelled` status instead.
+
+#### Output files
+
+A job that does not succeed leaves no output. Image pages are staged as `<name>.<jobId>.tmp` and renamed only once every page is written; a crashed or killed worker's staged files are removed by the pool. A job never deletes a file it did not write.
 
 ---
 
@@ -663,19 +765,19 @@ When you already run replicas behind a queue, keep doing that; the pool is for t
 
 ### Where the Memory Goes
 
-Most memory used while processing PDFs is native: PDFium's document and font data, and rendered bitmaps. A US Letter page rendered as BGRA at 300 DPI is about 32 MiB. This memory is released by `Dispose()`, not by the garbage collector.
+Most memory used while processing PDFs is native: PDFium's document and font data, and rendered bitmaps. A US Letter page rendered as BGRA at 300 DPI (PNG, JPEG, `RenderPages`) is about 32 MiB; TIFF output renders in 8-bit gray, about 8 MiB for the same page. This memory is released by `Dispose()`, not by the garbage collector.
 
 - Dispose every document, page, form and merger. If one is dropped without `Dispose()`, its finalizer does not call PDFium; it queues the native handles and the next PdfiumWrapper operation on any thread closes them (`PdfiumRuntime.ReleasePending()` does so on demand). That delays the release of native memory, so treat it as a safety net.
 - Do not force garbage collection between documents or batches. It does not release PDF memory and only pauses the process.
 - `RenderPages` / `RenderPagesAsync` buffer the whole document: every page is held as a managed `byte[]` until the call returns, so a 100-page document at 300 DPI needs about 3.3 GB. For large documents prefer `StreamImageBytes` / `StreamImageBytesAsync` or the `SaveAs...` methods, which hold one page at a time.
-- Every render is capped at 268,435,456 pixels (1 GiB as BGRA). The cap is checked before PDFium allocates the bitmap, so a PDF with a huge page box, or a mistaken DPI, fails fast with an `InvalidOperationException` that names the page and its pixel size. Without the cap, such a file could force a multi-GiB allocation per caller. A DPI of zero or less throws `ArgumentOutOfRangeException`. The cap applies to each bitmap: with N concurrent callers, up to N bitmaps of that size can exist at once. Raise or lower it with the `PdfiumWrapper.MaxRenderPixels` `AppContext` data key (pixels):
+- Every render is capped at 268,435,456 pixels (1 GiB as BGRA). The cap is checked before PDFium allocates the bitmap, so a PDF with a huge page box, or a mistaken DPI, fails fast with an `InvalidOperationException` that names the page and its pixel size. Without the cap, such a file could force a multi-GiB allocation per caller. A DPI, width or height of zero or less throws `ArgumentOutOfRangeException`. The cap applies to each bitmap: with N concurrent callers, up to N bitmaps of that size can exist at once. Raise or lower it with the `PdfiumWrapper.MaxRenderPixels` `AppContext` data key (pixels):
 
   ```csharp
   // A service that only renders ordinary pages can afford a tighter bound per caller.
   AppContext.SetData("PdfiumWrapper.MaxRenderPixels", 64L * 1024 * 1024);
   ```
 
-  The worker pool's `MaxWorkerMemoryBytes` bounds a whole worker process. This cap also protects in-process callers and bounds each render inside a worker.
+  The worker pool's `MaxWorkerMemoryBytes` bounds a whole worker process. This cap also protects in-process callers and bounds each render inside a worker, but a value set with `AppContext.SetData` in the host does not reach the workers; see [Pool Events and Lifecycle](#pool-events-and-lifecycle) for how to change it there.
 - Saving a PDF (`Save`, `SaveToStream`, `PdfMerger.Save`, `PdfMerger.ToBytes`) serializes the whole output into a pooled in-memory buffer and writes it to the file or stream afterwards. Peak memory includes the full output size.
 - Bound the number of concurrent callers: each one in flight holds a rendered page.
 
@@ -943,7 +1045,6 @@ public class PdfTextExtractor
         doc.ProcessAllPages(page =>
         {
             pageTexts[page.PageIndex] = page.ExtractText();
-            return true; // Return value required by Func<>
         });
         
         return new PdfTextIndex(pdfPath, doc.PageCount, pageTexts);
@@ -975,7 +1076,10 @@ public class PdfTextExtractor
 ```csharp
 public class PdfMergeService
 {
-    public async Task<byte[]> MergeAsync(string[] pdfPaths, IProgress<string>? progress = null)
+    // PdfMerger is synchronous. From a UI or request thread, run the whole merge with
+    // Task.Run(() => service.Merge(paths, progress)); do not use await Task.Yield() for this,
+    // which posts back to the caller's SynchronizationContext.
+    public byte[] Merge(string[] pdfPaths, IProgress<string>? progress = null)
     {
         using var merger = new PdfMerger();
         
@@ -985,9 +1089,6 @@ public class PdfMergeService
             progress?.Report($"Adding document {i + 1}/{pdfPaths.Length}: {Path.GetFileName(path)}");
             
             merger.AppendDocument(path);
-            
-            // Yield to allow progress updates
-            await Task.Yield();
         }
         
         progress?.Report("Generating final PDF...");

@@ -21,33 +21,26 @@ This guide covers common issues and their solutions when using PdfiumWrapper.
 
 **Symptom:** `DllNotFoundException` or `Unable to load DLL 'pdfium'`
 
+The native libraries ship in four runtime packages (`PdfiumWrapper.runtime.win-x64`, `linux-x64`, `osx-x64`, `osx-arm64`) that `PdfiumWrapper` depends on, so no `RuntimeIdentifier` is needed:
+
+- a portable build puts every platform under `runtimes/<rid>/native` in the output and loads the matching one;
+- a RID-specific build or publish (`-r linux-x64`) copies only its own platform.
+
 **Causes and Solutions:**
 
-1. **Missing runtime identifier**
-   
-   Ensure your project targets the correct runtime:
-   ```xml
-   <PropertyGroup>
-     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
-   </PropertyGroup>
-   ```
-   
-   Or for multiple platforms:
-   ```xml
-   <PropertyGroup>
-     <RuntimeIdentifiers>win-x64;linux-x64;osx-x64;osx-arm64</RuntimeIdentifiers>
-   </PropertyGroup>
-   ```
+1. **The natives are not in the output**
 
-2. **Self-contained deployment without native binaries**
-   
-   When publishing self-contained, ensure native libraries are included:
-   ```bash
-   dotnet publish -c Release -r win-x64 --self-contained true
-   ```
+   Check that the output contains `runtimes/<rid>/native/` with `pdfium.dll` / `libpdfium.so` / `libpdfium.dylib` for your platform.
+   - If they are missing, check that the `PdfiumWrapper.runtime.*` packages were restored (`dotnet list package --include-transitive`).
+   - If you copy files into a container or deployment by hand, include the `runtimes` folder.
+   - Publishing for a platform other than the four supported RIDs (for example `linux-arm64` or `linux-musl-x64`) gets no natives.
+
+2. **Windows: Visual C++ runtime missing**
+
+   `tiff.dll` and `pdfium_png.dll` need the Visual C++ 2015-2022 x64 runtime. See [Windows](#windows) below.
 
 3. **Linux missing dependencies**
-   
+
    PDFium may require additional libraries:
    ```bash
    # Ubuntu/Debian
@@ -63,12 +56,14 @@ This guide covers common issues and their solutions when using PdfiumWrapper.
 
 ### "Failed to load PDF document"
 
-**Symptom:** `InvalidOperationException: Failed to load PDF document`
+**Symptom:** `PdfiumException: Failed to load PDF document: <reason> (PDFium error N).`
+
+`PdfiumException` derives from `InvalidOperationException`. Its `ErrorCode` (`PdfiumErrorCode`) says why the load failed; see [Error Codes](#error-codes).
 
 **Possible Causes:**
 
-1. **File doesn't exist**
-   ```csharp
+1. **File doesn't exist** (`ErrorCode == PdfiumErrorCode.File`)
+```csharp
    // Check file exists first
    if (!File.Exists(path))
        throw new FileNotFoundException($"PDF not found: {path}");
@@ -76,8 +71,8 @@ This guide covers common issues and their solutions when using PdfiumWrapper.
    using var document = new PdfDocument(path);
    ```
 
-2. **File is corrupted**
-   ```csharp
+2. **File is corrupted** (`ErrorCode == PdfiumErrorCode.Format`)
+```csharp
    // Validate PDF header
    byte[] header = new byte[5];
    using var fs = File.OpenRead(path);
@@ -87,16 +82,15 @@ This guide covers common issues and their solutions when using PdfiumWrapper.
        throw new InvalidDataException("Not a valid PDF file");
    ```
 
-3. **File is password-protected**
+3. **File is password-protected** (`ErrorCode == PdfiumErrorCode.Password`)
    ```csharp
-   // Try with password
    try
    {
        using var document = new PdfDocument(path, password: "secret");
    }
-   catch (InvalidOperationException ex) when (ex.Message.Contains("Error"))
+   catch (PdfiumException ex) when (ex.ErrorCode == PdfiumErrorCode.Password)
    {
-       Console.WriteLine("Incorrect password or encrypted PDF");
+       Console.WriteLine("Missing or wrong password");
    }
    ```
 
@@ -235,8 +229,7 @@ A DPI, width or height of zero or less throws `ArgumentOutOfRangeException` inst
    - Use a PDF editor to verify form fields exist
 
 2. **XFA forms**
-   - XFA forms are partially supported
-   - Check if fields are XFA type in the form field list
+   - XFA forms are not supported: the bundled PDFium is built without XFA, so only the AcroForm fields of a hybrid form are visible
 
 ### Form Field Not Found
 
@@ -334,12 +327,10 @@ A DPI, width or height of zero or less throws `ArgumentOutOfRangeException` inst
 
 2. **Process pages one at a time**
    ```csharp
-   for (int i = 0; i < document.PageCount; i++)
+   document.ProcessAllPages(page =>
    {
-       using var page = document.GetPage(i);
-       // Process single page
-       // Page is disposed after each iteration
-   }
+       // Process a single page; it is disposed before the next one is loaded
+   });
    ```
 
 3. **Don't hold all bitmaps in memory**
@@ -347,12 +338,8 @@ A DPI, width or height of zero or less throws `ArgumentOutOfRangeException` inst
    // ❌ Holds all bitmaps in memory
    var bitmaps = document.RenderPages(300);
 
-   // ✅ Process one at a time
-   for (int i = 0; i < document.PageCount; i++)
-   {
-       using var page = document.GetPage(i);
-       // Render, save, dispose immediately
-   }
+   // ✅ Encode and write one page at a time
+   document.SaveAsPngs("output", dpi: 300);
    ```
 
 4. **Stream encoded pages instead of collecting them, and bound how many documents are processed at once**
@@ -390,20 +377,22 @@ A DPI, width or height of zero or less throws `ArgumentOutOfRangeException` inst
    // ❌ Memory leak
    var doc = new PdfDocument("file.pdf");
    // doc never disposed
-   
+   ```
+
+   ```csharp
    // ✅ Proper disposal
    using var doc = new PdfDocument("file.pdf");
    ```
 
 2. **Not disposing PdfPage**
+
+   A page stays loaded until it is disposed or its document is disposed. In a long-lived document, that adds up.
    ```csharp
-   // ❌ Memory leak
+   // ❌ Every page stays loaded until the document is disposed (GetAllPages is obsolete)
    var pages = document.GetAllPages();
-   // pages never disposed
-   
-   // ✅ Dispose each page
-   foreach (var page in pages)
-       page.Dispose();
+
+   // ✅ One page at a time, disposed automatically
+   document.ProcessAllPages(page => Console.WriteLine(page.ExtractText().Length));
    ```
 
 3. **Holding all rendered pages in memory**
@@ -411,11 +400,10 @@ A DPI, width or height of zero or less throws `ArgumentOutOfRangeException` inst
    // ❌ High memory usage: all bitmaps in memory at once
    var bitmaps = document.RenderPages(300);
 
-   // ✅ Process pages one at a time instead
-   for (int i = 0; i < document.PageCount; i++)
+   // ✅ Stream encoded pages one at a time instead
+   foreach (var bytes in document.StreamImageBytes(ImageFormat.Png, dpi: 300))
    {
-       using var page = document.GetPage(i);
-       // Render and process single page
+       // write or upload bytes
    }
    ```
 
@@ -455,7 +443,7 @@ PdfiumWrapper 2.0 serializes native work itself through one process-wide gate (`
    await Parallel.ForEachAsync(files, new ParallelOptions { MaxDegreeOfParallelism = 4 }, async (file, ct) =>
    {
        using var doc = new PdfDocument(file);
-       await doc.SaveAsTiffAsync(Path.ChangeExtension(file, ".tiff"), 200);
+       await doc.SaveAsTiffAsync(Path.ChangeExtension(file, ".tiff"), 200, cancellationToken: ct);
    });
    ```
 
@@ -482,9 +470,9 @@ Using a disposed document, page, form or page object does not reach native code;
 
 A native abort inside PDFium cannot be caught as a .NET exception; it ends the hosting process.
 
-As a characterization, 25 deliberately damaged inputs were processed in a child process on win-x64 and linux-x64: each of the five test fixtures truncated at 25%, 50% and 75%, with 1% of its bytes flipped, and with its cross-reference data zeroed. Every input was either rejected with `InvalidOperationException` (PDFium error 3) or processed. None aborted the process.
+As a characterization, 25 deliberately damaged inputs were processed in a child process on win-x64 and linux-x64: each of the five test fixtures truncated at 25%, 50% and 75%, with 1% of its bytes flipped, and with its cross-reference data zeroed. Every input was either rejected with `PdfiumException` (`PdfiumErrorCode.Format`, PDFium error 3) or processed. None aborted the process.
 
-That sample does not prove PDFium never aborts. Services that must survive hostile input should run conversions in a separate process, so a native abort takes down a worker and not the service.
+That sample does not prove PDFium never aborts. Services that must survive hostile input should run conversions in a separate process, so a native abort takes down a worker and not the service. The `PdfiumWrapper.Processing` package does this: see [Worker Pool](HIGH-THROUGHPUT-PROCESSING.md#worker-pool). A job whose worker dies is reported as `WorkerCrashed` after its retries.
 
 ### ObjectDisposedException After Disposing a Document
 
@@ -543,7 +531,9 @@ await document.SaveAsTiffAsync(outputPath, 200);
 
 **Issue:** DLL not found on Windows Server
 
-**Solution:** Install Visual C++ Redistributable:
+**Cause:** `tiff.dll` and `pdfium_png.dll` link against the Visual C++ 2015-2022 x64 runtime (`VCRUNTIME140.dll`). It is present on most machines but can be missing on a minimal Windows Server or Windows container image. `pdfium.dll` and `turbojpeg.dll` do not need it, so documents load while TIFF or PNG output fails.
+
+**Solution:** Install the Visual C++ Redistributable:
 ```
 https://aka.ms/vs/17/release/vc_redist.x64.exe
 ```
@@ -565,18 +555,27 @@ fc-cache -f -v
 
 **Issue:** Library not signed (Gatekeeper)
 
+The packaged dylibs are ad-hoc signed and carry no quarantine attribute, and NuGet does not add one. This only happens to binaries copied by hand, for example downloaded in a browser or rebuilt locally.
+
 **Solution:**
 ```bash
-# Remove quarantine attribute
+# Remove the quarantine attribute and re-sign ad hoc
 xattr -d com.apple.quarantine /path/to/libpdfium.dylib
+codesign --force --sign - /path/to/libpdfium.dylib
 ```
 
 **Issue:** ARM64 vs x64 mismatch on Apple Silicon
 
-**Solution:** Ensure correct runtime identifier:
-```xml
-<RuntimeIdentifier>osx-arm64</RuntimeIdentifier>
+A portable build carries both `osx-arm64` and `osx-x64` binaries and loads the one matching the process architecture. A process running under Rosetta (an x64 `dotnet`) loads the x64 binaries.
+
+**Solution:** Run with the native ARM64 .NET runtime, or publish for one architecture:
+```bash
+dotnet publish -c Release -r osx-arm64
 ```
+
+**Issue:** Text looks lighter than in 1.0
+
+2.0 renders text with PDFium's own rasterizer on macOS (`FPDF_NO_NATIVETEXT`), as on Windows and Linux, instead of CoreGraphics. This is intended: output now matches the other platforms.
 
 ### Docker
 
@@ -596,8 +595,8 @@ RUN apt-get update && apt-get install -y \
 FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build
 WORKDIR /src
 COPY . .
-RUN dotnet restore
-RUN dotnet publish -c Release -o /app/publish
+# -r linux-x64 copies only the Linux natives. Without it the publish works too, but carries every platform.
+RUN dotnet publish -c Release -r linux-x64 --self-contained false -o /app/publish
 
 FROM base AS final
 WORKDIR /app
@@ -609,17 +608,18 @@ ENTRYPOINT ["dotnet", "YourApp.dll"]
 
 ## Error Codes
 
-PDFium returns error codes that can help diagnose issues. The error code is included in exception messages.
+A document that fails to load throws `PdfiumException`. Its `ErrorCode` is PDFium's `FPDF_GetLastError` value as a `PdfiumErrorCode`:
 
-| Error Code | Meaning | Common Causes |
-|------------|---------|---------------|
-| 0 | Success | N/A |
-| 1 | Unknown error | Corrupted PDF, internal error |
-| 2 | File not found | File path incorrect |
-| 3 | Invalid format | Not a valid PDF file |
-| 4 | Password required | PDF is encrypted |
-| 5 | Unsupported security | Encryption method not supported |
-| 6 | Page not found | Invalid page index |
+| `PdfiumErrorCode` | Value | Meaning | Common Causes |
+|-------------------|-------|---------|---------------|
+| `Unknown` | 1 | No specific reason | Corrupted PDF, internal error |
+| `File` | 2 | File not found or could not be opened | Wrong path, file locked or unreadable |
+| `Format` | 3 | Not a PDF, or corrupted | Truncated or damaged file, wrong file type |
+| `Password` | 4 | Password missing or wrong | Encrypted PDF |
+| `Security` | 5 | Unsupported security handler | Encryption method PDFium does not support |
+| `Page` | 6 | A page was not found or its content is broken | Damaged page tree |
+
+Only document loads carry an error code. Other native failures, such as a page that cannot be loaded (`Failed to load page index N.`) or a failed save, throw a plain `InvalidOperationException`.
 
 ### Checking Error Codes
 
@@ -628,12 +628,21 @@ try
 {
     using var document = new PdfDocument("file.pdf");
 }
-catch (InvalidOperationException ex)
+catch (PdfiumException ex)
 {
-    // Error code is in the message
-    Console.WriteLine(ex.Message);
-    // Output: "Failed to load PDF document. Error: 4"
-    // Error 4 = Password required
+    switch (ex.ErrorCode)
+    {
+        case PdfiumErrorCode.Password:
+            Console.WriteLine("Ask the user for a password");
+            break;
+        case PdfiumErrorCode.Format:
+            Console.WriteLine("Not a PDF, or damaged");
+            break;
+        default:
+            // Message: "Failed to load PDF document: <reason> (PDFium error N)."
+            Console.WriteLine(ex.Message);
+            break;
+    }
 }
 ```
 

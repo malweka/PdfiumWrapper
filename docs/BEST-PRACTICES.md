@@ -41,18 +41,24 @@ Each worker has its own `PdfDocument`. Bound the degree of parallelism: every ca
 await Parallel.ForEachAsync(pdfFiles, new ParallelOptions { MaxDegreeOfParallelism = 4 }, async (file, ct) =>
 {
     using var document = new PdfDocument(file);
-    await document.SaveAsTiffAsync(Path.ChangeExtension(file, ".tiff"), 200);
+    await document.SaveAsTiffAsync(Path.ChangeExtension(file, ".tiff"), dpi: 200, cancellationToken: ct);
 });
 ```
 
 #### Pattern 2: Async Methods
 
-The async methods (`SaveAsTiffAsync`, `RenderPagesAsync`, `StreamImageBytesAsync`, `SaveAsJpegsAsync`, `SaveAsImagesAsync`, `ProcessAllPagesAsync`) wait for the gate without blocking a thread. They process pages sequentially and yield between pages.
+The async methods (`RenderPagesAsync`, `StreamImageBytesAsync`, `StreamJpegBytesAsync`, `SaveAsPngsAsync`, `SaveAsJpegsAsync`, `SaveAsImagesAsync`, `SaveAsTiffAsync`, `ProcessAllPagesAsync`):
+
+- wait for the gate without blocking a thread;
+- process pages sequentially, on thread-pool threads;
+- never post work to the caller's `SynchronizationContext`, so blocking on one from a UI thread does not deadlock, and the delegate given to `ProcessAllPagesAsync` runs on a pool thread;
+- can be cancelled. Task-returning methods take a `CancellationToken` as their last parameter; the streaming methods take it through `WithCancellation`. The token is checked before each page (see [Cancellation](EXAMPLES.md#cancellation)).
 
 ```csharp
 // ✅ SAFE: sequential processing, no thread blocked while waiting for the gate
+using var cts = new CancellationTokenSource(TimeSpan.FromMinutes(5));
 using var document = new PdfDocument("large.pdf");
-var bitmaps = await document.RenderPagesAsync(dpi: 300);
+await document.SaveAsPngsAsync("pages", dpi: 300, cancellationToken: cts.Token);
 ```
 
 Synchronous methods, including constructors, block the calling thread while they wait. In a busy async service prefer the async methods: with 192 concurrent conversions on a thread pool pinned to 24 threads, a heartbeat work item waited 1.6 ms (p99) when the conversions used the async API and about 2.5 s when they called the synchronous API from pool threads.
@@ -69,9 +75,11 @@ public async Task<IActionResult> ConvertPdf(IFormFile file)
     using var stream = file.OpenReadStream();
     using var document = new PdfDocument(stream);
 
-    await foreach (var image in document.StreamImageBytesAsync(ImageFormat.Png, 100, 150))
+    // First page only; stops if the client disconnects
+    await foreach (var image in document.StreamImageBytesAsync(ImageFormat.Png, dpi: 150)
+                       .WithCancellation(HttpContext.RequestAborted))
     {
-        return File(image, "image/png"); // first page
+        return File(image, "image/png");
     }
 
     return NoContent();
@@ -168,6 +176,8 @@ public class PdfDocumentFactory : IPdfDocumentFactory
 builder.Services.AddSingleton<IPdfDocumentFactory, PdfDocumentFactory>();
 ```
 
+`new PdfDocument(stream)` reads the stream to its end during construction and keeps its own copy. `new PdfDocument(byte[])` uses the array in place: it stays pinned until the document is disposed and must not be modified until then.
+
 ### Controller Example
 
 ```csharp
@@ -190,83 +200,78 @@ public class PdfController : ControllerBase
     {
         if (file == null || file.Length == 0)
             return BadRequest("No file provided");
-            
-        if (!file.ContentType.Equals("application/pdf", StringComparison.OrdinalIgnoreCase))
-            return BadRequest("File must be a PDF");
-        
+
         try
         {
             using var stream = new MemoryStream();
-            await file.CopyToAsync(stream);
+            await file.CopyToAsync(stream, HttpContext.RequestAborted);
             stream.Position = 0;
-            
+
             using var document = _pdfFactory.CreateFromStream(stream);
-            
-            var textBuilder = new StringBuilder();
-            for (int i = 0; i < document.PageCount; i++)
-            {
-                using var page = document.GetPage(i);
-                textBuilder.AppendLine($"--- Page {i + 1} ---");
-                textBuilder.AppendLine(page.ExtractText());
-            }
-            
-            return Ok(new { text = textBuilder.ToString(), pageCount = document.PageCount });
+
+            // One page loaded at a time; waits for the native gate without blocking a thread
+            string[] pages = await document.ProcessAllPagesAsync(page => page.ExtractText(), HttpContext.RequestAborted);
+
+            return Ok(new { pages, pageCount = pages.Length });
         }
-        catch (Exception ex)
+        catch (PdfiumException ex)
         {
-            _logger.LogError(ex, "Failed to extract text from PDF");
-            return StatusCode(500, "Failed to process PDF");
+            // Wrong password, not a PDF, corrupted: the client's problem, not the server's
+            return BadRequest($"Cannot open the PDF ({ex.ErrorCode})");
         }
     }
-    
+
     [HttpPost("convert-to-images")]
     [RequestSizeLimit(50_000_000)]
     public async Task<IActionResult> ConvertToImages(IFormFile file, [FromQuery] int dpi = 150)
     {
         if (file == null || file.Length == 0)
             return BadRequest("No file provided");
-        
+
         dpi = Math.Clamp(dpi, 72, 600); // Limit DPI range
-        
+
         try
         {
             using var stream = new MemoryStream();
-            await file.CopyToAsync(stream);
+            await file.CopyToAsync(stream, HttpContext.RequestAborted);
             stream.Position = 0;
-            
+
             using var document = _pdfFactory.CreateFromStream(stream);
-            
-            // For large documents, consider streaming response
-            var images = document.StreamImageBytes(ImageFormat.Png, 100, dpi).ToList();
-            
-            // Return as zip for multiple pages
-            if (images.Count > 1)
+
+            // Pages are rendered and added one at a time; only the zip grows in memory.
+            // For very large outputs, write the zip to a temporary file instead.
+            var zipStream = new MemoryStream();
+            using (var archive = new ZipArchive(zipStream, ZipArchiveMode.Create, leaveOpen: true))
             {
-                using var zipStream = new MemoryStream();
-                using (var archive = new ZipArchive(zipStream, ZipArchiveMode.Create, true))
+                int pageNumber = 0;
+                await foreach (var png in document.StreamImageBytesAsync(ImageFormat.Png, dpi: dpi)
+                                   .WithCancellation(HttpContext.RequestAborted))
                 {
-                    for (int i = 0; i < images.Count; i++)
-                    {
-                        var entry = archive.CreateEntry($"page_{i + 1:D3}.png");
-                        using var entryStream = entry.Open();
-                        await entryStream.WriteAsync(images[i]);
-                    }
+                    // PNG is already compressed
+                    var entry = archive.CreateEntry($"page_{++pageNumber:D3}.png", CompressionLevel.NoCompression);
+                    await using var entryStream = entry.Open();
+                    await entryStream.WriteAsync(png, HttpContext.RequestAborted);
                 }
-                
-                zipStream.Position = 0;
-                return File(zipStream.ToArray(), "application/zip", "pages.zip");
             }
-            
-            return File(images[0], "image/png", "page.png");
+
+            zipStream.Position = 0;
+            return File(zipStream, "application/zip", "pages.zip");
         }
-        catch (Exception ex)
+        catch (PdfiumException ex)
         {
-            _logger.LogError(ex, "Failed to convert PDF to images");
-            return StatusCode(500, "Failed to process PDF");
+            return BadRequest($"Cannot open the PDF ({ex.ErrorCode})");
+        }
+        catch (InvalidOperationException ex)
+        {
+            // For example a page above the render pixel limit
+            _logger.LogWarning(ex, "Failed to convert PDF to images");
+            return UnprocessableEntity("The PDF could not be rendered");
         }
     }
 }
 ```
+
+The controller needs `using Microsoft.AspNetCore.Mvc;` and `using System.IO.Compression;`. Catch `PdfiumException` before `InvalidOperationException`: it derives from it.
 
 ### Background Service Example
 
@@ -299,7 +304,7 @@ public class PdfProcessingService : BackgroundService
             {
                 await ProcessJobAsync(job, stoppingToken);
             }
-            catch (Exception ex)
+            catch (Exception ex) when (ex is not OperationCanceledException)
             {
                 _logger.LogError(ex, "Failed to process PDF job {JobId}", job.Id);
             }
@@ -310,16 +315,19 @@ public class PdfProcessingService : BackgroundService
     {
         using var document = new PdfDocument(job.PdfPath);
         
-        // The async methods wait for the native gate without blocking a thread
+        // Waits for the native gate without blocking a thread; the token is checked before each page
         int pageNumber = 0;
-        await foreach (var bytes in document.StreamImageBytesAsync(ImageFormat.Jpeg, 90, 200))
+        await foreach (var bytes in document.StreamImageBytesAsync(ImageFormat.Jpeg, quality: 90, dpi: 200).WithCancellation(ct))
         {
-            ct.ThrowIfCancellationRequested();
             await File.WriteAllBytesAsync($"{job.Id}_{++pageNumber:D3}.jpg", bytes, ct);
         }
     }
 }
+
+public record PdfJob(string Id, string PdfPath);
 ```
+
+A PDFium failure on one job (for example `PdfiumException` for a broken file) is logged and the loop continues; cancellation of `stoppingToken` ends it.
 
 ### Prefer Async Methods and Bound Concurrency
 
@@ -343,11 +351,11 @@ builder.Services.AddRateLimiter(options =>
     });
 });
 
-// Controller
-[HttpPost("convert")]
-[EnableRateLimiting("pdf-processing")]
-public async Task<IActionResult> Convert(IFormFile file) { ... }
+var app = builder.Build();
+app.UseRateLimiter();
 ```
+
+Then put `[EnableRateLimiting("pdf-processing")]` on the PDF actions, next to `[HttpPost]`.
 
 ---
 
@@ -361,8 +369,10 @@ Every disposable object must be properly disposed:
 // ✅ CORRECT: All resources disposed
 using var document = new PdfDocument("file.pdf");
 using var page = document.GetPage(0);
-using var form = document.GetForm();
+using var form = document.GetForm();   // null when the PDF has no form; using accepts null
+```
 
+```csharp
 // Or with explicit blocks
 using (var document = new PdfDocument("file.pdf"))
 {
@@ -373,47 +383,31 @@ using (var document = new PdfDocument("file.pdf"))
 }
 ```
 
-### Dispose Order Matters
+### The Document Owns Its Children
 
-Dispose child objects before parent objects:
+A document owns its pages, the forms returned by `GetForm()`, and page objects removed from its pages with `RemoveObject`. Disposing the document disposes all of them, so dispose order does not matter for releasing memory. What matters is not to use a child after its document is disposed: it throws `ObjectDisposedException` (see [Pitfall 4](#pitfall-4-using-a-form-or-page-after-its-document-is-disposed)). Still dispose pages and forms when you are done with them, so a long-lived document does not keep them loaded.
+
+### Processing Every Page
+
+Use `ProcessAllPages` or `ProcessAllPagesAsync`. They load, process and dispose one page at a time:
 
 ```csharp
-// ✅ CORRECT: Page disposed before document
 using var document = new PdfDocument("file.pdf");
-using var page = document.GetPage(0);
-string text = page.ExtractText();
-// page.Dispose() called first (end of scope)
-// document.Dispose() called second
+
+string[] texts = document.ProcessAllPages(page => page.ExtractText());
+
+document.ProcessAllPages(page => Console.WriteLine($"Page {page.PageIndex + 1}: {page.Width} x {page.Height} pt"));
 ```
 
-### Disposing Arrays of Pages
-
-`GetAllPages()` is obsolete: it loads every page at once. Prefer `ProcessAllPages`, which loads and disposes one page at a time. If you use it, dispose each page:
-
-```csharp
-var pages = document.GetAllPages();
-try
-{
-    foreach (var page in pages)
-    {
-        Console.WriteLine(page.ExtractText());
-    }
-}
-finally
-{
-    foreach (var page in pages)
-    {
-        page.Dispose();
-    }
-}
-```
+`GetAllPages()` is obsolete: it loads every page at once and leaves every page for you to dispose.
 
 ### Working with RawBitmaps
 
-`RawBitmap` is a lightweight record and does not require disposal, but the pixel arrays can consume significant memory:
+`RawBitmap` is a record holding a managed array and does not require disposal, but the pixel arrays can consume significant memory. Rendered pages are BGRx: the fourth byte of each pixel is not alpha.
 
 ```csharp
-var bitmaps = document.RenderPages(300);
+using var document = new PdfDocument("file.pdf");
+var bitmaps = document.RenderPages(dpi: 150);   // every page at once
 
 for (int i = 0; i < bitmaps.Length; i++)
 {
@@ -451,39 +445,29 @@ document.SaveAsPngs("thumbs", dpi: 72);
 document.SaveAsPngs("print", dpi: 300);
 ```
 
-### Process Large Documents in Chunks
+The DPI must be positive; zero or a negative value throws `ArgumentOutOfRangeException`. When the DPI comes from a request, clamp it (for example `Math.Clamp(dpi, 72, 600)`).
 
-For very large documents, process pages in batches:
+### Stream Large Documents Page by Page
+
+For large documents, never hold every page at once. The streaming methods render, encode and hand over one page at a time:
 
 ```csharp
-public async IAsyncEnumerable<byte[]> ConvertInChunksAsync(
-    string pdfPath, 
-    int batchSize = 10,
+public async IAsyncEnumerable<byte[]> ConvertToPngsAsync(
+    string pdfPath,
+    int dpi = 150,
     [EnumeratorCancellation] CancellationToken ct = default)
 {
     using var document = new PdfDocument(pdfPath);
-    
-    for (int i = 0; i < document.PageCount; i += batchSize)
-    {
-        ct.ThrowIfCancellationRequested();
-        
-        int endPage = Math.Min(i + batchSize, document.PageCount);
-        
-        for (int j = i; j < endPage; j++)
-        {
-            using var page = document.GetPage(j);
-            // Render and encode page as PNG
-            int width = (int)(page.Width / 72.0 * 150);
-            int height = (int)(page.Height / 72.0 * 150);
-            byte[] pixels = page.RenderToBytes(width, height);
 
-            yield return pixels;
-        }
-        
-        await Task.Yield(); // Allow other work
+    // The token is checked before each page; only one page's PNG is in memory at a time
+    await foreach (var png in document.StreamImageBytesAsync(ImageFormat.Png, dpi: dpi).WithCancellation(ct))
+    {
+        yield return png;
     }
 }
 ```
+
+(`EnumeratorCancellationAttribute` is in `System.Runtime.CompilerServices`.) To write files, `SaveAsPngsAsync`, `SaveAsJpegsAsync`, `SaveAsImagesAsync` and `SaveAsTiffAsync` also hold one page at a time.
 
 ### Reuse Document Instances
 
@@ -507,28 +491,13 @@ for (int i = 0; i < document.PageCount; i++)
 }
 ```
 
-### Stream Large Files
-
-For very large output, stream to disk instead of memory:
-
-```csharp
-// ✅ Stream to files instead of holding all in memory
-document.SaveAsImages("output", "page", ImageFormat.Png, 100, 300, 300);
-
-// Or stream one page at a time for minimal memory:
-foreach (var bytes in document.StreamImageBytes(ImageFormat.Png, 100, 300))
-{
-    // Process and discard — only one page in memory at a time
-}
-```
-
 ### Use JPEG for Size, PNG for Quality
 
 ```csharp
-// Smaller files, acceptable quality
+// Smaller files, acceptable quality (the default JPEG quality is 90)
 document.SaveAsJpegs("output", quality: 85, dpi: 150);
 
-// Lossless, larger files
+// Lossless, larger files; PNG has no quality setting
 document.SaveAsPngs("output", dpi: 150);
 ```
 
@@ -538,11 +507,12 @@ document.SaveAsPngs("output", dpi: 150);
 
 ### Where the Memory Goes
 
-Most memory used while processing PDFs is native: PDFium's document and font data, and rendered bitmaps. A US Letter page rendered as BGRA at 300 DPI is about 32 MiB. Native memory is released by `Dispose()`, not by the garbage collector.
+Most memory used while processing PDFs is native: PDFium's document and font data, and rendered bitmaps. A US Letter page rendered at 300 DPI (4 bytes per pixel) is about 32 MiB. Native memory is released by `Dispose()`, not by the garbage collector.
 
 - `RenderPages` returns every page as a managed `byte[]` at once. For large documents use `StreamImageBytes` / `StreamImageBytesAsync`, `SaveAsTiff`, or the `SaveAs...` methods, which hold one page at a time.
+- Each rendered page is limited to 268,435,456 pixels by default, so one oversized or hostile page cannot demand a multi-GiB bitmap. A larger page throws `InvalidOperationException`; the `PdfiumWrapper.MaxRenderPixels` AppContext data key changes the limit (see [Troubleshooting](TROUBLESHOOTING.md)).
 - `Save`, `SaveToStream`, `PdfMerger.Save` and `PdfMerger.ToBytes` serialize the whole PDF into a pooled in-memory buffer before writing it, so peak memory includes the full output size.
-- `new PdfDocument(stream)` and `new PdfMerger(stream)` read the stream to its end during construction. Up to 64 MB is held in memory; larger inputs go to a temporary file that is deleted on dispose.
+- `new PdfDocument(stream)` and `new PdfMerger(stream)` read the stream to its end during construction. Up to 64 MB is held in memory; larger inputs go to a temporary file that is deleted on dispose. The `PdfiumWrapper.SpoolThreshold` AppContext data key changes the threshold.
 
 ### Monitor Memory Usage
 
@@ -552,13 +522,15 @@ Most memory used while processing PDFs is native: PDFium's document and font dat
 public class PdfProcessingMetrics
 {
     private readonly ILogger _logger;
-    
+
+    public PdfProcessingMetrics(ILogger<PdfProcessingMetrics> logger) => _logger = logger;
+
     public async Task ProcessWithMetrics(Func<Task> operation)
     {
         using var process = Process.GetCurrentProcess();
         long before = process.WorkingSet64;
         var stopwatch = Stopwatch.StartNew();
-        
+
         try
         {
             await operation();
@@ -568,7 +540,7 @@ public class PdfProcessingMetrics
             stopwatch.Stop();
             process.Refresh();
             long after = process.WorkingSet64;
-            
+
             _logger.LogInformation(
                 "PDF operation completed in {ElapsedMs}ms. Working set: {Before}MB -> {After}MB",
                 stopwatch.ElapsedMilliseconds,
@@ -590,18 +562,18 @@ If an object is dropped without `Dispose()`, its finalizer does not call PDFium.
 Use a semaphore to limit how many PDF operations are in flight. The limit bounds memory (each operation holds a rendered page); the library is safe without it:
 
 ```csharp
-public class PdfProcessingPool
+public sealed class PdfConcurrencyLimiter : IDisposable
 {
     private readonly SemaphoreSlim _semaphore;
-    
-    public PdfProcessingPool(int maxConcurrent = 4)
+
+    public PdfConcurrencyLimiter(int maxConcurrent = 4)
     {
         _semaphore = new SemaphoreSlim(maxConcurrent);
     }
-    
-    public async Task<T> ProcessAsync<T>(Func<Task<T>> operation)
+
+    public async Task<T> RunAsync<T>(Func<Task<T>> operation, CancellationToken ct = default)
     {
-        await _semaphore.WaitAsync();
+        await _semaphore.WaitAsync(ct);
         try
         {
             return await operation();
@@ -611,8 +583,12 @@ public class PdfProcessingPool
             _semaphore.Release();
         }
     }
+
+    public void Dispose() => _semaphore.Dispose();
 }
 ```
+
+To run conversions in separate processes instead, use `PdfProcessingPool` from the `PdfiumWrapper.Processing` package (see [Malformed and Hostile Input](#malformed-and-hostile-input)).
 
 ---
 
@@ -620,68 +596,62 @@ public class PdfProcessingPool
 
 ### Handle Common Exceptions
 
+Opening a document that PDFium cannot load throws `PdfiumException` (it derives from `InvalidOperationException`). Its `ErrorCode` tells the cases apart: `Password`, `Format` (not a PDF or corrupted), `File` (cannot be opened), `Security` (unsupported security handler), `Page` or `Unknown`.
+
 ```csharp
 public PdfProcessResult ProcessPdf(byte[] pdfData, string? password = null)
 {
     try
     {
         using var document = new PdfDocument(pdfData, password);
-        return new PdfProcessResult 
-        { 
-            Success = true, 
-            PageCount = document.PageCount 
-        };
+        return new PdfProcessResult(Success: true, PageCount: document.PageCount);
     }
     catch (PdfiumException ex) when (ex.ErrorCode == PdfiumErrorCode.Password)
     {
-        return new PdfProcessResult 
-        { 
-            Success = false, 
-            Error = "PDF is password protected" 
-        };
+        return new PdfProcessResult(Success: false, Error: "PDF is password protected");
     }
-    catch (PdfiumException)
+    catch (PdfiumException ex)
     {
-        return new PdfProcessResult 
-        { 
-            Success = false, 
-            Error = "Invalid or corrupted PDF file" 
-        };
-    }
-    catch (OutOfMemoryException)
-    {
-        return new PdfProcessResult 
-        { 
-            Success = false, 
-            Error = "PDF too large to process" 
-        };
+        return new PdfProcessResult(Success: false, Error: $"Invalid or corrupted PDF file ({ex.ErrorCode})");
     }
 }
+
+public record PdfProcessResult(bool Success, int PageCount = 0, string? Error = null);
 ```
+
+Other exceptions to expect:
+
+| Exception | When |
+|-----------|------|
+| `ArgumentOutOfRangeException` | A page index outside the document, or a DPI that is zero or negative |
+| `InvalidOperationException` | A page above the render pixel limit, a document with no pages passed to a render method, a failed save or page import |
+| `ObjectDisposedException` | A document, page, form or page object used after it was disposed |
+| `OperationCanceledException` | An async method whose `CancellationToken` was cancelled |
 
 ### Validate Input
 
 ```csharp
 public void ValidatePdfInput(IFormFile file)
 {
-    if (file == null)
-        throw new ArgumentNullException(nameof(file));
-        
+    ArgumentNullException.ThrowIfNull(file);
+
     if (file.Length == 0)
         throw new ArgumentException("File is empty");
-        
+
     if (file.Length > 100_000_000) // 100MB
         throw new ArgumentException("File exceeds maximum size");
-        
-    // Check magic bytes
+
+    // Check the magic bytes
     using var stream = file.OpenReadStream();
-    var header = new byte[5];
-    stream.Read(header, 0, 5);
-    
-    if (header[0] != '%' || header[1] != 'P' || header[2] != 'D' || header[3] != 'F')
-        throw new ArgumentException("File is not a valid PDF");
+    Span<byte> header = stackalloc byte[5];
+    int read = stream.ReadAtLeast(header, header.Length, throwOnEndOfStream: false);
+
+    if (read < 5 || !header.StartsWith("%PDF-"u8))
+        throw new ArgumentException("File is not a PDF");
 }
 ```
+
+The header check is cheap but not proof: a file can start with `%PDF-` and still be corrupted. Opening it is the real check.
 
 ### Save Errors
 
@@ -692,19 +662,31 @@ try
 {
     document.SaveToStream(output);
 }
-catch (IOException ex)
+catch (IOException)
 {
     // The destination failed (disk full, connection closed, ...)
 }
-catch (InvalidOperationException ex)
+catch (InvalidOperationException)
 {
     // PDFium could not serialize the document
 }
 ```
 
-### Malformed Input
+### Malformed and Hostile Input
 
-A damaged PDF normally fails with `InvalidOperationException` when it is opened. A native abort inside PDFium cannot be caught and ends the process. If the service must survive hostile input, run conversions in a separate process. See [Troubleshooting](TROUBLESHOOTING.md#process-aborts-on-a-damaged-pdf).
+A damaged PDF normally fails when it is opened, with `PdfiumException` and `ErrorCode == PdfiumErrorCode.Format`. But a native abort inside PDFium cannot be caught and ends the process. If the service must survive hostile input, run conversions in worker processes with `PdfProcessingPool` from the optional `PdfiumWrapper.Processing` package. A worker that dies is replaced, and the job reports `PdfJobStatus.WorkerCrashed` instead of taking your process down:
+
+```csharp
+using PdfiumWrapper.Processing;
+
+await using var pool = await PdfProcessingPool.CreateAsync();
+
+var result = await pool.ConvertToTiffAsync(PdfInput.FromFile("upload.pdf"), "upload.tiff", dpi: 200);
+if (!result.IsSuccess)
+    Console.WriteLine($"{result.Status}: {result.Error}");
+```
+
+A cancelled single job reports `PdfJobStatus.Cancelled`; cancelling the token of a batch throws `OperationCanceledException`. See [High-Throughput Processing](HIGH-THROUGHPUT-PROCESSING.md#worker-pool) and [Troubleshooting](TROUBLESHOOTING.md#process-aborts-on-a-damaged-pdf).
 
 ---
 
@@ -713,15 +695,16 @@ A damaged PDF normally fails with `InvalidOperationException` when it is opened.
 ### Pitfall 1: Not Disposing Resources
 
 ```csharp
-// ❌ MEMORY LEAK: Document never disposed
+// ❌ Native memory held until the finalizer runs
 public string GetText(string path)
 {
     var document = new PdfDocument(path);
     var page = document.GetPage(0);
     return page.ExtractText();
-    // document and page are never disposed!
 }
+```
 
+```csharp
 // ✅ CORRECT
 public string GetText(string path)
 {
@@ -734,30 +717,30 @@ public string GetText(string path)
 ### Pitfall 2: Assuming Form Exists
 
 ```csharp
-// ❌ CRASH: GetForm() can return null
+// ❌ CRASH: GetForm() returns null when the PDF has no form fields
 var form = document.GetForm();
 form.SetFormFieldValue("Name", "John"); // NullReferenceException!
+```
 
+```csharp
 // ✅ CORRECT
-var form = document.GetForm();
+using var form = document.GetForm();
 if (form != null)
 {
     form.SetFormFieldValue("Name", "John");
-    form.Dispose();
 }
 ```
 
 ### Pitfall 3: Wrong Page Index
 
+Page indices are 0-based; page ranges given as strings to `PdfMerger` are 1-based.
+
 ```csharp
-// ❌ Pages are 0-indexed
-using var page = document.GetPage(1); // Gets SECOND page, not first
+using var second = document.GetPage(1); // the SECOND page
+using var first = document.GetPage(0);  // the first page
 
-// ✅ CORRECT
-using var page = document.GetPage(0); // First page
-
-// Note: PdfMerger.AppendPages with string range uses 1-based indexing
-merger.AppendPages(source, "1,2,3"); // First three pages (1-based)
+merger.AppendPages(source, "1,2,3");           // the first three pages (1-based)
+merger.AppendPages(source, new[] { 0, 1, 2 }); // the same pages by index (0-based)
 ```
 
 ### Pitfall 4: Using a Form or Page After Its Document Is Disposed
@@ -772,7 +755,9 @@ using (var document = new PdfDocument("form.pdf"))
     form = document.GetForm();
 }
 form?.SetFormFieldValue("Name", "John");
+```
 
+```csharp
 // ✅ CORRECT: use the form while the document is alive
 using var document = new PdfDocument("form.pdf");
 using var form = document.GetForm();
@@ -782,34 +767,29 @@ document.Save("filled_form.pdf");
 
 ### Pitfall 5: Ignoring Save After Modifications
 
+Changes to forms and page content live in the open document until you save it.
+
 ```csharp
-// ❌ Changes lost: Modified but not saved
+// ❌ Changes lost: modified but never saved
 using var document = new PdfDocument("form.pdf");
-var form = document.GetForm();
+using var form = document.GetForm();
 form?.SetFormFieldValue("Name", "John");
 // Document disposed without saving!
+```
 
+```csharp
 // ✅ CORRECT
 using var document = new PdfDocument("form.pdf");
-var form = document.GetForm();
-if (form != null)
-{
-    form.SetFormFieldValue("Name", "John");
-    form.Dispose();
-}
+using var form = document.GetForm();
+form?.SetFormFieldValue("Name", "John");
 document.Save("filled_form.pdf");
 ```
 
-### Pitfall 6: High DPI for Thumbnails
+Page content also needs `page.GenerateContent()` before saving (see [PDF Editing](PDF-EDITING.md#important-workflow)).
 
-```csharp
-// ❌ WASTEFUL: 300 DPI for a 100px thumbnail
-document.SaveAsPngs("thumbs", dpi: 300); // Generates huge images
+### Pitfall 6: Rendering at a Higher DPI Than Needed
 
-// ✅ EFFICIENT: Use appropriate DPI
-document.SaveAsPngs("thumbs", dpi: 72);
-```
-
+Render cost and memory grow with the square of the DPI: 300 DPI is 16 times the pixels of 75 DPI. Pick the DPI from the table in [Choose Appropriate DPI](#choose-appropriate-dpi); for thumbnails, 72 or less is enough.
 
 ---
 
