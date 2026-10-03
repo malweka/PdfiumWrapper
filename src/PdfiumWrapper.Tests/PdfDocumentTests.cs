@@ -1347,6 +1347,68 @@ public class PdfDocumentTests : IDisposable
         // Assert
         Assert.Same(metadata1, metadata2);
     }
+
+    [Theory]
+    [InlineData("D:2023", 2023, 1, 1, 0, 0, 0, DateTimeKind.Unspecified)]
+    [InlineData("D:202312", 2023, 12, 1, 0, 0, 0, DateTimeKind.Unspecified)]
+    [InlineData("D:20231215", 2023, 12, 15, 0, 0, 0, DateTimeKind.Unspecified)]
+    [InlineData("D:2023121510", 2023, 12, 15, 10, 0, 0, DateTimeKind.Unspecified)]
+    [InlineData("D:20231215103045", 2023, 12, 15, 10, 30, 45, DateTimeKind.Unspecified)]
+    [InlineData("20231215103045", 2023, 12, 15, 10, 30, 45, DateTimeKind.Unspecified)]
+    [InlineData("D:20231215103045Z", 2023, 12, 15, 10, 30, 45, DateTimeKind.Utc)]
+    [InlineData("D:20231215103045Z00'00'", 2023, 12, 15, 10, 30, 45, DateTimeKind.Utc)]
+    [InlineData("D:20231215103045+05'30'", 2023, 12, 15, 5, 0, 45, DateTimeKind.Utc)]
+    [InlineData("D:20231215103045-08'00'", 2023, 12, 15, 18, 30, 45, DateTimeKind.Utc)]
+    [InlineData("D:20231215103045-0800", 2023, 12, 15, 18, 30, 45, DateTimeKind.Utc)]
+    [InlineData("D:20231215103045+05", 2023, 12, 15, 5, 30, 45, DateTimeKind.Utc)]
+    [InlineData("D:2023121510+01'00'", 2023, 12, 15, 9, 0, 0, DateTimeKind.Utc)]
+    public void ParsePdfDate_AcceptsEveryPrefixOfTheFields(string text, int year, int month, int day,
+        int hour, int minute, int second, DateTimeKind kind)
+    {
+        var parsed = PdfMetadata.ParsePdfDate(text);
+
+        Assert.Equal(new DateTime(year, month, day, hour, minute, second), parsed);
+        Assert.Equal(kind, parsed!.Value.Kind);
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("D:")]
+    [InlineData("garbage")]
+    [InlineData("D:20x3")]
+    [InlineData("D:202")]
+    [InlineData("D:20231")]
+    [InlineData("D:20231315")]
+    [InlineData("D:20230230")]
+    [InlineData("D:2023121525")]
+    [InlineData("D:20231215103045+5")]
+    [InlineData("D:20231215103045+05'30'junk")]
+    [InlineData("D:20231215103045 ")]
+    [InlineData("D:00001215")]
+    public void ParsePdfDate_RejectsInvalidDates(string? text)
+    {
+        Assert.Null(PdfMetadata.ParsePdfDate(text));
+    }
+
+    [Fact]
+    public void CreationDateTime_WithAShortDate_IsParsed()
+    {
+        const string pdf = """
+            %PDF-1.7
+            1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj
+            2 0 obj << /Type /Pages /Kids [3 0 R] /Count 1 >> endobj
+            3 0 obj << /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] >> endobj
+            4 0 obj << /CreationDate (D:20231215) /ModDate (D:2024) >> endobj
+            trailer << /Root 1 0 R /Info 4 0 R >>
+            %%EOF
+
+            """;
+        using var doc = new PdfDocument(System.Text.Encoding.ASCII.GetBytes(pdf));
+
+        Assert.Equal(new DateTime(2023, 12, 15), doc.Metadata.CreationDateTime);
+        Assert.Equal(new DateTime(2024, 1, 1), doc.Metadata.ModificationDateTime);
+    }
     
     #endregion
     

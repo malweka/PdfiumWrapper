@@ -139,69 +139,88 @@ public class PdfMetadata
 
     /// <summary>
     /// Parse PDF date string to DateTime
-    /// PDF date format: D:YYYYMMDDHHmmSSOHH'mm'
+    /// PDF date format: D:YYYYMMDDHHmmSSOHH'mm', where every field after the year may be omitted
+    /// from the end (D:2023, D:20231215, ...). Missing month and day are 1, missing time fields 0.
     /// Example: D:20231215103045+05'30'
     /// </summary>
-    private DateTime? ParsePdfDate(string pdfDate)
+    /// <returns>
+    /// UTC (<see cref="DateTimeKind.Utc"/>) when the string has an offset or Z, the local time as
+    /// written (<see cref="DateTimeKind.Unspecified"/>) when it has none, null when it is not a
+    /// valid PDF date.
+    /// </returns>
+    internal static DateTime? ParsePdfDate(string? pdfDate)
     {
         if (string.IsNullOrEmpty(pdfDate))
             return null;
 
-        try
-        {
-            // Remove "D:" prefix if present
-            string date = pdfDate.StartsWith("D:") ? pdfDate.Substring(2) : pdfDate;
+        // Remove "D:" prefix if present
+        var date = pdfDate.AsSpan();
+        if (date.StartsWith("D:"))
+            date = date[2..];
 
-            // Extract basic date components (at minimum we need YYYYMMDD)
-            if (date.Length < 8)
-                return null;
-
-            int year = int.Parse(date.Substring(0, 4));
-            int month = int.Parse(date.Substring(4, 2));
-            int day = int.Parse(date.Substring(6, 2));
-
-            int hour = 0, minute = 0, second = 0;
-
-            if (date.Length >= 10)
-                hour = int.Parse(date.Substring(8, 2));
-            if (date.Length >= 12)
-                minute = int.Parse(date.Substring(10, 2));
-            if (date.Length >= 14)
-                second = int.Parse(date.Substring(12, 2));
-
-            var dateTime = new DateTime(year, month, day, hour, minute, second, DateTimeKind.Unspecified);
-
-            // Try to parse timezone offset if present
-            int tzIndex = date.IndexOfAny(new[] { '+', '-', 'Z' }, 14);
-            if (tzIndex > 0)
-            {
-                if (date[tzIndex] == 'Z')
-                {
-                    return DateTime.SpecifyKind(dateTime, DateTimeKind.Utc);
-                }
-                else
-                {
-                    // Parse offset like +05'30' or -08'00'
-                    string tzPart = date.Substring(tzIndex);
-                    int sign = tzPart[0] == '+' ? 1 : -1;
-
-                    string[] parts = tzPart.Substring(1).Split('\'');
-                    if (parts.Length >= 1)
-                    {
-                        int tzHours = int.Parse(parts[0]);
-                        int tzMinutes = parts.Length > 1 ? int.Parse(parts[1]) : 0;
-
-                        TimeSpan offset = new TimeSpan(sign * tzHours, sign * tzMinutes, 0);
-                        return new DateTimeOffset(dateTime, offset).UtcDateTime;
-                    }
-                }
-            }
-
-            return dateTime;
-        }
-        catch
-        {
+        if (!TryTakeDigits(ref date, 4, out int year) || year < 1)
             return null;
+
+        // Month, day, hour, minute, second: each present only if the ones before it are.
+        Span<int> fields = stackalloc int[] { 1, 1, 0, 0, 0 };
+        for (int i = 0; i < fields.Length && !date.IsEmpty && char.IsAsciiDigit(date[0]); i++)
+        {
+            if (!TryTakeDigits(ref date, 2, out fields[i]))
+                return null;
         }
+
+        int month = fields[0], day = fields[1], hour = fields[2], minute = fields[3], second = fields[4];
+        if (month is < 1 or > 12 || day < 1 || day > DateTime.DaysInMonth(year, month) ||
+            hour > 23 || minute > 59 || second > 59)
+            return null;
+
+        var dateTime = new DateTime(year, month, day, hour, minute, second, DateTimeKind.Unspecified);
+        if (date.IsEmpty)
+            return dateTime;
+
+        // Offset: Z, or +/- HH, optionally followed by 'mm' (some writers drop the apostrophes).
+        // Z may carry a zero offset too (Z00'00').
+        char sign = date[0];
+        if (sign is not ('Z' or '+' or '-'))
+            return null;
+        date = date[1..];
+
+        int offsetHours = 0, offsetMinutes = 0;
+        if (!date.IsEmpty || sign != 'Z')
+        {
+            if (!TryTakeDigits(ref date, 2, out offsetHours))
+                return null;
+            if (!date.IsEmpty && date[0] == '\'')
+                date = date[1..];
+            if (!date.IsEmpty && !TryTakeDigits(ref date, 2, out offsetMinutes))
+                return null;
+            if (!date.IsEmpty && date[0] == '\'')
+                date = date[1..];
+        }
+        if (!date.IsEmpty || offsetHours > 23 || offsetMinutes > 59)
+            return null;
+
+        var offset = new TimeSpan(offsetHours, offsetMinutes, 0);
+        long utcTicks = dateTime.Ticks - (sign == '-' ? -offset.Ticks : offset.Ticks);
+        if (utcTicks < DateTime.MinValue.Ticks || utcTicks > DateTime.MaxValue.Ticks)
+            return null;
+        return new DateTime(utcTicks, DateTimeKind.Utc);
+    }
+
+    private static bool TryTakeDigits(ref ReadOnlySpan<char> text, int count, out int value)
+    {
+        value = 0;
+        if (text.Length < count)
+            return false;
+
+        for (int i = 0; i < count; i++)
+        {
+            if (!char.IsAsciiDigit(text[i]))
+                return false;
+            value = value * 10 + (text[i] - '0');
+        }
+
+        text = text[count..];
+        return true;
     }
 }
