@@ -57,6 +57,9 @@ public class PoolFailureTests : IDisposable
 
         File.WriteAllText(marker, "");
         Kill(first.WorkerPid);
+        // Submit only once the pool has seen the exit: before that, the job can still be sent to the
+        // dead worker (seen on Linux) and come back with a crashed attempt instead of none.
+        await WaitUntilAsync(() => pool.Statistics.WorkersStopped >= 1, TimeSpan.FromSeconds(10));
 
         var stranded = await pool.GetPageCountAsync(input).WaitAsync(TimeSpan.FromSeconds(60));
         Assert.Equal(PdfJobStatus.Failed, stranded.Status);

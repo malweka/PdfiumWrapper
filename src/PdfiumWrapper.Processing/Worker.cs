@@ -141,8 +141,8 @@ internal sealed class Worker : IAsyncDisposable
                     // A worker that writes garbage to stdout cannot be trusted with the job in flight.
                     _hello.TrySetException(new PdfPoolException($"Worker {Pid} sent a malformed frame: {ex.Message}"));
                     _onStderr(this, "malformed frame from worker: " + ex.Message);
-                    await KillAsync().ConfigureAwait(false);
-                    break;
+                    await KillProcessAsync().ConfigureAwait(false);
+                    break;   // the exit is signalled below, once this loop has ended
                 }
 
                 if (frame == null)
@@ -231,7 +231,20 @@ internal sealed class Worker : IAsyncDisposable
         }
     }
 
+    /// <summary>
+    /// Kills the worker and signals its exit once the frames it wrote before dying have been read,
+    /// as for any other exit: a result already in the pipe completes its job rather than being
+    /// mistaken for a job still running.
+    /// </summary>
     public async Task KillAsync()
+    {
+        await KillProcessAsync().ConfigureAwait(false);
+        if (_readLoop is { } readLoop)
+            await Task.WhenAny(readLoop, Task.Delay(1000)).ConfigureAwait(false);
+        SignalExit();
+    }
+
+    private async Task KillProcessAsync()
     {
         try
         {
@@ -243,8 +256,6 @@ internal sealed class Worker : IAsyncDisposable
         catch (Exception)
         {
         }
-
-        SignalExit();
     }
 
     public async ValueTask DisposeAsync()

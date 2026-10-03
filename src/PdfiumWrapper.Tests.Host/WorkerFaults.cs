@@ -10,7 +10,8 @@ namespace PdfiumWrapper.Tests.Host;
 /// A job whose input path contains the substring triggers the fault once per process.
 /// <c>crash-after-page-N:&lt;substring&gt;</c> crashes once page N of an image job is in place;
 /// <c>hang-after-page-N:&lt;substring&gt;</c> hangs that job (not the worker's loop) there;
-/// <c>sleep-after-page-MS:&lt;substring&gt;</c> sleeps MS milliseconds after every page of such jobs.
+/// <c>sleep-after-page-MS:&lt;substring&gt;</c> sleeps MS milliseconds after every page of such jobs;
+/// <c>pause-while-marked:&lt;substring&gt;</c> holds such a job after each page while <c>&lt;input&gt;.pause</c> exists.
 /// <c>slow-start:&lt;milliseconds&gt;</c> delays the worker's ready report;
 /// <c>fail-start-if-exists:&lt;path&gt;</c> makes the worker exit before reporting ready while that file exists.
 /// Several faults combine with <c>;</c>.
@@ -100,6 +101,22 @@ internal static class WorkerFaults
                 {
                     if (done == page && job.Input.Contains(match, StringComparison.OrdinalIgnoreCase))
                         Thread.Sleep(Timeout.Infinite);
+                },
+            };
+        }
+
+        if (fault == "pause-while-marked")
+        {
+            // Holds the job after each page for as long as "<input>.pause" exists, ignoring
+            // cancellation: the test decides exactly when the job may go on, on any attempt.
+            return new WorkerHooks
+            {
+                AfterPage = (job, _) =>
+                {
+                    if (!job.Input.Contains(match, StringComparison.OrdinalIgnoreCase))
+                        return;
+                    while (File.Exists(job.Input + ".pause"))
+                        Thread.Sleep(20);
                 },
             };
         }

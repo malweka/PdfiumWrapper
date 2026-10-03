@@ -35,7 +35,13 @@ internal sealed class PendingJob
     /// worker from then on, so a crash on its next attempt is its own.
     /// </summary>
     public bool RunAlone { get; set; }
+    /// <summary>The worker running the current attempt, or null while the job waits. Set and cleared under the pool's worker lock.</summary>
     public Worker? Worker { get; set; }
+    /// <summary>
+    /// Set under the pool's worker lock when a job that has not reached a worker is ended where it
+    /// waits (cancelled, or failed because no worker can start): it is never dispatched after that.
+    /// </summary>
+    public bool Withdrawn { get; set; }
     public CancellationTokenSource? AttemptTimeout { get; set; }
     /// <summary>Pages the worker reported staged for the current attempt (image jobs).</summary>
     public int PagesDone { get; set; }

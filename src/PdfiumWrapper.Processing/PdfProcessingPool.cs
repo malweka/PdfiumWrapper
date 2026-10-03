@@ -41,6 +41,8 @@ public sealed partial class PdfProcessingPool : IAsyncDisposable
     private long _allBusySince;
     private int _startingWorkers;
     private int _consecutiveStartFailures;
+    // Set by the dispatcher while the job at the head must run alone and no worker is empty.
+    private bool _headWaitsForEmptyWorker;
     // Set when the dispatcher has stopped on an unexpected error: every job from then on is Failed with it.
     private string? _fault;
     private bool _disposed;
@@ -120,6 +122,16 @@ public sealed partial class PdfProcessingPool : IAsyncDisposable
     }
 
     private static bool IsBusy(Worker worker) => !worker.Active.IsEmpty;
+
+    /// <summary>Slots taken across all workers (jobs in flight plus the dispatcher's claim), for tests that check none leaks.</summary>
+    internal int SlotsInUseForTests
+    {
+        get
+        {
+            lock (_workersLock)
+                return _workers.Sum(w => w.InUse);
+        }
+    }
 
     /// <summary>Jobs waiting for a worker.</summary>
     public int QueuedJobs => Volatile.Read(ref _queuedCount);
@@ -238,20 +250,26 @@ public sealed partial class PdfProcessingPool : IAsyncDisposable
         if (job.Completion.Task.IsCompleted)
             return;
 
-        if (job.Worker is { } worker && !job.Completion.Task.IsCompleted)
+        if (TryWithdraw(job, out var worker))
+        {
+            // Queued: it stays in the channel and is dropped when it reaches the head of its queue.
+            Finish(job, PdfJobStatus.Cancelled, "cancelled before dispatch", new ResultPayload { JobId = job.Id, Status = ResultStatus.Cancelled });
+            SignalDispatcher();
+        }
+        else if (worker is { } running)
         {
             // In flight: ask the worker; the attempt timeout is replaced by the cancel grace.
             _ = Task.Run(async () =>
             {
                 try
                 {
-                    await worker.SendAsync(Frame.ForCancel(job.Id), CancellationToken.None).ConfigureAwait(false);
+                    await running.SendAsync(Frame.ForCancel(job.Id), CancellationToken.None).ConfigureAwait(false);
                     await Task.Delay(CancelGrace).ConfigureAwait(false);
                     if (!job.Completion.Task.IsCompleted)
                     {
                         Finish(job, PdfJobStatus.Cancelled, "cancelled; the worker did not stop in time and was replaced", new ResultPayload { JobId = job.Id, Status = ResultStatus.Cancelled });
                         // The other jobs on this worker are bystanders: they run again without using an attempt.
-                        await KillWorkerAsync(worker, PdfPoolEventKind.WorkerStopped, "killed after cancel grace", job.Id).ConfigureAwait(false);
+                        await KillWorkerAsync(running, PdfPoolEventKind.WorkerStopped, "killed after cancel grace", job.Id).ConfigureAwait(false);
                         RemovePartialOutput(job);
                     }
                 }
@@ -260,11 +278,26 @@ public sealed partial class PdfProcessingPool : IAsyncDisposable
                 }
             });
         }
-        else
+    }
+
+    /// <summary>
+    /// Takes a job that has not reached a worker out of dispatch for good, so the caller can end it
+    /// where it waits. Decided under the worker lock, where <see cref="Dispatch"/> registers a job, so
+    /// a job is either withdrawn or in flight, never both. Returns false, with the worker running it,
+    /// if the job is in flight; false with null if it already ended.
+    /// </summary>
+    private bool TryWithdraw(PendingJob job, out Worker? worker)
+    {
+        lock (_workersLock)
         {
-            // Queued: it stays in the channel and is dropped when it reaches the head of its queue.
-            Finish(job, PdfJobStatus.Cancelled, "cancelled before dispatch", new ResultPayload { JobId = job.Id, Status = ResultStatus.Cancelled });
-            SignalDispatcher();
+            worker = null;
+            if (job.Completion.Task.IsCompleted)
+                return false;
+            worker = job.Worker;
+            if (worker != null)
+                return false;
+            job.Withdrawn = true;
+            return true;
         }
     }
 
@@ -290,10 +323,15 @@ public sealed partial class PdfProcessingPool : IAsyncDisposable
                 if (next.Completion.Task.IsCompleted)
                 {
                     TryDequeue(source, out _);
+                    Volatile.Write(ref _headWaitsForEmptyWorker, false);
                     continue;
                 }
 
                 var worker = ClaimWorker(next.RunAlone);
+                // A job that must run alone waits at the head for an empty worker, and nothing behind
+                // it is dispatched meanwhile: that is what lets a busy worker drain for it. The sizer
+                // sees this and starts a worker for it, as it does when every slot is taken.
+                Volatile.Write(ref _headWaitsForEmptyWorker, worker == null && next.RunAlone);
                 if (worker == null)
                 {
                     await _workerAvailable.WaitAsync(token).ConfigureAwait(false);
@@ -441,9 +479,11 @@ public sealed partial class PdfProcessingPool : IAsyncDisposable
         lock (_workersLock)
         {
             // Checked and registered under the lock, so a worker retired for memory either sees
-            // this job in Active (and waits for it) or this dispatch sees it retiring. A worker no
-            // longer in the table may already be disposed, so HasExited is asked only of one that is.
-            gone = !_workers.Contains(worker) || worker.Retiring || worker.HasExited || job.Completion.Task.IsCompleted;
+            // this job in Active (and waits for it) or this dispatch sees it retiring; a worker's exit
+            // handler sees the job in both Active and the in-flight table, or in neither; and a job
+            // ended where it waited (TryWithdraw) is never dispatched. A worker no longer in the
+            // table may already be disposed, so HasExited is asked only of one that is.
+            gone = !_workers.Contains(worker) || worker.Retiring || worker.HasExited || job.Withdrawn || job.Completion.Task.IsCompleted;
             if (!gone)
             {
                 job.Attempts++;
@@ -452,20 +492,20 @@ public sealed partial class PdfProcessingPool : IAsyncDisposable
                 job.CommittingPages = 0;
                 job.DispatchedAt = Stopwatch.GetTimestamp();
                 worker.Active[job.Id] = job;
+                _inFlight[job.Id] = job;
             }
         }
 
         if (gone)
         {
             // The worker went away between the claim and the dispatch: queue the job again (or drop
-            // it, if it ended while being dequeued).
+            // it, if it ended or was withdrawn while being dequeued; whoever withdrew it ends it).
             ReleaseClaim(worker);
-            if (!job.Completion.Task.IsCompleted)
+            if (!job.Withdrawn && !job.Completion.Task.IsCompleted)
                 Requeue(job);
             return;
         }
 
-        _inFlight[job.Id] = job;
         DispatchHookForTests?.Invoke(job.Id);
 
         var timeout = new CancellationTokenSource(_options.JobTimeout);
@@ -525,7 +565,28 @@ public sealed partial class PdfProcessingPool : IAsyncDisposable
 
     private void OnResult(Worker worker, ResultPayload result)
     {
-        if (!_inFlight.TryRemove(result.JobId, out var job) || job.Worker != worker)
+        // The slot is this worker's to give back whatever became of the job meanwhile (cancelled,
+        // failed where it waited, or already retried elsewhere after a kill). The job itself is
+        // completed only if this is its current attempt: a late frame from a worker the job has left
+        // must not end, or unregister, the attempt that replaced it.
+        PendingJob? job;
+        bool current;
+        lock (_workersLock)
+        {
+            if (!worker.Active.TryRemove(result.JobId, out job))
+                return;
+            if (worker.InUse > 0)
+                worker.InUse--;
+            if (worker.InUse == 0)
+                worker.Exclusive = false;
+            if (worker.Active.IsEmpty)
+                worker.IdleSince = Stopwatch.GetTimestamp();
+            current = job.Worker == worker && _inFlight.TryRemove(KeyValuePair.Create(job.Id, job));
+        }
+
+        StopIfDrained(worker);
+        SignalDispatcher();
+        if (!current)
             return;
 
         if (result.RenderIntervalsUtcTicks != null)
@@ -544,7 +605,6 @@ public sealed partial class PdfProcessingPool : IAsyncDisposable
         job.AttemptTimeout?.Dispose();
         job.AttemptTimeout = null;
         job.FinalWorkerPid = worker.Pid;
-        Release(worker, job);
 
         switch (result.Status)
         {
@@ -563,25 +623,20 @@ public sealed partial class PdfProcessingPool : IAsyncDisposable
             RetireForMemory(worker, $"working set {worker.WorkingSetBytes:N0} bytes above {limit:N0}");
     }
 
-    private void Release(Worker worker, PendingJob job)
+    /// <summary>
+    /// Ends <paramref name="job"/>'s attempt on <paramref name="worker"/> if it is still in flight
+    /// there; true for exactly one caller. Under the worker lock, where <see cref="Dispatch"/>
+    /// registers attempts, so a stale caller (an old timer, a late frame) never takes a later attempt.
+    /// </summary>
+    private bool TryEndAttempt(PendingJob job, Worker worker)
     {
         lock (_workersLock)
-        {
-            if (worker.Active.TryRemove(job.Id, out _) && worker.InUse > 0)
-                worker.InUse--;
-            if (worker.InUse == 0)
-                worker.Exclusive = false;
-            if (worker.Active.IsEmpty)
-                worker.IdleSince = Stopwatch.GetTimestamp();
-        }
-
-        StopIfDrained(worker);
-        SignalDispatcher();
+            return job.Worker == worker && _inFlight.TryRemove(KeyValuePair.Create(job.Id, job));
     }
 
     private async Task OnAttemptTimeoutAsync(PendingJob job, Worker worker)
     {
-        if (!_inFlight.TryRemove(job.Id, out _))
+        if (!TryEndAttempt(job, worker))
             return;
 
         _counters.Increment(ref _counters.TimedOut);
@@ -594,6 +649,7 @@ public sealed partial class PdfProcessingPool : IAsyncDisposable
     private void OnWorkerExit(Worker worker)
     {
         PendingJob[] jobs;
+        PendingJob[] live;
         long killedFor;
         lock (_workersLock)
         {
@@ -602,7 +658,10 @@ public sealed partial class PdfProcessingPool : IAsyncDisposable
             jobs = worker.Active.Values.ToArray();
             worker.Active.Clear();
             worker.InUse = 0;
+            worker.Exclusive = false;
             killedFor = worker.KilledFor;
+            // Jobs whose attempt here has not already ended (completed, cancelled, timed out).
+            live = jobs.Where(j => j.Worker == worker && _inFlight.TryRemove(KeyValuePair.Create(j.Id, j))).ToArray();
         }
 
         _counters.Increment(ref _counters.WorkersStopped);
@@ -617,7 +676,6 @@ public sealed partial class PdfProcessingPool : IAsyncDisposable
         // another job's timeout or cancellation, every job left is a bystander. On a worker that
         // died with one job, that job is the cause. On a worker that died with several, the cause is
         // unknown: each runs again alone, uncharged, so the one that crashes again is charged then.
-        var live = jobs.Where(j => _inFlight.TryRemove(j.Id, out _)).ToArray();
         foreach (var job in live)
         {
             job.AttemptTimeout?.Dispose();
@@ -651,7 +709,8 @@ public sealed partial class PdfProcessingPool : IAsyncDisposable
     private void RetryOrFinish(PendingJob job, PdfJobStatus status, string error, int workerPid, bool charged = true)
     {
         job.FinalWorkerPid = workerPid;
-        job.Worker = null;
+        lock (_workersLock)
+            job.Worker = null;
         RemovePartialOutput(job); // the worker is gone (crashed, or killed on timeout) and could not clean up itself
 
         if (Volatile.Read(ref _fault) is { } fault)
@@ -860,7 +919,12 @@ public sealed partial class PdfProcessingPool : IAsyncDisposable
 
         string reason = $"no worker could be started ({failures} attempts in a row failed): {error}";
         foreach (var job in _waiting.Values)
-            Finish(job, PdfJobStatus.Failed, reason, new ResultPayload { JobId = job.Id, Status = ResultStatus.Failed, Error = reason });
+        {
+            // A worker may have started meanwhile and taken this job: then it runs, and is not failed.
+            if (TryWithdraw(job, out _))
+                Finish(job, PdfJobStatus.Failed, reason, new ResultPayload { JobId = job.Id, Status = ResultStatus.Failed, Error = reason });
+        }
+
         SignalDispatcher();
     }
 
@@ -961,7 +1025,12 @@ public sealed partial class PdfProcessingPool : IAsyncDisposable
         {
             int alive = _workers.Count(w => !w.Retiring) + _startingWorkers;
             int freeSlots = _workers.Where(w => !w.Retiring && !w.Exclusive).Sum(w => w.Slots - w.InUse);
-            bool saturated = QueuedJobs > 0 && freeSlots <= 0 && _startingWorkers == 0;
+            // A job that must run alone needs an empty worker, not a free slot: while it waits at the
+            // head with every worker partly busy, nothing is dispatched, so the pool is as stuck as
+            // when every slot is taken.
+            bool aloneWaits = Volatile.Read(ref _headWaitsForEmptyWorker)
+                && !_workers.Any(w => !w.Retiring && !w.Exclusive && w.InUse == 0);
+            bool saturated = QueuedJobs > 0 && (freeSlots <= 0 || aloneWaits) && _startingWorkers == 0;
 
             if (saturated)
             {
