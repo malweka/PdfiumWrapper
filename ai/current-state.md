@@ -2,6 +2,10 @@
 
 ## Current focus
 
+Release 2.0.0 preparation (2026-10-03); checklist in `ai/tmp/release-2.0-checklist.md`. Merged today: PR #23 (the core package depends on the four `PdfiumWrapper.runtime.<rid>` packages instead of `runtime.json`, which left portable apps without natives) and PR #24 (check box set/get through PDFium's form filler, real list-box multi-select, `PdfBookmark.PageIndex` is `int?`, short PDF dates parse). In review: the documentation pass on `docs/2.0-review` with `CHANGELOG.md` (notes since `9021729`, major items only). Next: owner runs the macOS tests and native build, then the pool qualification run, then `release/2.0.0`. 2.0 targets .NET 10 only (decided).
+
+### Earlier focus (2026-10-03, PR #22 merged)
+
 Nothing active. PR #22 is merged into `main` (`683da87`, 2026-10-03): `PdfPage.RemoveObject` throws `ObjectDisposedException` for a disposed wrapper and returns false unless the wrapper is the one the page tracks, so an object can no longer be removed through a disposed wrapper and leaked. Every technical-audit finding (AUD-001 to AUD-024) is fixed on `main`. Open: run the full test suite once on macOS (CI only builds there).
 
 ### Earlier focus (2026-10-03, PR #21 merged)
