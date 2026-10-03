@@ -32,7 +32,7 @@ public static partial class PDFium
         int start_x, int start_y, int size_x, int size_y, int rotate, int flags);
 
     [LibraryImport(LibraryName)]
-    internal static partial void FPDF_SetFormFieldHighlightColor(IntPtr hHandle, int fieldType, uint color);
+    internal static partial void FPDF_SetFormFieldHighlightColor(IntPtr hHandle, int fieldType, CULong color);
 
     [LibraryImport(LibraryName)]
     internal static partial void FPDF_SetFormFieldHighlightAlpha(IntPtr hHandle, byte alpha);
@@ -98,10 +98,10 @@ public static partial class PDFium
     internal static partial bool FORM_ForceToKillFocus(IntPtr hHandle);
 
     [LibraryImport(LibraryName)]
-    internal static partial int FORM_GetFocusedText(IntPtr hHandle, IntPtr page, IntPtr buffer, ulong buflen);
+    internal static partial CULong FORM_GetFocusedText(IntPtr hHandle, IntPtr page, IntPtr buffer, CULong buflen);
 
     [LibraryImport(LibraryName)]
-    internal static partial int FORM_GetSelectedText(IntPtr hHandle, IntPtr page, IntPtr buffer, ulong buflen);
+    internal static partial CULong FORM_GetSelectedText(IntPtr hHandle, IntPtr page, IntPtr buffer, CULong buflen);
 
     [LibraryImport(LibraryName)]
     internal static partial void FORM_ReplaceSelection(IntPtr hHandle, IntPtr page,
@@ -163,7 +163,7 @@ public static partial class PDFium
     /// This structure must be filled by the application before calling FPDFDOC_InitFormFillEnvironment
     /// </summary>
     [StructLayout(LayoutKind.Sequential)]
-    public struct FPDF_FORMFILLINFO
+    internal struct FPDF_FORMFILLINFO
     {
         public int version;  // Version 1 or 2
 
@@ -272,14 +272,14 @@ public static partial class PDFium
     }
 
     [StructLayout(LayoutKind.Sequential)]
-    public struct FS_POINTF
+    internal struct FS_POINTF
     {
         public float x;
         public float y;
     }
 
     [StructLayout(LayoutKind.Sequential)]
-    public struct FPDF_SYSTEMTIME
+    internal struct FPDF_SYSTEMTIME
     {
         public ushort wYear;
         public ushort wMonth;

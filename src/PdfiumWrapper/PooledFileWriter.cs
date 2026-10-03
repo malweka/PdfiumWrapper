@@ -32,7 +32,7 @@ internal sealed class PooledFileWriter : IDisposable
     /// On success the caller owns <paramref name="buffer"/> and must return it to
     /// <see cref="ArrayPool{T}.Shared"/>.
     /// </summary>
-    public static bool TrySave(IntPtr document, uint flags, out byte[] buffer, out int length, out uint error)
+    public static bool TrySave(IntPtr document, uint flags, out byte[] buffer, out int length)
     {
         PdfiumRuntime.AssertHeld();
 
@@ -41,17 +41,15 @@ internal sealed class PooledFileWriter : IDisposable
 
         bool success;
         using (PdfiumDiagnostics.NativeInterval(NativeOp.Save))
-            success = PDFium.FPDF_SaveAsCopy(document, ref fileWrite, flags);
+            success = PDFium.FPDF_SaveAsCopy(document, ref fileWrite, new CULong(flags));
 
         if (!success || writer._failed)
         {
-            error = PDFium.FPDF_GetLastError();
             buffer = Array.Empty<byte>();
             length = 0;
             return false;
         }
 
-        error = 0;
         (buffer, length) = writer.Detach();
         return true;
     }

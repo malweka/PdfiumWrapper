@@ -1,4 +1,6 @@
 ﻿using System.Buffers;
+using System.Diagnostics;
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 
 namespace PdfiumWrapper;
@@ -40,7 +42,7 @@ public class PdfDocument : IDisposable
         Document = PDFium.FPDF_CreateNewDocument();
         if (Document == IntPtr.Zero)
         {
-            throw new InvalidOperationException($"Failed to create new PDF document. Error: {PDFium.FPDF_GetLastError()}");
+            throw new InvalidOperationException("Failed to create a new PDF document.");
         }
 
         PdfiumRuntime.HandleOpened();
@@ -172,8 +174,7 @@ public class PdfDocument : IDisposable
         {
             using var _ = PdfiumRuntime.Enter();
             ThrowIfDisposed();
-            uint rawPermissions = PDFium.FPDF_GetDocPermissions(Document);
-            return (PdfPermissions)rawPermissions;
+            return (PdfPermissions)(uint)PDFium.FPDF_GetDocPermissions(Document).Value;
         }
     }
 
@@ -188,11 +189,11 @@ public class PdfDocument : IDisposable
             ThrowIfDisposed();
 
             // First, get the original file ID (type 0)
-            var size = PDFium.FPDF_GetFileIdentifier(Document, 0, IntPtr.Zero, 0);
-            if (size == 0)
+            var size = PDFium.FPDF_GetFileIdentifier(Document, 0, IntPtr.Zero, default);
+            if (size.Value == 0)
                 return null;
 
-            var buffer = ArrayPool<byte>.Shared.Rent(checked((int)size));
+            var buffer = ArrayPool<byte>.Shared.Rent(checked((int)size.Value));
             try
             {
                 ulong actualSize;
@@ -200,14 +201,15 @@ public class PdfDocument : IDisposable
                 {
                     fixed (byte* bufferPtr = buffer)
                     {
-                        actualSize = PDFium.FPDF_GetFileIdentifier(Document, 0, (IntPtr)bufferPtr, size);
+                        actualSize = PDFium.FPDF_GetFileIdentifier(Document, 0, (IntPtr)bufferPtr, size).Value;
                     }
                 }
 
-                if (actualSize == 0)
+                // The size counts a NUL terminator after the identifier bytes.
+                if (actualSize <= 1)
                     return null;
 
-                return Convert.ToHexString(buffer.AsSpan(0, checked((int)actualSize)));
+                return Convert.ToHexString(buffer.AsSpan(0, checked((int)Math.Min(actualSize, size.Value)) - 1));
             }
             finally
             {
@@ -338,7 +340,7 @@ public class PdfDocument : IDisposable
         // The error is read in the same gated scope as the failing call.
         if (Document == IntPtr.Zero)
         {
-            throw new InvalidOperationException($"Failed to load PDF document. Error: {PDFium.FPDF_GetLastError()}");
+            throw PdfiumException.FromLastError("Failed to load PDF document");
         }
 
         PdfiumRuntime.HandleOpened();
@@ -363,8 +365,7 @@ public class PdfDocument : IDisposable
                 Document = PDFium.FPDF_LoadMemDocument(dataPtr, length, password);
             if (Document == IntPtr.Zero)
             {
-                throw new InvalidOperationException(
-                    $"Failed to load PDF document from memory. Error: {PDFium.FPDF_GetLastError()}");
+                throw PdfiumException.FromLastError("Failed to load PDF document from memory");
             }
 
             PdfiumRuntime.HandleOpened();
@@ -434,7 +435,7 @@ public class PdfDocument : IDisposable
 
         var pageHandle = PDFium.FPDFPage_New(Document, index, width, height);
         if (pageHandle == IntPtr.Zero)
-            throw new InvalidOperationException($"Failed to create new page. Error: {PDFium.FPDF_GetLastError()}");
+            throw new InvalidOperationException($"Failed to create a new page at index {index}.");
 
         // Close the page handle and re-open it using the standard method
         PDFium.FPDF_ClosePage(pageHandle);
@@ -482,15 +483,17 @@ public class PdfDocument : IDisposable
     }
 
     /// <summary>
-    /// Gets all pages in the document. CALLER IS RESPONSIBLE FOR DISPOSING EACH PAGE.
+    /// Gets all pages in the document. The caller should dispose each page.
     /// </summary>
     /// <remarks>
-    /// ⚠️ WARNING: Each PdfPage in the returned array must be disposed by the caller.
-    /// For high-throughput scenarios, prefer <see cref="ProcessAllPages{TResult}(Func{PdfPage, TResult})"/>
-    /// or <see cref="ProcessAllPages(Action{PdfPage})"/> which handle disposal automatically.
+    /// Every page holds a loaded native page until it is disposed. An undisposed page is
+    /// released by its finalizer or with the document, so nothing leaks, but a large document
+    /// keeps all its pages loaded at once. Prefer
+    /// <see cref="ProcessAllPages{TResult}(Func{PdfPage, TResult})"/> or
+    /// <see cref="ProcessAllPages(Action{PdfPage})"/>, which load and dispose one page at a time.
     /// </remarks>
-    /// <returns>Array of PdfPage objects that must be disposed by the caller</returns>
-    [Obsolete("Use ProcessAllPages() for automatic disposal, or ensure each page is disposed manually. This method may cause memory leaks if pages are not disposed.")]
+    /// <returns>Array of PdfPage objects that the caller should dispose</returns>
+    [Obsolete("Loads every page at once. Use ProcessAllPages(), which loads and disposes one page at a time.")]
     public PdfPage[] GetAllPages()
     {
         using var _ = PdfiumRuntime.Enter();
@@ -581,13 +584,14 @@ public class PdfDocument : IDisposable
     /// </summary>
     /// <typeparam name="TResult">The type of result to return for each page</typeparam>
     /// <param name="processor">Function to process each page and return a result</param>
+    /// <param name="cancellationToken">Checked before each page.</param>
     /// <returns>Array of results from processing each page</returns>
-    public async Task<TResult[]> ProcessAllPagesAsync<TResult>(Func<PdfPage, TResult> processor)
+    public async Task<TResult[]> ProcessAllPagesAsync<TResult>(Func<PdfPage, TResult> processor, CancellationToken cancellationToken = default)
     {
         await new ThreadPoolHop();
 
         int pageCount;
-        using (await PdfiumRuntime.EnterAsync())
+        using (await PdfiumRuntime.EnterAsync(cancellationToken))
         {
             ThrowIfDisposed();
             if (processor == null)
@@ -598,7 +602,7 @@ public class PdfDocument : IDisposable
         var results = new TResult[pageCount];
         for (int i = 0; i < pageCount; i++)
         {
-            var page = await GetPageAsync(i).ConfigureAwait(false);
+            var page = await GetPageAsync(i, cancellationToken).ConfigureAwait(false);
             try
             {
                 results[i] = processor(page);
@@ -617,12 +621,13 @@ public class PdfDocument : IDisposable
     /// synchronization context, so <paramref name="action"/> must not touch UI objects.
     /// </summary>
     /// <param name="action">Action to perform on each page</param>
-    public async Task ProcessAllPagesAsync(Action<PdfPage> action)
+    /// <param name="cancellationToken">Checked before each page.</param>
+    public async Task ProcessAllPagesAsync(Action<PdfPage> action, CancellationToken cancellationToken = default)
     {
         await new ThreadPoolHop();
 
         int pageCount;
-        using (await PdfiumRuntime.EnterAsync())
+        using (await PdfiumRuntime.EnterAsync(cancellationToken))
         {
             ThrowIfDisposed();
             if (action == null)
@@ -632,7 +637,7 @@ public class PdfDocument : IDisposable
 
         for (int i = 0; i < pageCount; i++)
         {
-            var page = await GetPageAsync(i).ConfigureAwait(false);
+            var page = await GetPageAsync(i, cancellationToken).ConfigureAwait(false);
             try
             {
                 action(page);
@@ -644,9 +649,10 @@ public class PdfDocument : IDisposable
         }
     }
 
-    private async ValueTask<PdfPage> GetPageAsync(int pageIndex)
+    private async ValueTask<PdfPage> GetPageAsync(int pageIndex, CancellationToken cancellationToken)
     {
-        using (await PdfiumRuntime.EnterAsync())
+        cancellationToken.ThrowIfCancellationRequested();
+        using (await PdfiumRuntime.EnterAsync(cancellationToken))
         {
             return GetPageCore(pageIndex);
         }
@@ -669,9 +675,9 @@ public class PdfDocument : IDisposable
         return RequirePagesCore();
     }
 
-    private async ValueTask<int> RequirePagesAsync()
+    private async ValueTask<int> RequirePagesAsync(CancellationToken cancellationToken)
     {
-        using (await PdfiumRuntime.EnterAsync())
+        using (await PdfiumRuntime.EnterAsync(cancellationToken))
         {
             return RequirePagesCore();
         }
@@ -717,9 +723,15 @@ public class PdfDocument : IDisposable
         return RenderPageLeaseCore(pageIndex, dpiWidth, dpiHeight, flags, gray);
     }
 
-    private async ValueTask<BitmapLease> RenderPageLeaseAsync(int pageIndex, int dpiWidth, int dpiHeight, int flags, bool gray = false)
+    /// <summary>
+    /// Render inside the gate, waited for asynchronously. Every async page loop renders through here,
+    /// so <paramref name="cancellationToken"/> is checked before each page.
+    /// </summary>
+    private async ValueTask<BitmapLease> RenderPageLeaseAsync(int pageIndex, int dpiWidth, int dpiHeight, int flags,
+        CancellationToken cancellationToken, bool gray = false)
     {
-        using (await PdfiumRuntime.EnterAsync())
+        cancellationToken.ThrowIfCancellationRequested();
+        using (await PdfiumRuntime.EnterAsync(cancellationToken))
         {
             return RenderPageLeaseCore(pageIndex, dpiWidth, dpiHeight, flags, gray);
         }
@@ -800,19 +812,16 @@ public class PdfDocument : IDisposable
         TiffColorMode colorMode, byte threshold, int totalPages)
     {
         // TIFF pages are rendered into an 8-bit gray bitmap (see RenderToBitmapLeaseCore).
+        Debug.Assert(lease.IsGray, "TIFF pages are rendered gray.");
         switch (colorMode)
         {
             case TiffColorMode.Bilevel:
-                var bilevelData = lease.IsGray
-                    ? PixelConverter.GrayToPackedBilevel(lease.Buffer, lease.Width, lease.Height, lease.Stride, threshold)
-                    : PixelConverter.BgraToPackedBilevel(lease.Buffer, lease.Width, lease.Height, lease.Stride, threshold);
+                var bilevelData = PixelConverter.GrayToPackedBilevel(lease.Buffer, lease.Width, lease.Height, lease.Stride, threshold);
                 writer.WriteBilevelPage(bilevelData, lease.Width, lease.Height, dpiWidth, dpiHeight, totalPages);
                 break;
 
             case TiffColorMode.Grayscale:
-                var grayData = lease.IsGray
-                    ? PixelConverter.GrayToGrayscale(lease.Buffer, lease.Width, lease.Height, lease.Stride)
-                    : PixelConverter.BgraToGrayscale(lease.Buffer, lease.Width, lease.Height, lease.Stride);
+                var grayData = PixelConverter.GrayToGrayscale(lease.Buffer, lease.Width, lease.Height, lease.Stride);
                 writer.WriteGrayscalePage(grayData, lease.Width, lease.Height, dpiWidth, dpiHeight, totalPages);
                 break;
 
@@ -861,23 +870,25 @@ public class PdfDocument : IDisposable
     }
 
     /// <inheritdoc cref="RenderPages(int)"/>
-    public Task<RawBitmap[]> RenderPagesAsync(int dpi = 300)
+    /// <param name="cancellationToken">Checked before each page.</param>
+    public Task<RawBitmap[]> RenderPagesAsync(int dpi = 300, CancellationToken cancellationToken = default)
     {
-        return RenderPagesAsync(dpi, dpi);
+        return RenderPagesAsync(dpi, dpi, cancellationToken);
     }
 
     /// <inheritdoc cref="RenderPages(int)"/>
-    public async Task<RawBitmap[]> RenderPagesAsync(int dpiWidth, int dpiHeight)
+    /// <param name="cancellationToken">Checked before each page.</param>
+    public async Task<RawBitmap[]> RenderPagesAsync(int dpiWidth, int dpiHeight, CancellationToken cancellationToken = default)
     {
         await new ThreadPoolHop();
 
-        int pageCount = await RequirePagesAsync().ConfigureAwait(false);
+        int pageCount = await RequirePagesAsync(cancellationToken).ConfigureAwait(false);
         RequirePositiveDpi(dpiWidth, dpiHeight);
 
         var results = new RawBitmap[pageCount];
         for (int i = 0; i < pageCount; i++)
         {
-            var lease = await RenderPageLeaseAsync(i, dpiWidth, dpiHeight, ImageRenderFlags).ConfigureAwait(false);
+            var lease = await RenderPageLeaseAsync(i, dpiWidth, dpiHeight, ImageRenderFlags, cancellationToken).ConfigureAwait(false);
             await using var leaseScope = lease.ConfigureAwait(false);
             results[i] = ToRawBitmap(lease);
         }
@@ -974,32 +985,8 @@ public class PdfDocument : IDisposable
         if (pageIndex < 0 || pageIndex >= PDFium.FPDF_GetPageCount(Document))
             throw new ArgumentOutOfRangeException(nameof(pageIndex));
 
-        // Get the required buffer size
-        var size = PDFium.FPDF_GetPageLabel(Document, pageIndex, IntPtr.Zero, 0);
-        if (size == 0)
-            return null;
-
-        var buffer = ArrayPool<char>.Shared.Rent(checked((int)(size / 2)));
-        try
-        {
-            ulong actualSize;
-            unsafe
-            {
-                fixed (char* bufferPtr = buffer)
-                {
-                    actualSize = PDFium.FPDF_GetPageLabel(Document, pageIndex, (IntPtr)bufferPtr, size);
-                }
-            }
-
-            if (actualSize == 0)
-                return null;
-
-            return new string(buffer, 0, checked((int)(actualSize / 2)) - 1);
-        }
-        finally
-        {
-            ArrayPool<char>.Shared.Return(buffer);
-        }
+        return NativeText.ReadUtf16((Document, pageIndex),
+            static (s, buffer, length) => PDFium.FPDF_GetPageLabel(s.Document, s.pageIndex, buffer, length));
     }
 
     /// <summary>
@@ -1054,7 +1041,9 @@ public class PdfDocument : IDisposable
     /// disposed, <paramref name="format"/> cannot be streamed or a DPI is not positive. An empty
     /// document is reported (<see cref="InvalidOperationException"/>) when enumeration starts,
     /// because reading the page count is native work and is awaited there. Pages are rendered and
-    /// encoded on the thread pool, never on the consumer's synchronization context.
+    /// encoded on the thread pool, never on the consumer's synchronization context. Cancel with
+    /// <see cref="TaskAsyncEnumerableExtensions.WithCancellation{T}(IAsyncEnumerable{T}, CancellationToken)"/>;
+    /// the token is checked before each page.
     /// </remarks>
     public IAsyncEnumerable<byte[]> StreamImageBytesAsync(ImageFormat format, int quality = DefaultJpegQuality, int dpi = 300)
     {
@@ -1078,9 +1067,9 @@ public class PdfDocument : IDisposable
     /// JPEG/PNG output. Reads the page count itself unless the caller already has it.
     /// </summary>
     private async IAsyncEnumerable<byte[]> StreamImageBytesCoreAsync(ImageFormat format, int quality, int dpiWidth, int dpiHeight,
-        int? knownPageCount = null)
+        int? knownPageCount = null, [EnumeratorCancellation] CancellationToken cancellationToken = default)
     {
-        int pageCount = knownPageCount ?? await RequirePagesAsync().ConfigureAwait(false);
+        int pageCount = knownPageCount ?? await RequirePagesAsync(cancellationToken).ConfigureAwait(false);
 
         using var encoder = PageEncoder.Create(format, quality);
         for (int i = 0; i < pageCount; i++)
@@ -1090,7 +1079,7 @@ public class PdfDocument : IDisposable
             await new ThreadPoolHop();
 
             byte[] bytes;
-            var lease = await RenderPageLeaseAsync(i, dpiWidth, dpiHeight, ImageRenderFlags).ConfigureAwait(false);
+            var lease = await RenderPageLeaseAsync(i, dpiWidth, dpiHeight, ImageRenderFlags, cancellationToken).ConfigureAwait(false);
             await using (lease.ConfigureAwait(false))
             {
                 bytes = encoder.Encode(lease);
@@ -1124,18 +1113,20 @@ public class PdfDocument : IDisposable
     /// Async version of <see cref="SaveAsImages(Stream[], ImageFormat, int, int, int)"/>.
     /// Writes each page with <see cref="Stream.WriteAsync(ReadOnlyMemory{byte}, CancellationToken)"/>.
     /// </summary>
-    public async Task SaveAsImagesAsync(Stream[] outputStreams, ImageFormat format, int quality, int dpiWidth, int dpiHeight)
+    /// <param name="cancellationToken">Checked before each page and passed to the stream writes.</param>
+    public async Task SaveAsImagesAsync(Stream[] outputStreams, ImageFormat format, int quality, int dpiWidth, int dpiHeight,
+        CancellationToken cancellationToken = default)
     {
         await new ThreadPoolHop();
 
-        int pageCount = await RequirePagesAsync().ConfigureAwait(false);
+        int pageCount = await RequirePagesAsync(cancellationToken).ConfigureAwait(false);
         RequireOutputStreams(outputStreams, pageCount);
         RequireStreamableFormat(format);
         RequirePositiveDpi(dpiWidth, dpiHeight);
 
         int index = 0;
-        await foreach (var bytes in StreamImageBytesCoreAsync(format, quality, dpiWidth, dpiHeight, pageCount).ConfigureAwait(false))
-            await outputStreams[index++].WriteAsync(bytes).ConfigureAwait(false);
+        await foreach (var bytes in StreamImageBytesCoreAsync(format, quality, dpiWidth, dpiHeight, pageCount, cancellationToken).ConfigureAwait(false))
+            await outputStreams[index++].WriteAsync(bytes, cancellationToken).ConfigureAwait(false);
     }
 
     private static void RequireOutputStreams(Stream[] outputStreams, int pageCount)
@@ -1221,21 +1212,26 @@ public class PdfDocument : IDisposable
     /// Async version of <see cref="SaveAsTiff(string, int, TiffColorMode, byte)"/>.
     /// Pages are rendered and written on the thread pool, never on the caller's synchronization context.
     /// </summary>
+    /// <remarks>
+    /// <paramref name="cancellationToken"/> is checked before each page; a cancelled export deletes the
+    /// partly written file. libtiff writes synchronously, so a page being written finishes first.
+    /// </remarks>
     public Task SaveAsTiffAsync(string outputPath, int dpi = 200,
-        TiffColorMode colorMode = TiffColorMode.Bilevel, byte threshold = 128)
+        TiffColorMode colorMode = TiffColorMode.Bilevel, byte threshold = 128, CancellationToken cancellationToken = default)
     {
-        return SaveAsTiffAsync(outputPath, dpi, dpi, colorMode, threshold);
+        return SaveAsTiffAsync(outputPath, dpi, dpi, colorMode, threshold, cancellationToken);
     }
 
     /// <summary>
     /// Async version of <see cref="SaveAsTiff(string, int, int, TiffColorMode, byte)"/>.
     /// </summary>
+    /// <inheritdoc cref="SaveAsTiffAsync(string, int, TiffColorMode, byte, CancellationToken)" path="/remarks"/>
     public async Task SaveAsTiffAsync(string outputPath, int dpiWidth, int dpiHeight,
-        TiffColorMode colorMode = TiffColorMode.Bilevel, byte threshold = 128)
+        TiffColorMode colorMode = TiffColorMode.Bilevel, byte threshold = 128, CancellationToken cancellationToken = default)
     {
         await new ThreadPoolHop();
 
-        int pageCount = await RequirePagesAsync().ConfigureAwait(false);
+        int pageCount = await RequirePagesAsync(cancellationToken).ConfigureAwait(false);
         ArgumentException.ThrowIfNullOrWhiteSpace(outputPath);
         RequirePositiveDpi(dpiWidth, dpiHeight);
 
@@ -1245,7 +1241,7 @@ public class PdfDocument : IDisposable
             using (file)
             using (var writer = new TiffWriter(file))
             {
-                await WriteAllPagesToTiffAsync(writer, pageCount, dpiWidth, dpiHeight, colorMode, threshold).ConfigureAwait(false);
+                await WriteAllPagesToTiffAsync(writer, pageCount, dpiWidth, dpiHeight, colorMode, threshold, cancellationToken).ConfigureAwait(false);
                 writer.Close();
             }
         }
@@ -1259,25 +1255,31 @@ public class PdfDocument : IDisposable
     /// <summary>
     /// Async version of <see cref="SaveAsTiff(Stream, int, TiffColorMode, byte)"/>.
     /// </summary>
+    /// <remarks>
+    /// <paramref name="cancellationToken"/> is checked before each page; after a cancellation the
+    /// stream holds an incomplete TIFF. libtiff writes synchronously, so the stream is written with
+    /// synchronous calls.
+    /// </remarks>
     public Task SaveAsTiffAsync(Stream output, int dpi = 200,
-        TiffColorMode colorMode = TiffColorMode.Bilevel, byte threshold = 128)
+        TiffColorMode colorMode = TiffColorMode.Bilevel, byte threshold = 128, CancellationToken cancellationToken = default)
     {
-        return SaveAsTiffAsync(output, dpi, dpi, colorMode, threshold);
+        return SaveAsTiffAsync(output, dpi, dpi, colorMode, threshold, cancellationToken);
     }
 
     /// <summary>
     /// Async version of <see cref="SaveAsTiff(Stream, int, int, TiffColorMode, byte)"/>.
     /// </summary>
+    /// <inheritdoc cref="SaveAsTiffAsync(Stream, int, TiffColorMode, byte, CancellationToken)" path="/remarks"/>
     public async Task SaveAsTiffAsync(Stream output, int dpiWidth, int dpiHeight,
-        TiffColorMode colorMode = TiffColorMode.Bilevel, byte threshold = 128)
+        TiffColorMode colorMode = TiffColorMode.Bilevel, byte threshold = 128, CancellationToken cancellationToken = default)
     {
         await new ThreadPoolHop();
 
-        int pageCount = await RequirePagesAsync().ConfigureAwait(false);
+        int pageCount = await RequirePagesAsync(cancellationToken).ConfigureAwait(false);
         RequirePositiveDpi(dpiWidth, dpiHeight);
 
         using var writer = new TiffWriter(output);
-        await WriteAllPagesToTiffAsync(writer, pageCount, dpiWidth, dpiHeight, colorMode, threshold).ConfigureAwait(false);
+        await WriteAllPagesToTiffAsync(writer, pageCount, dpiWidth, dpiHeight, colorMode, threshold, cancellationToken).ConfigureAwait(false);
         writer.Close();
     }
 
@@ -1293,11 +1295,11 @@ public class PdfDocument : IDisposable
     }
 
     private async Task WriteAllPagesToTiffAsync(TiffWriter writer, int pageCount, int dpiWidth, int dpiHeight,
-        TiffColorMode colorMode, byte threshold)
+        TiffColorMode colorMode, byte threshold, CancellationToken cancellationToken)
     {
         for (int i = 0; i < pageCount; i++)
         {
-            var lease = await RenderPageLeaseAsync(i, dpiWidth, dpiHeight, TiffRenderFlags, gray: true).ConfigureAwait(false);
+            var lease = await RenderPageLeaseAsync(i, dpiWidth, dpiHeight, TiffRenderFlags, cancellationToken, gray: true).ConfigureAwait(false);
             await using var leaseScope = lease.ConfigureAwait(false);
             WriteTiffPage(writer, lease, dpiWidth, dpiHeight, colorMode, threshold, pageCount);
         }
@@ -1337,9 +1339,11 @@ public class PdfDocument : IDisposable
     }
 
     /// <summary>Async version of <see cref="SaveAsPngs"/>.</summary>
-    public Task SaveAsPngsAsync(string outputDirectory, string fileNamePrefix = DefaultFileNamePrefix, int dpi = 300)
+    /// <inheritdoc cref="SaveImagesToDirectoryAsync" path="/remarks"/>
+    public Task SaveAsPngsAsync(string outputDirectory, string fileNamePrefix = DefaultFileNamePrefix, int dpi = 300,
+        CancellationToken cancellationToken = default)
     {
-        return SaveImagesToDirectoryAsync(outputDirectory, fileNamePrefix, ImageFormat.Png, DefaultJpegQuality, dpi, dpi);
+        return SaveImagesToDirectoryAsync(outputDirectory, fileNamePrefix, ImageFormat.Png, DefaultJpegQuality, dpi, dpi, cancellationToken);
     }
 
     /// <summary>
@@ -1359,15 +1363,19 @@ public class PdfDocument : IDisposable
     }
 
     /// <summary>Async version of <see cref="SaveAsJpegs(string, string, int, int)"/>.</summary>
-    public Task SaveAsJpegsAsync(string outputDirectory, string fileNamePrefix = DefaultFileNamePrefix, int quality = DefaultJpegQuality, int dpi = 300)
+    /// <inheritdoc cref="SaveImagesToDirectoryAsync" path="/remarks"/>
+    public Task SaveAsJpegsAsync(string outputDirectory, string fileNamePrefix = DefaultFileNamePrefix, int quality = DefaultJpegQuality, int dpi = 300,
+        CancellationToken cancellationToken = default)
     {
-        return SaveAsJpegsAsync(outputDirectory, fileNamePrefix, quality, dpi, dpi);
+        return SaveAsJpegsAsync(outputDirectory, fileNamePrefix, quality, dpi, dpi, cancellationToken);
     }
 
     /// <summary>Async version of <see cref="SaveAsJpegs(string, string, int, int, int)"/>.</summary>
-    public Task SaveAsJpegsAsync(string outputDirectory, string fileNamePrefix, int quality, int dpiWidth, int dpiHeight)
+    /// <inheritdoc cref="SaveImagesToDirectoryAsync" path="/remarks"/>
+    public Task SaveAsJpegsAsync(string outputDirectory, string fileNamePrefix, int quality, int dpiWidth, int dpiHeight,
+        CancellationToken cancellationToken = default)
     {
-        return SaveImagesToDirectoryAsync(outputDirectory, fileNamePrefix, ImageFormat.Jpeg, quality, dpiWidth, dpiHeight);
+        return SaveImagesToDirectoryAsync(outputDirectory, fileNamePrefix, ImageFormat.Jpeg, quality, dpiWidth, dpiHeight, cancellationToken);
     }
 
     /// <summary>
@@ -1394,7 +1402,9 @@ public class PdfDocument : IDisposable
     /// </summary>
     /// <remarks>
     /// This call returns without waiting for the native gate. An empty document is reported
-    /// (<see cref="InvalidOperationException"/>) when enumeration starts.
+    /// (<see cref="InvalidOperationException"/>) when enumeration starts. Cancel with
+    /// <see cref="TaskAsyncEnumerableExtensions.WithCancellation{T}(IAsyncEnumerable{T}, CancellationToken)"/>;
+    /// the token is checked before each page.
     /// </remarks>
     public IAsyncEnumerable<byte[]> StreamJpegBytesAsync(int quality = DefaultJpegQuality, int dpi = 300)
     {
@@ -1428,15 +1438,19 @@ public class PdfDocument : IDisposable
     }
 
     /// <summary>Async version of <see cref="SaveAsImages(string, string, ImageFormat, int, int)"/>.</summary>
-    public Task SaveAsImagesAsync(string outputDirectory, string fileNamePrefix, ImageFormat format, int quality = DefaultJpegQuality, int dpi = 300)
+    /// <inheritdoc cref="SaveImagesToDirectoryAsync" path="/remarks"/>
+    public Task SaveAsImagesAsync(string outputDirectory, string fileNamePrefix, ImageFormat format, int quality = DefaultJpegQuality, int dpi = 300,
+        CancellationToken cancellationToken = default)
     {
-        return SaveImagesToDirectoryAsync(outputDirectory, fileNamePrefix, format, quality, dpi, dpi);
+        return SaveImagesToDirectoryAsync(outputDirectory, fileNamePrefix, format, quality, dpi, dpi, cancellationToken);
     }
 
     /// <summary>Async version of <see cref="SaveAsImages(string, string, ImageFormat, int, int, int)"/>.</summary>
-    public Task SaveAsImagesAsync(string outputDirectory, string fileNamePrefix, ImageFormat format, int quality, int dpiWidth, int dpiHeight)
+    /// <inheritdoc cref="SaveImagesToDirectoryAsync" path="/remarks"/>
+    public Task SaveAsImagesAsync(string outputDirectory, string fileNamePrefix, ImageFormat format, int quality, int dpiWidth, int dpiHeight,
+        CancellationToken cancellationToken = default)
     {
-        return SaveImagesToDirectoryAsync(outputDirectory, fileNamePrefix, format, quality, dpiWidth, dpiHeight);
+        return SaveImagesToDirectoryAsync(outputDirectory, fileNamePrefix, format, quality, dpiWidth, dpiHeight, cancellationToken);
     }
 
     /// <summary>
@@ -1459,12 +1473,16 @@ public class PdfDocument : IDisposable
             File.WriteAllBytes(Path.Combine(outputDirectory, PageFileName(fileNamePrefix, ++pageNumber, format)), bytes);
     }
 
+    /// <remarks>
+    /// The files are written asynchronously. <paramref name="cancellationToken"/> is checked before
+    /// each page and passed to the writes; pages written before a cancellation are kept.
+    /// </remarks>
     private async Task SaveImagesToDirectoryAsync(string outputDirectory, string fileNamePrefix, ImageFormat format, int quality,
-        int dpiWidth, int dpiHeight)
+        int dpiWidth, int dpiHeight, CancellationToken cancellationToken)
     {
         await new ThreadPoolHop();
 
-        int pageCount = await RequirePagesAsync().ConfigureAwait(false);
+        int pageCount = await RequirePagesAsync(cancellationToken).ConfigureAwait(false);
         ArgumentException.ThrowIfNullOrWhiteSpace(outputDirectory);
         RequireStreamableFormat(format);
         RequirePositiveDpi(dpiWidth, dpiHeight);
@@ -1472,8 +1490,11 @@ public class PdfDocument : IDisposable
         Directory.CreateDirectory(outputDirectory);
 
         int pageNumber = 0;
-        await foreach (var bytes in StreamImageBytesCoreAsync(format, quality, dpiWidth, dpiHeight, pageCount).ConfigureAwait(false))
-            File.WriteAllBytes(Path.Combine(outputDirectory, PageFileName(fileNamePrefix, ++pageNumber, format)), bytes);
+        await foreach (var bytes in StreamImageBytesCoreAsync(format, quality, dpiWidth, dpiHeight, pageCount, cancellationToken).ConfigureAwait(false))
+        {
+            await File.WriteAllBytesAsync(Path.Combine(outputDirectory, PageFileName(fileNamePrefix, ++pageNumber, format)), bytes,
+                cancellationToken).ConfigureAwait(false);
+        }
     }
 
     /// <summary>
@@ -1584,8 +1605,8 @@ public class PdfDocument : IDisposable
     private (byte[] Buffer, int Length) SaveCore(uint flags)
     {
         PdfiumRuntime.AssertHeld();
-        if (!PooledFileWriter.TrySave(Document, flags, out var buffer, out int length, out uint error))
-            throw new InvalidOperationException($"Failed to save PDF document. PDFium error code: {error}");
+        if (!PooledFileWriter.TrySave(Document, flags, out var buffer, out int length))
+            throw new InvalidOperationException("Failed to save PDF document.");
 
         return (buffer, length);
     }

@@ -6,7 +6,7 @@ namespace PdfiumWrapper;
 /// P/Invoke bindings for libtiff using modern LibraryImport.
 /// Covers multi-page TIFF writing with CCITT G4, LZW, and Deflate compression.
 /// </summary>
-public static partial class LibTiff
+internal static partial class LibTiff
 {
     private const string LibraryName = "tiff";
 

@@ -13,7 +13,7 @@ public class PdfImageObject : PdfPageObject
     /// <summary>
     /// Create a new image object
     /// </summary>
-    public static PdfImageObject Create(IntPtr documentHandle)
+    internal static PdfImageObject Create(IntPtr documentHandle)
     {
         using var _ = PdfiumRuntime.Enter();
 

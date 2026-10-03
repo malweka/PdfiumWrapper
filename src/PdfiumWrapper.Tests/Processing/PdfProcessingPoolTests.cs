@@ -94,7 +94,7 @@ public class PdfProcessingPoolTests : IDisposable
 
         var failed = await pool.GetPageCountAsync(bad).WaitAsync(PoolFixture.TestTimeout);
         Assert.Equal(PdfJobStatus.Failed, failed.Status);
-        Assert.Contains("InvalidOperationException", failed.Error);
+        Assert.Contains("PdfiumException", failed.Error);
         Assert.Equal(1, failed.Attempts);
 
         var missing = await pool.GetPageCountAsync(Path.Combine(_output, "missing.pdf")).WaitAsync(PoolFixture.TestTimeout);

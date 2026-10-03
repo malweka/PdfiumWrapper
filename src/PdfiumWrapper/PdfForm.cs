@@ -129,50 +129,34 @@ public class PdfForm : IDisposable
 
     private FormField? ExtractFormField(IntPtr annot, int pageIndex)
     {
-        // Get field name
-        ulong nameLength = PDFium.FPDFAnnot_GetFormFieldName(_formHandle, annot, IntPtr.Zero, 0);
-        if (nameLength == 0)
+        string? name = GetFieldName(annot);
+        if (name == null)
             return null;
 
-        var nameBuffer = Marshal.AllocHGlobal((int)nameLength);
-        try
+        int type = PDFium.FPDFAnnot_GetFormFieldType(_formHandle, annot);
+        string? value = GetAnnotFieldValue(annot, type);
+        int flags = PDFium.FPDFAnnot_GetFormFieldFlags(_formHandle, annot);
+
+        // Options for combo/list boxes
+        var options = type is PDFium.FPDF_FORMFIELD_COMBOBOX or PDFium.FPDF_FORMFIELD_LISTBOX
+            ? GetFieldOptions(annot)
+            : new List<string>();
+
+        return new FormField
         {
-            PDFium.FPDFAnnot_GetFormFieldName(_formHandle, annot, nameBuffer, nameLength);
-            string? name = Marshal.PtrToStringUni(nameBuffer);
-
-            // Get field type
-            int type = PDFium.FPDFAnnot_GetFormFieldType(_formHandle, annot);
-
-            // Get field value
-            string? value = GetAnnotFieldValue(annot, type);
-
-            // Get flags
-            int flags = PDFium.FPDFAnnot_GetFormFieldFlags(_formHandle, annot);
-
-            // Get options for combo/list boxes
-            List<string> options = new List<string>();
-
-            if (type == PDFium.FPDF_FORMFIELD_COMBOBOX || type == PDFium.FPDF_FORMFIELD_LISTBOX)
-            {
-                options = GetFieldOptions(annot);
-            }
-
-            return new FormField
-            {
-                Name = name,
-                Type = (FormFieldType)type,
-                Value = value,
-                PageIndex = pageIndex,
-                IsRequired = (flags & PDFium.FPDF_FORMFLAG_REQUIRED) != 0,
-                IsReadOnly = (flags & PDFium.FPDF_FORMFLAG_READONLY) != 0,
-                Options = options
-            };
-        }
-        finally
-        {
-            Marshal.FreeHGlobal(nameBuffer);
-        }
+            Name = name,
+            Type = (FormFieldType)type,
+            Value = value,
+            PageIndex = pageIndex,
+            IsRequired = (flags & PDFium.FPDF_FORMFLAG_REQUIRED) != 0,
+            IsReadOnly = (flags & PDFium.FPDF_FORMFLAG_READONLY) != 0,
+            Options = options
+        };
     }
+
+    private string? GetFieldName(IntPtr annot) =>
+        NativeText.ReadUtf16((_formHandle, annot),
+            static (s, buffer, length) => PDFium.FPDFAnnot_GetFormFieldName(s._formHandle, s.annot, buffer, length));
 
     private string? GetAnnotFieldValue(IntPtr annot, int fieldType)
     {
@@ -183,43 +167,11 @@ public class PdfForm : IDisposable
                 bool isChecked = PDFium.FPDFAnnot_IsChecked(_formHandle, annot);
                 return isChecked ? "true" : "false";
 
-            case PDFium.FPDF_FORMFIELD_COMBOBOX:
-            case PDFium.FPDF_FORMFIELD_LISTBOX:
-                // For combo/list boxes, get the current value
-                ulong valueLength = PDFium.FPDFAnnot_GetFormFieldValue(_formHandle, annot, IntPtr.Zero, 0);
-                if (valueLength > 0)
-                {
-                    var valueBuffer = Marshal.AllocHGlobal((int)valueLength);
-                    try
-                    {
-                        PDFium.FPDFAnnot_GetFormFieldValue(_formHandle, annot, valueBuffer, valueLength);
-                        return Marshal.PtrToStringUni(valueBuffer);
-                    }
-                    finally
-                    {
-                        Marshal.FreeHGlobal(valueBuffer);
-                    }
-                }
-                return string.Empty;
-
-            case PDFium.FPDF_FORMFIELD_TEXTFIELD:
             default:
-                // Standard text field
-                ulong textLength = PDFium.FPDFAnnot_GetFormFieldValue(_formHandle, annot, IntPtr.Zero, 0);
-                if (textLength > 0)
-                {
-                    var textBuffer = Marshal.AllocHGlobal((int)textLength);
-                    try
-                    {
-                        PDFium.FPDFAnnot_GetFormFieldValue(_formHandle, annot, textBuffer, textLength);
-                        return Marshal.PtrToStringUni(textBuffer);
-                    }
-                    finally
-                    {
-                        Marshal.FreeHGlobal(textBuffer);
-                    }
-                }
-                return string.Empty;
+                // Text fields and the current value of combo/list boxes
+                return NativeText.ReadUtf16((_formHandle, annot),
+                    static (s, buffer, length) => PDFium.FPDFAnnot_GetFormFieldValue(s._formHandle, s.annot, buffer, length))
+                    ?? string.Empty;
         }
     }
 
@@ -230,21 +182,10 @@ public class PdfForm : IDisposable
 
         for (int i = 0; i < optionCount; i++)
         {
-            ulong labelLength = PDFium.FPDFAnnot_GetOptionLabel(_formHandle, annot, i, IntPtr.Zero, 0);
-            if (labelLength > 0)
-            {
-                var labelBuffer = Marshal.AllocHGlobal((int)labelLength);
-                try
-                {
-                    PDFium.FPDFAnnot_GetOptionLabel(_formHandle, annot, i, labelBuffer, labelLength);
-                    string label = Marshal.PtrToStringUni(labelBuffer) ?? string.Empty;
-                    options.Add(label);
-                }
-                finally
-                {
-                    Marshal.FreeHGlobal(labelBuffer);
-                }
-            }
+            var label = NativeText.ReadUtf16((_formHandle, annot, i),
+                static (s, buffer, length) => PDFium.FPDFAnnot_GetOptionLabel(s._formHandle, s.annot, s.i, buffer, length));
+            if (label != null)
+                options.Add(label);
         }
 
         return options;
@@ -308,25 +249,9 @@ public class PdfForm : IDisposable
                 if (shouldCheck)
                 {
                     // Get export value for the field
-                    ulong exportLength = PDFium.FPDFAnnot_GetFormFieldExportValue(_formHandle, annot, IntPtr.Zero, 0);
-                    if (exportLength > 0)
-                    {
-                        var exportBuffer = Marshal.AllocHGlobal((int)exportLength);
-                        try
-                        {
-                            PDFium.FPDFAnnot_GetFormFieldExportValue(_formHandle, annot, exportBuffer, exportLength);
-                            string exportValue = Marshal.PtrToStringUni(exportBuffer)!;
-                            PDFium.FPDFAnnot_SetStringValue(annot, "V", exportValue);
-                        }
-                        finally
-                        {
-                            Marshal.FreeHGlobal(exportBuffer);
-                        }
-                    }
-                    else
-                    {
-                        PDFium.FPDFAnnot_SetStringValue(annot, "V", "Yes");
-                    }
+                    var exportValue = NativeText.ReadUtf16((_formHandle, annot),
+                        static (s, buffer, length) => PDFium.FPDFAnnot_GetFormFieldExportValue(s._formHandle, s.annot, buffer, length));
+                    PDFium.FPDFAnnot_SetStringValue(annot, "V", exportValue ?? "Yes");
                 }
                 else
                 {
@@ -426,26 +351,11 @@ public class PdfForm : IDisposable
 
                 if (subtype == PDFium.FPDF_ANNOT_WIDGET)
                 {
-                    // Get field name
-                    ulong nameLength = PDFium.FPDFAnnot_GetFormFieldName(_formHandle, annot, IntPtr.Zero, 0);
-                    if (nameLength > 0)
+                    string? name = GetFieldName(annot);
+                    if (name != null && name.Equals(fieldName, StringComparison.OrdinalIgnoreCase))
                     {
-                        var nameBuffer = Marshal.AllocHGlobal((int)nameLength);
-                        try
-                        {
-                            PDFium.FPDFAnnot_GetFormFieldName(_formHandle, annot, nameBuffer, nameLength);
-                            string name = Marshal.PtrToStringUni(nameBuffer)!;
-
-                            if (name.Equals(fieldName, StringComparison.OrdinalIgnoreCase))
-                            {
-                                var field = ExtractFormField(annot, pageIndex);
-                                return (field!, annot, page);
-                            }
-                        }
-                        finally
-                        {
-                            Marshal.FreeHGlobal(nameBuffer);
-                        }
+                        var field = ExtractFormField(annot, pageIndex);
+                        return (field!, annot, page);
                     }
                 }
 

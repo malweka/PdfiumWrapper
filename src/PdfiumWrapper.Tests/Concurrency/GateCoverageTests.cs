@@ -204,7 +204,7 @@ public class GateCoverageTests : IDisposable
             _page.AddRectangle(10, 10, 20, 20);
             using (PdfiumRuntime.Enter())
             {
-                var wrapper = create(_page.GetObject(0), _document.Document);
+                var wrapper = create(_page.GetObject(0).Handle, _document.Document);
                 wrapper.AttachToPage(_page);
                 return wrapper;
             }
@@ -267,6 +267,7 @@ public class GateCoverageTests : IDisposable
             if (type == typeof(TiffColorMode)) return TiffColorMode.Bilevel;
             if (type == typeof(Color)) return Color.Black;
             if (type == typeof(DateTime)) return DateTime.UtcNow;
+            if (type == typeof(CancellationToken)) return CancellationToken.None;
             if (type == typeof(Func<PdfPage, int>)) return (Func<PdfPage, int>)(_ => 0);
             if (type == typeof(Action<PdfPage>)) return (Action<PdfPage>)(_ => { });
             if (Nullable.GetUnderlyingType(type) != null) return null;

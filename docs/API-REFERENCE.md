@@ -82,7 +82,7 @@ using var secureDoc = new PdfDocument("encrypted.pdf", password: "secret");
 - `password` — Optional password for encrypted PDFs
 
 **Exceptions:**
-- `InvalidOperationException` — If the document fails to load
+- `PdfiumException` — If the document fails to load. It derives from `InvalidOperationException`; its `ErrorCode` says why (see [Load errors](#load-errors)).
 
 #### PdfDocument(byte[] data, string password = null)
 
@@ -119,12 +119,38 @@ The threshold can be changed with `AppContext.SetData("PdfiumWrapper.SpoolThresh
 - `pdfStream` — Readable stream containing PDF data. It does not need to be seekable.
 - `password` — Optional password for encrypted PDFs
 
+#### Load errors
+
+Every constructor that loads a document (path, byte array, stream, and the same `PdfMerger` constructors) throws `PdfiumException` when PDFium rejects the input. `ErrorCode` is a `PdfiumErrorCode`, the value of `FPDF_GetLastError` read right after the failing load:
+
+| `ErrorCode` | Meaning |
+|-------------|---------|
+| `File` | The file was not found or could not be opened |
+| `Format` | The input is not a PDF or is corrupted |
+| `Password` | The document is encrypted and the password is missing or wrong |
+| `Security` | The document uses a security handler PDFium does not support |
+| `Unknown`, `Page` | Other failures |
+
+```csharp
+try
+{
+    using var document = new PdfDocument(bytes, password);
+}
+catch (PdfiumException ex) when (ex.ErrorCode == PdfiumErrorCode.Password)
+{
+    // Ask for the password again
+}
+```
+
+**Changed in 2.0:** load failures used to be plain `InvalidOperationException` with the code in the message. `PdfiumException` derives from `InvalidOperationException`, so existing `catch` blocks still match. Failures of calls that do not set `FPDF_GetLastError` (importing pages, creating or loading a page, saving) no longer append a stale code to their message.
+
 ### Properties
 
 | Property | Type | Description |
 |----------|------|-------------|
 | `PageCount` | `int` | Number of pages in the document |
-| `Permissions` | `uint` | Document permission flags (see PDF specification) |
+| `Permissions` | `PdfPermissions` | Document permission flags (see PDF specification) |
+| `DocumentId` | `string?` | The original file identifier from the trailer `/ID`, as uppercase hex (32 characters for the usual 16-byte ID), or null. **Changed in 2.0:** the hex no longer ends in `00` from PDFium's terminator. |
 | `Metadata` | `PdfMetadata` | Access to document metadata |
 | `Bookmarks` | `PdfBookmarks` | Access to document bookmarks/outlines |
 | `Attachments` | `PdfAttachments` | Access to embedded file attachments |
@@ -179,7 +205,7 @@ string text = page.ExtractText();
 
 #### GetAllPages()
 
-Returns all pages as an array. **Important:** Each page must be disposed individually.
+**Obsolete.** Returns all pages as an array, every page loaded at once. Dispose each page; an undisposed page is released by its finalizer or with the document. Prefer `ProcessAllPages`, which loads and disposes one page at a time.
 
 ```csharp
 var pages = document.GetAllPages();
@@ -273,8 +299,10 @@ Renders all pages to bitmaps with different horizontal and vertical DPI.
 Async version. Waits for the native gate without blocking a thread.
 
 ```csharp
-RawBitmap[] bitmaps = await document.RenderPagesAsync(dpi: 300);
+RawBitmap[] bitmaps = await document.RenderPagesAsync(dpi: 300, cancellationToken: ct);
 ```
+
+**Cancellation:** every async method on `PdfDocument` takes an optional `CancellationToken` as its last parameter (`StreamImageBytesAsync` and `StreamJpegBytesAsync` take it through `WithCancellation`). The token is checked before each page and while waiting for the native gate, and a cancelled call throws `OperationCanceledException`. A page that is rendering finishes first. PNG and JPEG files are written with `File.WriteAllBytesAsync` and the token; pages written before the cancellation are kept. libtiff writes synchronously, so TIFF output checks the token between pages only; a cancelled `SaveAsTiffAsync(path)` deletes the partial file, and a cancelled `SaveAsTiffAsync(stream)` leaves an incomplete TIFF in the stream.
 
 **Note:** This applies to every async method on `PdfDocument` (`RenderPagesAsync`, `StreamImageBytesAsync`, `StreamJpegBytesAsync`, `SaveAsTiffAsync`, `SaveAsPngsAsync`, `SaveAsJpegsAsync`, `SaveAsImagesAsync`, `ProcessAllPagesAsync`): pages are processed sequentially on thread-pool threads, and waiting for the gate does not block a thread. They never post work to the caller's `SynchronizationContext`, so a UI thread is not used for rendering, and a caller that blocks on the task (`.Wait()`, `.Result`) does not deadlock. For the same reason, the delegate passed to `ProcessAllPagesAsync` runs on a thread-pool thread. The synchronous methods, including constructors, block the calling thread while they wait. Neither form renders one document's pages in parallel.
 
@@ -590,6 +618,22 @@ page.AddRectangle(100, 500, 200, 100, Color.Blue, null);
 page.GenerateContent();  // Required!
 document.Save("output.pdf");
 ```
+
+#### ObjectCount and GetObject(int index)
+
+`ObjectCount` is the number of objects on the page. `GetObject` returns the object at `index` wrapped in the class that matches its kind: `PdfTextObject`, `PdfPathObject`, `PdfImageObject`, `PdfShadingObject` or `PdfFormObject` (a form XObject, whose own `ObjectCount` and `GetObject` read its sub-objects).
+
+```csharp
+for (int i = 0; i < page.ObjectCount; i++)
+{
+    var obj = page.GetObject(i);
+    Console.WriteLine($"{obj.GetType().Name}: {obj.GetBounds()}");
+}
+```
+
+The page owns these objects: disposing a wrapper does not delete the object, and every wrapper becomes unusable (`ObjectDisposedException`) when the page is disposed. While a wrapper is not disposed, the page returns that same wrapper for the same object, including the wrappers returned by the `Add*` methods. Pass a wrapper to `RemoveObject` to take the object off the page.
+
+**Changed in 2.0:** `GetObject` returned a native `IntPtr`, and `PdfTextObject.Create`, `PdfImageObject.Create`, `PdfPathObject.Create` and `CreateRectangle` took a document handle. The factories are internal; use the `Add*` methods.
 
 ### Text Extraction Methods
 
@@ -1155,13 +1199,15 @@ merger.CopyViewerPreferences(source);
 
 ## PdfMetadata
 
-Provides access to PDF document metadata.
+Reads PDF document metadata (the Info dictionary). Metadata is read-only: PDFium has no function to write it.
 
 ### Declaration
 
 ```csharp
 public class PdfMetadata
 ```
+
+**Changed in 2.0:** the property setters, `SetMetadataString`, `SetCreationDateTime`, `SetModificationDateTime`, `SetAllMetadata` and `ClearAllMetadata` are removed. They called `FPDF_SetMetaText`, which PDFium does not export, so every call threw `EntryPointNotFoundException`.
 
 ### Properties
 
@@ -1176,8 +1222,8 @@ public class PdfMetadata
 | `CreationDate` | `string` | Raw creation date string |
 | `ModificationDate` | `string` | Raw modification date string |
 | `Trapped` | `string` | Trapped status |
-| `FileVersion` | `int` | PDF version as integer (e.g., 17 for PDF 1.7) |
-| `FileVersionString` | `string` | PDF version as string (e.g., "1.7") |
+| `PdfVersion` | `int` | PDF version as integer (e.g., 17 for PDF 1.7) |
+| `PdfVersionString` | `string` | PDF version as string (e.g., "1.7") |
 | `CreationDateTime` | `DateTime?` | Parsed creation date |
 | `ModificationDateTime` | `DateTime?` | Parsed modification date |
 
@@ -1189,51 +1235,6 @@ Gets a metadata value by tag name.
 
 ```csharp
 string customField = document.Metadata.GetMetadataString("CustomField");
-```
-
-#### SetMetadataString(string tag, string value)
-
-Sets a metadata value by tag name.
-
-```csharp
-document.Metadata.SetMetadataString("CustomField", "Custom Value");
-```
-
-#### SetCreationDateTime(DateTime dateTime)
-
-Sets the creation date from a DateTime.
-
-```csharp
-document.Metadata.SetCreationDateTime(DateTime.Now);
-```
-
-#### SetModificationDateTime(DateTime dateTime)
-
-Sets the modification date from a DateTime.
-
-```csharp
-document.Metadata.SetModificationDateTime(DateTime.UtcNow);
-```
-
-#### SetAllMetadata(...)
-
-Sets multiple metadata fields at once.
-
-```csharp
-document.Metadata.SetAllMetadata(
-    title: "Annual Report 2024",
-    author: "Finance Department",
-    subject: "Q4 Financial Results",
-    keywords: "finance, quarterly, 2024"
-);
-```
-
-#### ClearAllMetadata()
-
-Clears all metadata fields.
-
-```csharp
-document.Metadata.ClearAllMetadata();
 ```
 
 #### GetAllMetadata()
@@ -1411,8 +1412,8 @@ Groups several wrapper calls into one uninterrupted native sequence. Wrapper mem
 using (PdfiumRuntime.Enter())
 {
     // No other thread runs PDFium work between these calls
-    document.Metadata.Title = "Report";
-    document.Metadata.Author = "Finance";
+    var title = document.Metadata.Title;
+    var author = document.Metadata.Author;
 }
 ```
 
@@ -1436,12 +1437,14 @@ PdfiumRuntime.Shutdown(); // throws if anything is still alive
 
 ## The PDFium Class in 2.0
 
-**Breaking change:** the raw native imports on the `PDFium` class (192 functions such as `PDFium.FPDF_LoadDocument` or `PDFium.FPDF_RenderPageBitmap`) are `internal` in 2.0. A raw call bypassed the gate and was unsafe next to any other use of the library. There is no supported raw-call path in 2.0; functionality that is needed is exposed through the wrapper types.
+**Breaking change:** the raw native imports on the `PDFium` class (functions such as `PDFium.FPDF_LoadDocument` or `PDFium.FPDF_RenderPageBitmap`) are `internal` in 2.0, and so are the `LibTiff` and `LibTurboJpeg` import classes. A raw call bypassed the gate and was unsafe next to any other use of the library. There is no supported raw-call path in 2.0; functionality that is needed is exposed through the wrapper types.
 
-The `PDFium` class itself stays public for its constants and structs, for example:
+The `PDFium` class itself stays public for its constants, for example:
 
 - `PDFium.FPDF_ANNOT`, `PDFium.FPDF_PRINTING` and the other render flags for `PdfPage.RenderToBytes`
 - `PDFium.FPDF_INCREMENTAL` and the other save flags for `Save` / `SaveToStream`
+
+Its interop structs (`FPDF_FILEWRITE`, `FPDF_FORMFILLINFO` and the others) are internal, like the functions that take them. No public member of the library takes or returns a native pointer.
 
 ---
 
@@ -1534,6 +1537,8 @@ Output files are written to a temporary name and renamed when complete, so a cra
 - **Memory retirement** (`MaxWorkerMemoryBytes`): the worker takes no new job, finishes the ones it is running (each within its `JobTimeout`), then shuts down and is replaced.
 - **Cancellation:** a cancelled job that has not started is dropped; one in flight is asked to stop between pages and its partial output removed. Either way the result is `Cancelled`.
 - **`DisposeAsync`:** stops accepting jobs, cancels queued ones, lets in-flight ones finish (up to `JobTimeout`), then stops every worker. Submitting afterwards throws `ObjectDisposedException`.
+- **Workers never outlive the application.** If the process that owns the pool ends without disposing it (a crash, a kill), its workers end too. On Windows every worker is in a job object that Windows kills with the owning process. On every platform a worker whose standard input closes asks its jobs to stop and exits; if a job does not stop within 5 seconds (hung in native code, for example), the worker exits anyway with exit code 5.
+- **Large text results** (above 4 MB as UTF-16, about two million characters) travel through a file in the pool's own temp directory under `TempDirectory`. The pool reads such a file only from there, deletes it once read, and deletes it as well when nobody will read it (the job was cancelled, timed out or its worker died).
 
 #### Properties
 
@@ -1602,7 +1607,7 @@ public static class PdfWorkerHost
 }
 ```
 
-`TryRun()` returns `false` immediately in a normal process. In a worker it runs the job loop until the pool shuts it down and then returns `true`; the process should exit. A worker writes protocol frames to its standard output, so nothing else in the process may write there; calling `TryRun()` first in `Main` guarantees that.
+`TryRun()` returns `false` immediately in a normal process. In a worker it runs the job loop until the pool shuts it down, or until its standard input closes, and then returns `true`; the process should exit. A worker writes protocol frames to its standard output, so nothing else in the process may write there; calling `TryRun()` first in `Main` guarantees that.
 
 ### Events and Statistics
 
@@ -1610,6 +1615,6 @@ public static class PdfWorkerHost
 pool.Events += (sender, e) => logger.LogInformation("{Kind} worker={Pid} job={JobId} {Detail}", e.Kind, e.WorkerPid, e.JobId, e.Detail);
 ```
 
-`PdfPoolEventKind`: `WorkerStarting`, `WorkerReady`, `WorkerStopped`, `WorkerCrashed`, `WorkerStartFailed`, `WorkerRetiredForMemory`, `ScaledUp`, `ScaledDown`, `JobDispatched`, `JobCompleted`, `JobFailed`, `JobTimedOut`, `JobRetried`, `JobCancelled`, `QueueFull`. A worker's standard error arrives as `WorkerStopped` events whose detail starts with `stderr:`. Handlers run on pool threads and must be quick and must not throw.
+`PdfPoolEventKind`: `WorkerStarting`, `WorkerReady`, `WorkerStopped`, `WorkerCrashed`, `WorkerStartFailed`, `WorkerRetiredForMemory`, `ScaledUp`, `ScaledDown`, `JobDispatched`, `JobCompleted`, `JobFailed`, `JobTimedOut`, `JobRetried`, `JobCancelled`, `QueueFull`, `WorkerMessage`. A worker's standard error arrives as `WorkerMessage` events, one per line, with the line as the detail; a line longer than 4,096 characters is cut there and ends with ` [truncated]`. Malformed protocol data from a worker is reported the same way. Handlers run on pool threads and must be quick and must not throw.
 
 `PdfPoolStatistics` counts jobs submitted, succeeded, failed, timed out, cancelled, crashed and retried, and workers started, stopped, crashed and retired for memory, plus scale-ups and scale-downs.

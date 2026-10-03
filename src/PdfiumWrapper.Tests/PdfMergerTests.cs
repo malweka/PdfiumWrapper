@@ -101,7 +101,7 @@ public class PdfMergerTests : IDisposable
     public void Constructor_WithInvalidFilePath_ShouldThrowException()
     {
         // Act & Assert
-        Assert.Throws<InvalidOperationException>(() => new PdfMerger("nonexistent.pdf"));
+        Assert.Throws<PdfiumException>(() => new PdfMerger("nonexistent.pdf"));
     }
 
     [Fact]
@@ -362,9 +362,9 @@ public class PdfMergerTests : IDisposable
         using var stream = new MemoryStream(new byte[] { 1, 2, 3, 4, 5 });
 
         // Act
-        var mergerError = Assert.Throws<InvalidOperationException>(() => new PdfMerger(stream));
+        var mergerError = Assert.Throws<PdfiumException>(() => new PdfMerger(stream));
         stream.Position = 0;
-        var documentError = Assert.Throws<InvalidOperationException>(() => new PdfDocument(stream));
+        var documentError = Assert.Throws<PdfiumException>(() => new PdfDocument(stream));
 
         // Assert
         Assert.Equal(documentError.Message, mergerError.Message);
@@ -394,7 +394,7 @@ public class PdfMergerTests : IDisposable
         var invalidBytes = new byte[] { 1, 2, 3, 4, 5 };
 
         // Act & Assert
-        Assert.Throws<InvalidOperationException>(() => new PdfMerger(invalidBytes));
+        Assert.Throws<PdfiumException>(() => new PdfMerger(invalidBytes));
     }
 
     #endregion

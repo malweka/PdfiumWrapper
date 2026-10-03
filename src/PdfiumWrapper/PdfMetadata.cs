@@ -1,6 +1,4 @@
-﻿using System.Runtime.InteropServices;
-
-namespace PdfiumWrapper;
+﻿namespace PdfiumWrapper;
 
 /// <summary>
 /// PDF document metadata and properties
@@ -28,83 +26,47 @@ public class PdfMetadata
     /// <summary>
     /// Document title
     /// </summary>
-    public string Title
-    {
-        get => GetMetadataString(PDFium.METADATA_TITLE);
-        set => SetMetadataString(PDFium.METADATA_TITLE, value);
-    }
+    public string Title => GetMetadataString(PDFium.METADATA_TITLE);
 
     /// <summary>
     /// Document author
     /// </summary>
-    public string Author
-    {
-        get => GetMetadataString(PDFium.METADATA_AUTHOR);
-        set => SetMetadataString(PDFium.METADATA_AUTHOR, value);
-    }
+    public string Author => GetMetadataString(PDFium.METADATA_AUTHOR);
 
     /// <summary>
     /// Document subject
     /// </summary>
-    public string Subject
-    {
-        get => GetMetadataString(PDFium.METADATA_SUBJECT);
-        set => SetMetadataString(PDFium.METADATA_SUBJECT, value);
-    }
+    public string Subject => GetMetadataString(PDFium.METADATA_SUBJECT);
 
     /// <summary>
     /// Document keywords
     /// </summary>
-    public string Keywords
-    {
-        get => GetMetadataString(PDFium.METADATA_KEYWORDS);
-        set => SetMetadataString(PDFium.METADATA_KEYWORDS, value);
-    }
+    public string Keywords => GetMetadataString(PDFium.METADATA_KEYWORDS);
 
     /// <summary>
     /// Application that created the original document
     /// </summary>
-    public string Creator
-    {
-        get => GetMetadataString(PDFium.METADATA_CREATOR);
-        set => SetMetadataString(PDFium.METADATA_CREATOR, value);
-    }
+    public string Creator => GetMetadataString(PDFium.METADATA_CREATOR);
 
     /// <summary>
     /// Application that produced the PDF
     /// </summary>
-    public string Producer
-    {
-        get => GetMetadataString(PDFium.METADATA_PRODUCER);
-        set => SetMetadataString(PDFium.METADATA_PRODUCER, value);
-    }
+    public string Producer => GetMetadataString(PDFium.METADATA_PRODUCER);
 
     /// <summary>
     /// Creation date (raw string from PDF)
     /// </summary>
-    public string CreationDate
-    {
-        get => GetMetadataString(PDFium.METADATA_CREATION_DATE);
-        set => SetMetadataString(PDFium.METADATA_CREATION_DATE, value);
-    }
+    public string CreationDate => GetMetadataString(PDFium.METADATA_CREATION_DATE);
 
     /// <summary>
     /// Modification date (raw string from PDF)
     /// </summary>
-    public string ModificationDate
-    {
-        get => GetMetadataString(PDFium.METADATA_MOD_DATE);
-        set => SetMetadataString(PDFium.METADATA_MOD_DATE, value);
-    }
+    public string ModificationDate => GetMetadataString(PDFium.METADATA_MOD_DATE);
 
     /// <summary>
     /// Trapped status
     /// </summary>
-    public string Trapped
-    {
-        get => GetMetadataString(PDFium.METADATA_TRAPPED);
-        set => SetMetadataString(PDFium.METADATA_TRAPPED, value);
-    }
+    public string Trapped => GetMetadataString(PDFium.METADATA_TRAPPED);
 
     /// <summary>
     /// PDF version (e.g., 14 for PDF 1.4, 17 for PDF 1.7)
@@ -147,83 +109,11 @@ public class PdfMetadata
     /// <summary>
     /// Get a custom metadata value by tag
     /// </summary>
-    public string 
-        GetMetadataString(string tag)
+    public string GetMetadataString(string tag)
     {
         using var _ = PdfiumRuntime.Enter();
-        var document = Handle;
-        ulong length = PDFium.FPDF_GetMetaText(document, tag, IntPtr.Zero, 0);
-        if (length == 0)
-            return string.Empty;
-
-        var buffer = Marshal.AllocHGlobal((int)length);
-        try
-        {
-            PDFium.FPDF_GetMetaText(document, tag, buffer, length);
-            return Marshal.PtrToStringUni(buffer) ?? string.Empty;
-        }
-        finally
-        {
-            Marshal.FreeHGlobal(buffer);
-        }
-    }
-
-    /// <summary>
-    /// Set a metadata value by tag
-    /// </summary>
-    public bool SetMetadataString(string tag, string value)
-    {
-        using var _ = PdfiumRuntime.Enter();
-        return PDFium.FPDF_SetMetaText(Handle, tag, value ?? string.Empty);
-    }
-
-    /// <summary>
-    /// Set creation date from DateTime
-    /// </summary>
-    public void SetCreationDateTime(DateTime dateTime)
-    {
-        string pdfDate = FormatPdfDate(dateTime);
-        SetMetadataString(PDFium.METADATA_CREATION_DATE, pdfDate);
-    }
-
-    /// <summary>
-    /// Set modification date from DateTime
-    /// </summary>
-    public void SetModificationDateTime(DateTime dateTime)
-    {
-        string pdfDate = FormatPdfDate(dateTime);
-        SetMetadataString(PDFium.METADATA_MOD_DATE, pdfDate);
-    }
-
-    /// <summary>
-    /// Set all common metadata fields at once
-    /// </summary>
-    public void SetAllMetadata(string? title = null, string? author = null, string? subject = null,
-        string? keywords = null, string? creator = null, string? producer = null)
-    {
-        using var _ = PdfiumRuntime.Enter();
-        if (title != null) Title = title;
-        if (author != null) Author = author;
-        if (subject != null) Subject = subject;
-        if (keywords != null) Keywords = keywords;
-        if (creator != null) Creator = creator;
-        if (producer != null) Producer = producer;
-    }
-
-    /// <summary>
-    /// Clear all metadata fields
-    /// </summary>
-    public void ClearAllMetadata()
-    {
-        using var _ = PdfiumRuntime.Enter();
-        Title = string.Empty;
-        Author = string.Empty;
-        Subject = string.Empty;
-        Keywords = string.Empty;
-        Creator = string.Empty;
-        Producer = string.Empty;
-        CreationDate = string.Empty;
-        ModificationDate = string.Empty;
+        return NativeText.ReadUtf16((Handle, tag),
+            static (s, buffer, length) => PDFium.FPDF_GetMetaText(s.Handle, s.tag, buffer, length)) ?? string.Empty;
     }
 
     /// <summary>
@@ -313,37 +203,5 @@ public class PdfMetadata
         {
             return null;
         }
-    }
-
-    /// <summary>
-    /// Format DateTime to PDF date string
-    /// PDF date format: D:YYYYMMDDHHmmSSOHH'mm'
-    /// Example: D:20231215103045+05'30'
-    /// </summary>
-    private string FormatPdfDate(DateTime dateTime)
-    {
-        // Convert to UTC if it's local time
-        if (dateTime.Kind == DateTimeKind.Local)
-        {
-            dateTime = dateTime.ToUniversalTime();
-        }
-
-        // Format basic date/time: D:YYYYMMDDHHmmSS
-        string formatted = $"D:{dateTime:yyyyMMddHHmmss}";
-
-        // Add timezone
-        if (dateTime.Kind == DateTimeKind.Utc)
-        {
-            formatted += "Z";
-        }
-        else
-        {
-            // For unspecified, assume local timezone
-            var offset = TimeZoneInfo.Local.GetUtcOffset(dateTime);
-            string sign = offset.TotalMinutes >= 0 ? "+" : "-";
-            formatted += $"{sign}{Math.Abs(offset.Hours):D2}'{Math.Abs(offset.Minutes):D2}'";
-        }
-
-        return formatted;
     }
 }

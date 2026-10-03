@@ -1,4 +1,6 @@
-﻿namespace PdfiumWrapper;
+﻿using System.Runtime.InteropServices;
+
+namespace PdfiumWrapper;
 
 /// <summary>
 /// High-level class for merging and manipulating PDF documents.
@@ -116,7 +118,7 @@ public class PdfMerger : IDisposable
 
         if (!success)
         {
-            throw new InvalidOperationException($"Failed to import pages. Error: {PDFium.FPDF_GetLastError()}");
+            throw ImportFailed();
         }
     }
 
@@ -152,11 +154,11 @@ public class PdfMerger : IDisposable
         bool success;
         using (PdfiumDiagnostics.NativeInterval(NativeOp.Import))
             success = PDFium.FPDF_ImportPagesByIndex(_target.Document, sourceHandle,
-                pageIndices, (ulong)pageIndices.Length, _target.PageCountCore);
+                pageIndices, new CULong((uint)pageIndices.Length), _target.PageCountCore);
 
         if (!success)
         {
-            throw new InvalidOperationException($"Failed to import pages. Error: {PDFium.FPDF_GetLastError()}");
+            throw ImportFailed();
         }
     }
 
@@ -207,7 +209,7 @@ public class PdfMerger : IDisposable
 
         if (!success)
         {
-            throw new InvalidOperationException($"Failed to import pages. Error: {PDFium.FPDF_GetLastError()}");
+            throw ImportFailed();
         }
     }
 
@@ -231,11 +233,11 @@ public class PdfMerger : IDisposable
         bool success;
         using (PdfiumDiagnostics.NativeInterval(NativeOp.Import))
             success = PDFium.FPDF_ImportPagesByIndex(_target.Document, sourceHandle,
-                pageIndices, (ulong)pageIndices.Length, insertAtIndex);
+                pageIndices, new CULong((uint)pageIndices.Length), insertAtIndex);
 
         if (!success)
         {
-            throw new InvalidOperationException($"Failed to import pages. Error: {PDFium.FPDF_GetLastError()}");
+            throw ImportFailed();
         }
     }
 
@@ -320,7 +322,7 @@ public class PdfMerger : IDisposable
         bool success = PDFium.FPDF_CopyViewerPreferences(_target.Document, sourceHandle);
         if (!success)
         {
-            throw new InvalidOperationException($"Failed to copy viewer preferences. Error: {PDFium.FPDF_GetLastError()}");
+            throw new InvalidOperationException("Failed to copy viewer preferences.");
         }
     }
 
@@ -342,6 +344,10 @@ public class PdfMerger : IDisposable
     {
         ObjectDisposedException.ThrowIf(_target.IsDisposed, this);
     }
+
+    // FPDF_ImportPages* do not set FPDF_GetLastError, so there is no code to report.
+    private static InvalidOperationException ImportFailed() =>
+        new("Failed to import pages. Check that the page range or indices exist in the source document.");
 
     /// <summary>
     /// Releases all resources used by the PdfMerger.

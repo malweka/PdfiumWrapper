@@ -29,10 +29,10 @@ public static partial class PDFium
     internal static partial int FPDFAnnot_GetFormFieldType(IntPtr hHandle, IntPtr annot);
 
     [LibraryImport(LibraryName)]
-    internal static partial ulong FPDFAnnot_GetFormFieldName(IntPtr hHandle, IntPtr annot, IntPtr buffer, ulong buflen);
+    internal static partial CULong FPDFAnnot_GetFormFieldName(IntPtr hHandle, IntPtr annot, IntPtr buffer, CULong buflen);
 
     [LibraryImport(LibraryName)]
-    internal static partial ulong FPDFAnnot_GetFormFieldAlternateName(IntPtr hHandle, IntPtr annot, IntPtr buffer, ulong buflen);
+    internal static partial CULong FPDFAnnot_GetFormFieldAlternateName(IntPtr hHandle, IntPtr annot, IntPtr buffer, CULong buflen);
 
     [LibraryImport(LibraryName)]
     internal static partial int FPDFAnnot_GetFormFieldFlags(IntPtr hHandle, IntPtr annot);
@@ -42,12 +42,12 @@ public static partial class PDFium
     #region Form Field Value Get/Set
 
     [LibraryImport(LibraryName)]
-    internal static partial ulong FPDFAnnot_GetFormFieldValue(IntPtr hHandle, IntPtr annot, IntPtr buffer, ulong buflen);
+    internal static partial CULong FPDFAnnot_GetFormFieldValue(IntPtr hHandle, IntPtr annot, IntPtr buffer, CULong buflen);
 
     [LibraryImport(LibraryName)]
     [return: MarshalAs(UnmanagedType.Bool)]
     internal static partial bool FPDFAnnot_SetStringValue(IntPtr annot,
-        [MarshalAs(UnmanagedType.LPStr)] string key,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string key,
         [MarshalAs(UnmanagedType.LPWStr)] string value);
 
     #endregion
@@ -58,7 +58,7 @@ public static partial class PDFium
     internal static partial int FPDFAnnot_GetOptionCount(IntPtr hHandle, IntPtr annot);
 
     [LibraryImport(LibraryName)]
-    internal static partial ulong FPDFAnnot_GetOptionLabel(IntPtr hHandle, IntPtr annot, int index, IntPtr buffer, ulong buflen);
+    internal static partial CULong FPDFAnnot_GetOptionLabel(IntPtr hHandle, IntPtr annot, int index, IntPtr buffer, CULong buflen);
 
     [LibraryImport(LibraryName)]
     [return: MarshalAs(UnmanagedType.Bool)]
@@ -79,7 +79,7 @@ public static partial class PDFium
     internal static partial int FPDFAnnot_GetFormControlIndex(IntPtr hHandle, IntPtr annot);
 
     [LibraryImport(LibraryName)]
-    internal static partial ulong FPDFAnnot_GetFormFieldExportValue(IntPtr hHandle, IntPtr annot, IntPtr buffer, ulong buflen);
+    internal static partial CULong FPDFAnnot_GetFormFieldExportValue(IntPtr hHandle, IntPtr annot, IntPtr buffer, CULong buflen);
 
     #endregion
 

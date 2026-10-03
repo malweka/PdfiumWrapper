@@ -72,7 +72,7 @@ public class PdfDocumentTests : IDisposable
     public void Constructor_WithInvalidFilePath_ShouldThrowException()
     {
         // Arrange & Act & Assert
-        Assert.Throws<InvalidOperationException>(() => new PdfDocument("nonexistent.pdf"));
+        Assert.Throws<PdfiumException>(() => new PdfDocument("nonexistent.pdf"));
     }
     
     [Fact]
@@ -236,8 +236,8 @@ public class PdfDocumentTests : IDisposable
         using var stream = new MemoryStream();
 
         // Act & Assert: the empty buffer goes to PDFium, which rejects it; nothing breaks on release
-        Assert.Throws<InvalidOperationException>(() => new PdfDocument(stream));
-        Assert.Throws<InvalidOperationException>(() => new PdfMerger(stream));
+        Assert.Throws<PdfiumException>(() => new PdfDocument(stream));
+        Assert.Throws<PdfiumException>(() => new PdfMerger(stream));
     }
 
     /// <summary>One small render per page, for comparing two loads of the same PDF byte for byte.</summary>
@@ -264,7 +264,7 @@ public class PdfDocumentTests : IDisposable
         var invalidBytes = new byte[] { 1, 2, 3, 4, 5 };
         
         // Act & Assert
-        Assert.Throws<InvalidOperationException>(() => new PdfDocument(invalidBytes));
+        Assert.Throws<PdfiumException>(() => new PdfDocument(invalidBytes));
     }
 
     [Fact]

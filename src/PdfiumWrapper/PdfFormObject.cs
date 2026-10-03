@@ -1,3 +1,5 @@
+using System.Runtime.InteropServices;
+
 namespace PdfiumWrapper;
 
 /// <summary>
@@ -24,16 +26,24 @@ public class PdfFormObject : PdfPageObject
     }
 
     /// <summary>
-    /// Get a sub-object from this form object by index
+    /// Get a sub-object from this form object by index, wrapped in the type that matches its kind.
+    /// The form object owns it: disposing the wrapper does not delete it, and the wrapper is
+    /// unusable once this form object is disposed.
     /// </summary>
-    public IntPtr GetObject(int index)
+    public PdfPageObject GetObject(int index)
     {
         using var _ = PdfiumRuntime.Enter();
         ThrowIfDisposed();
         if (index < 0 || index >= PDFium.FPDFFormObj_CountObjects(Handle))
             throw new ArgumentOutOfRangeException(nameof(index));
 
-        return PDFium.FPDFFormObj_GetObject(Handle, (ulong)index);
+        var handle = PDFium.FPDFFormObj_GetObject(Handle, new CULong((uint)index));
+        if (handle == IntPtr.Zero)
+            throw new InvalidOperationException($"Failed to get sub-object {index} of the form object.");
+
+        var wrapper = WrapExisting(handle, DocumentHandle);
+        wrapper.AttachToForm(this);
+        return wrapper;
     }
 }
 

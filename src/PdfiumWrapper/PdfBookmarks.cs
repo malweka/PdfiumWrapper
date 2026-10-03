@@ -1,6 +1,4 @@
-﻿using System.Runtime.InteropServices;
-
-namespace PdfiumWrapper;
+﻿namespace PdfiumWrapper;
 
 /// <summary>
 /// PDF bookmarks (table of contents)
@@ -58,27 +56,15 @@ public class PdfBookmarks
     {
         var bookmark = new PdfBookmark();
 
-        // Get title
-        ulong titleLength = PDFium.FPDFBookmark_GetTitle(bookmarkHandle, IntPtr.Zero, 0);
-        if (titleLength > 0)
-        {
-            var titleBuffer = Marshal.AllocHGlobal((int)titleLength);
-            try
-            {
-                PDFium.FPDFBookmark_GetTitle(bookmarkHandle, titleBuffer, titleLength);
-                bookmark.Title = Marshal.PtrToStringUni(titleBuffer) ?? string.Empty;
-            }
-            finally
-            {
-                Marshal.FreeHGlobal(titleBuffer);
-            }
-        }
+        var title = NativeText.ReadUtf16(bookmarkHandle, static (handle, buffer, length) => PDFium.FPDFBookmark_GetTitle(handle, buffer, length));
+        if (title != null)
+            bookmark.Title = title;
 
         // Get destination page
         var dest = PDFium.FPDFBookmark_GetDest(document, bookmarkHandle);
         if (dest != IntPtr.Zero)
         {
-            bookmark.PageIndex = (int)PDFium.FPDFDest_GetDestPageIndex(document, dest);
+            bookmark.PageIndex = PDFium.FPDFDest_GetDestPageIndex(document, dest);
         }
         else
         {
@@ -89,7 +75,7 @@ public class PdfBookmarks
                 dest = PDFium.FPDFAction_GetDest(document, action);
                 if (dest != IntPtr.Zero)
                 {
-                    bookmark.PageIndex = (int)PDFium.FPDFDest_GetDestPageIndex(document, dest);
+                    bookmark.PageIndex = PDFium.FPDFDest_GetDestPageIndex(document, dest);
                 }
             }
         }

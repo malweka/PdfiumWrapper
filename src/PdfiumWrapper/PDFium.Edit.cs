@@ -61,7 +61,8 @@ public static partial class PDFium
     /// Insert page object into page
     /// </summary>
     [LibraryImport(LibraryName)]
-    internal static partial void FPDFPage_InsertObject(IntPtr page, IntPtr page_obj);
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static partial bool FPDFPage_InsertObject(IntPtr page, IntPtr page_obj);
 
     /// <summary>
     /// Remove page object from page
@@ -81,15 +82,13 @@ public static partial class PDFium
     /// Set media box for a page
     /// </summary>
     [LibraryImport(LibraryName)]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    internal static partial bool FPDFPage_SetMediaBox(IntPtr page, float left, float bottom, float right, float top);
+    internal static partial void FPDFPage_SetMediaBox(IntPtr page, float left, float bottom, float right, float top);
 
     /// <summary>
     /// Set crop box for a page
     /// </summary>
     [LibraryImport(LibraryName)]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    internal static partial bool FPDFPage_SetCropBox(IntPtr page, float left, float bottom, float right, float top);
+    internal static partial void FPDFPage_SetCropBox(IntPtr page, float left, float bottom, float right, float top);
 
     /// <summary>
     /// Get media box for a page
@@ -240,8 +239,7 @@ public static partial class PDFium
     /// Get the line join style of a page object
     /// </summary>
     [LibraryImport(LibraryName)]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    internal static partial bool FPDFPageObj_GetLineJoin(IntPtr page_obj, out int line_join);
+    internal static partial int FPDFPageObj_GetLineJoin(IntPtr page_obj);
 
     /// <summary>
     /// Set the line join style of a page object
@@ -254,8 +252,7 @@ public static partial class PDFium
     /// Get the line cap style of a page object
     /// </summary>
     [LibraryImport(LibraryName)]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    internal static partial bool FPDFPageObj_GetLineCap(IntPtr page_obj, out int line_cap);
+    internal static partial int FPDFPageObj_GetLineCap(IntPtr page_obj);
 
     /// <summary>
     /// Set the line cap style of a page object
@@ -351,7 +348,7 @@ public static partial class PDFium
     /// </summary>
     [LibraryImport(LibraryName)]
     [return: MarshalAs(UnmanagedType.Bool)]
-    internal static partial bool FPDFText_SetCharcodes(IntPtr text_object, IntPtr charcodes, ulong count);
+    internal static partial bool FPDFText_SetCharcodes(IntPtr text_object, IntPtr charcodes, nuint count);
 
     /// <summary>
     /// Load a standard font
@@ -384,12 +381,6 @@ public static partial class PDFium
     [LibraryImport(LibraryName)]
     [return: MarshalAs(UnmanagedType.Bool)]
     internal static partial bool FPDFTextObj_SetFontSize(IntPtr text, float size);
-
-    /// <summary>
-    /// Get the font name
-    /// </summary>
-    [LibraryImport(LibraryName)]
-    internal static partial ulong FPDFFont_GetFontName(IntPtr font, IntPtr buffer, ulong length);
 
     /// <summary>
     /// Get the flags of a font
@@ -442,7 +433,7 @@ public static partial class PDFium
     /// </summary>
     [LibraryImport(LibraryName)]
     [return: MarshalAs(UnmanagedType.Bool)]
-    internal static partial bool FPDFFont_GetFontData(IntPtr font, IntPtr buffer, ulong buflen, out ulong out_buflen);
+    internal static partial bool FPDFFont_GetFontData(IntPtr font, IntPtr buffer, nuint buflen, out nuint out_buflen);
 
     /// <summary>
     /// Check if a font is embedded
@@ -504,7 +495,7 @@ public static partial class PDFium
     /// Get an image filter name
     /// </summary>
     [LibraryImport(LibraryName)]
-    internal static partial ulong FPDFImageObj_GetImageFilter(IntPtr image_object, int index, IntPtr buffer, ulong buflen);
+    internal static partial CULong FPDFImageObj_GetImageFilter(IntPtr image_object, int index, IntPtr buffer, CULong buflen);
 
     /// <summary>
     /// Get image metadata
@@ -527,7 +518,7 @@ public static partial class PDFium
     /// Get a sub-object from a form object
     /// </summary>
     [LibraryImport(LibraryName)]
-    internal static partial IntPtr FPDFFormObj_GetObject(IntPtr form_object, ulong index);
+    internal static partial IntPtr FPDFFormObj_GetObject(IntPtr form_object, CULong index);
 
     #endregion
 
@@ -571,12 +562,12 @@ public static partial class PDFium
     #region Structures
 
     [StructLayout(LayoutKind.Sequential)]
-    public struct FPDF_IMAGEOBJ_METADATA
+    internal struct FPDF_IMAGEOBJ_METADATA
     {
         public uint width;
         public uint height;
-        public uint horizontal_dpi;
-        public uint vertical_dpi;
+        public float horizontal_dpi;
+        public float vertical_dpi;
         public uint bits_per_pixel;
         public int colorspace;
         public int marked_content_id;

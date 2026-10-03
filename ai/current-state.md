@@ -2,6 +2,18 @@
 
 ## Current focus
 
+PR #21 (`feature/audit-low-fixes`): both Moderate review findings are fixed in `df2a304` and pushed (2026-10-03). `NativeText.ReadUtf16` drops only the final terminator (embedded U+0000 kept, which also fixes metadata values with an embedded NUL); `PdfPage` keys tracked wrappers by native handle (traversal of 10,000 objects 3.5 ms, 20,000 6.9 ms). 356/356 tests pass on win-x64. Awaiting CI and merge.
+
+### Earlier focus (2026-10-03, PR #21 review)
+
+PR #21 architecture review is complete (2026-10-03), using the `ai-pr-review` skill. Reviewed `feature/audit-low-fixes` at `c25ce1acb218cd61076e13c3f91b35456e13bea7`, merge base `e9c11ac43d801e9fa99508e93d4602000aa86f0e`. Verdict: request changes for two Moderate findings: the shared UTF-16 reader now truncates page labels at an embedded NUL, and `PdfPage.GetObject` searches all tracked wrappers per lookup, making page-object traversal quadratic. No implementation fixes or GitHub comments were made.
+
+### Earlier focus (2026-10-03, audit low fixes)
+
+Low findings of the technical audit (`ai/tmp/technical-audit-2026-10-03.md`, AUD-018 to AUD-024) and the new logo (2026-10-03), branch `feature/audit-low-fixes` from `main` at `e9c11ac` (after PRs 19 and 20, which fixed AUD-001 to AUD-017). Committed locally, not pushed; no PR yet. 354 tests pass on win-x64; not run on Linux or macOS.
+
+### Earlier focus (2026-10-03, .NET 10 upgrade, merged as PR 19)
+
 .NET 10 and dependency upgrade (2026-10-03), branch `feature/net10-upgrade` from `main` at `4497749`, uncommitted. Every project targets `net10.0`; win-x64 and linux-x64 natives are rebuilt at the new versions; 274 tests pass on win-x64 and on linux-x64 (.NET 10 SDK container). macOS natives (osx-arm64, osx-x64) were rebuilt on a Mac at the same versions (2026-10-03, uncommitted). After fixing three macOS-only test failures, 275/275 tests pass on osx-arm64 (two full runs).
 
 ### Earlier focus (2026-10-03, before the upgrade)
@@ -27,6 +39,28 @@ Follow-up verification of PR #15 commit `f3b15a1130567dc00f604c61b5aab9bc98a9e24
 Release 1 of `ai/plans/plan-pdfium-concurrency.md` is implemented on `feature/pdfium-concurrency-plan` (version 2.0.0); Release 2 remains deferred pending the owner's capacity/deployment inputs. The global `ai-pr-review` skill is installed and available.
 
 ## Completed
+
+### Latest task: PR #21 architecture review (2026-10-03)
+
+- Read the PR body/diff, `AGENTS.md`, `README.md`, current-state record, technical audit AUD-018 to AUD-024, and the relevant concurrency-plan contracts. Inspected native imports against local 8076 headers, changed wrapper ownership/cancellation paths, worker lifecycle/text-result cleanup, public-boundary tests, documentation and package configuration.
+- Independently ran `dotnet test src/PdfiumWrapper.Tests/PdfiumWrapper.Tests.csproj --no-restore`: 354/354 tests pass on win-x64. GitHub reports the Linux build/test job and all four platform build/package jobs successful.
+- Packed Processing and win-x64 runtime packages into the temporary review directory. Confirmed the Processing dependency is exactly `[2.0.0]` and both packages contain their declared `icon.png`.
+- Reproduced a page-label regression with a valid UTF-16 prefix `ABC\0DEF`: PDFium returns the whole value, but `NativeText.ReadUtf16` returns `ABC` (`NativeText.cs:36`). The previous `GetPageLabel` used the returned length minus its final terminator. Fix: remove only the trailing terminator, preserving embedded NULs; add a page-label regression.
+- Measured quadratic wrapper lookup (`PdfPage.cs:460`): traversing 10,000 tracked rectangle objects took 144 ms, and 20,000 took 584 ms; direct indexed native access took 0.58 ms and 1.22 ms respectively. Fix: index tracked wrappers by native handle while retaining disposal/removal ownership behavior, and remeasure traversal scaling.
+- A disposed-wrapper handle leak and metadata NUL truncation were reproduced but excluded because their root behavior predates this PR. A scratch-project restore initially failed on sandbox NuGet TLS; restoring from the existing package cache succeeded. Scratch xUnit tests and packed artifacts are outside the repository at `%TEMP%/PdfiumPr21Review_aecfe6ef3ef9413fab2f8d530734f04c/`.
+- Local review probes ran on Windows only; macOS runtime behavior was not independently verified. Only this required state file was edited in the repository.
+
+### Earlier task: audit low findings and package icon (2026-10-03, `feature/audit-low-fixes`)
+
+- Icon: `logos/PdfiumWrapperLogo.svg` is the source; `icon.png` (256 x 256, transparent) is rendered from it with Edge headless, because Inkscape drops `feDropShadow`. The core and Processing packages already pointed at `icon.png`; the per-RID runtime packages now carry it too.
+- AUD-018: every import checked against the chromium/8076 headers and the shipped `pdfium.dll` exports (scratch script, not committed). `unsigned long` is `CULong`, `size_t` `nuint`, byte-string keys UTF-8, wrong return types fixed. `FPDF_SetMetaText` is not exported by PDFium, so every `PdfMetadata` setter threw `EntryPointNotFoundException`: the setters and `SetMetadataString`/`Set*DateTime`/`SetAllMetadata`/`ClearAllMetadata` are removed (metadata is read-only). `FPDFPage_InsertObject` frees the object on failure; `PdfPage.InsertObject` handles it.
+- AUD-019: `DocumentId` drops the NUL terminator (32 hex characters).
+- AUD-020: `GetObject` returns typed wrappers (`PdfPageObject.WrapExisting`, one wrapper per object per page; form sub-objects tied to their form object). Factories, `PdfPageObject` constructor and `Handle`, `LibTiff`, `LibTurboJpeg`, `JpegInfo`, the `PDFium` structs and `PdfHelpers` are internal. Dead BGRA TIFF converters removed.
+- AUD-021: `NativeText.ReadUtf16` replaces ten string-read copies.
+- AUD-022: `PdfiumException` with `PdfiumErrorCode` at the two load sites; stale `FPDF_GetLastError` removed from import/page/save messages. Fixture `Docs/encrypted.pdf` (Ghostscript, password `secret`).
+- AUD-023: optional `CancellationToken` on every async render/save method, `[EnumeratorCancellation]` on the streams, async file writes for PNG/JPEG directories.
+- AUD-024 (done by a parallel agent, merged): text results in the pool temp directory, ghost-worker fix, `WorkerMessage` event for stderr with a 4,096-character line cap, Windows job object plus a 5 s stdin-EOF watchdog, exact `[2.0.0]` core dependency in the Processing nuspec. The Cancel/Dispatch race and scale-down item were already fixed by PR 20.
+- Tests: `NativeBoundaryTests.cs` (14) and `Processing/PoolHygieneTests.cs` (6); existing load-failure tests now expect `PdfiumException`.
 
 ### Latest task: make the test suite pass on macOS (2026-10-03, same branch, uncommitted)
 
@@ -264,6 +298,10 @@ Key measurements (one machine: i7-13700F, 24 logical processors, win-x64):
 
 ## In progress
 
+- PR #21: review findings fixed and pushed; waiting for CI and merge. The review's excluded "disposed-wrapper handle leak" (predates the PR) is not investigated yet; details are in the review probes under `%TEMP%/PdfiumPr21Review_aecfe6ef3ef9413fab2f8d530734f04c/`.
+
+Historical:
+
 - .NET 10 upgrade on `feature/net10-upgrade`: natives rebuilt for all four RIDs; macOS dylibs uncommitted.
 
 - Follow-up review is finished. The two remaining findings await implementation by the owner; no code corrections were requested in this verification turn.
@@ -273,6 +311,10 @@ Key measurements (one machine: i7-13700F, 24 logical processors, win-x64):
 - Nothing active. Verification is complete; the stride overflow edge case awaits correction. The four original review reproductions are resolved.
 
 ## Next recommended step
+
+- Fix `NativeText.ReadUtf16` (`src/PdfiumWrapper/NativeText.cs:36`) to preserve embedded NULs in page labels, replace the linear tracked-wrapper search in `PdfPage.GetObject` (`src/PdfiumWrapper/PdfPage.cs:460`) with a handle-keyed lookup, add the regression coverage, rerun the suite and lookup-scaling probe, then request a follow-up review of PR #21.
+
+Historical:
 
 - Commit the macOS dylibs and the macOS test fixes, then commit the upgrade on `feature/net10-upgrade`, open a PR and confirm CI on the .NET 10 SDK. Bump the package version (2.0.0 has not been released) if the TFM change should be called out.
 
@@ -291,6 +333,14 @@ Earlier list (items 1 and 2 still apply; item 3 is done):
 
 ## Blockers or open questions
 
+- PR #21 has two Moderate review findings (page-label truncation and quadratic object lookup); verdict is request changes. The review itself is complete.
+
+- `PdfMetadata` is now read-only (its setters could never work). If writing metadata matters, it needs a PDF object writer outside PDFium.
+- Worker stderr is no longer reported as `WorkerStopped` events; consumers must use `PdfPoolEventKind.WorkerMessage`.
+- On Windows a worker joins the job object just after `Process.Start`; if the host dies in that instant only the 5 s stdin watchdog stops it.
+
+Historical:
+
 - Dropping `net8.0` means .NET 8 and 9 consumers can no longer use the package (both reach end of support on 2026-11-10). Multi-targeting `net8.0;net10.0` is the alternative if that matters.
 
 - The local PR #18 fixes still have one Critical output-loss regression and one Moderate batch-memory issue. GitHub CI has not evaluated these uncommitted changes. The review itself is complete.
@@ -303,9 +353,9 @@ Earlier list (items 1 and 2 still apply; item 3 is done):
 - Merge benchmark moved between -5.9% and +4.4% by document (buffered save). Peak memory during a save now includes the whole output.
 - `benchmark.db` was not updated with the new runs; the tables are in `benchmark.md` only.
 - The starvation test bound (heartbeat p99 under 100 ms) is loose against the measured 1.3 ms.
-- `PdfImageObject.SetBitmap(IntPtr, IntPtr)` and `SetImage(byte[], IntPtr)` are now `internal` (they take native handles public callers cannot obtain); `PdfPage.AddImage` is the public path. The static `Create(IntPtr documentHandle, ...)` factories on `PdfImageObject`, `PdfTextObject` and `PdfPathObject` are still public and have the same limitation; not changed.
+- `PdfImageObject.SetBitmap(IntPtr, IntPtr)` and `SetImage(byte[], IntPtr)` are now `internal` (they take native handles public callers cannot obtain); `PdfPage.AddImage` is the public path. (The `Create(IntPtr documentHandle, ...)` factories were made internal on 2026-10-03, AUD-020.)
 - `docs/DOCUMENT_PROPERTIES_IMPLEMENTATION.md` still shows pre-gate implementation snippets with raw `PDFium.FPDF_*` calls. `.github/copilot-instructions.md` points at `AGENT.md`; the file is `AGENTS.md`.
-- Other raw import signatures were not audited. The gate-coverage test exercised every public member once and found one wrong signature; imports not reachable from the public API are unchecked.
+- (Resolved 2026-10-03, AUD-018: every import was checked against the 8076 headers and exports, and a test now checks the exports.)
 - Benchmarks on this machine: run a baseline worktree from the same volume and kind of directory as the repository. A worktree under `%TEMP%` made file opens about 60 µs slower.
 
 Earlier notes:Earlier notes:
@@ -321,6 +371,10 @@ Earlier notes:Earlier notes:
 - Shell commands required escalation because the Windows sandbox shell failed with `windows sandbox: spawn setup refresh`.
 
 ## Recently changed files
+
+- PR #21 review (2026-10-03): `ai/current-state.md` only. Implementation files were not changed; review probes and package artifacts are under `%TEMP%`.
+
+- Audit low fixes (2026-10-03): `icon.png`, `logos/PdfiumWrapperLogo.svg`, `src/PdfiumWrapper.runtime/PdfiumWrapper.runtime.csproj`; `src/PdfiumWrapper/`: new `NativeText.cs`, `PdfiumException.cs`; `PDFium*.cs`, `LibTiff.cs`, `LibTurboJpeg.cs`, `JpegDecoder.cs`, `PdfDocument.cs`, `PdfPage.cs`, `PdfPageObject.cs`, `PdfFormObject.cs`, `PdfTextObject.cs`, `PdfImageObject.cs`, `PdfPathObject.cs`, `PdfMetadata.cs`, `PdfBookmarks.cs`, `PdfAttachments.cs`, `PdfForm.cs`, `PdfMerger.cs`, `PdfHelpers.cs`, `PixelConverter.cs`, `PooledFileWriter.cs`; `src/PdfiumWrapper.Processing/` (AUD-024: `PdfProcessingPool*.cs`, `PdfWorkerHost.cs`, `Worker.cs`, new `WorkerJobObject.cs`, `PdfJobResult.cs`, csproj); `src/PdfiumWrapper.Tests.Host/WorkerFaults.cs`; `src/PdfiumWrapper.Tests/`: new `NativeBoundaryTests.cs`, `Processing/PoolHygieneTests.cs`, `Docs/encrypted.pdf`; updated load-failure assertions in five test files; `README.md`, `AGENTS.md`, `docs/API-REFERENCE.md`, `docs/BEST-PRACTICES.md`, `docs/EXAMPLES.md`, `docs/HIGH-THROUGHPUT-PROCESSING.md`, `ai/current-state.md`.
 
 - macOS test fixes (2026-10-03): `src/PdfiumWrapper/PdfAttachments.cs`, `PdfDocument.cs`; `src/PdfiumWrapper.Tests/PdfDocumentTests.cs`; `src/PdfiumWrapper.Tests.Host/Scenarios.Concurrency.cs`; `docs/API-REFERENCE.md`, `AGENTS.md`, `ai/current-state.md`.
 - macOS natives (2026-10-03): `src/libs/osx-arm64/*.dylib` (5), `src/libs/osx-x64/*.dylib` (5), `ai/current-state.md`.

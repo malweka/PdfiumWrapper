@@ -3,6 +3,7 @@
 		<TargetFramework>net10.0</TargetFramework>
 		<ImplicitUsings>enable</ImplicitUsings>
 		<Nullable>enable</Nullable>
+		<AllowUnsafeBlocks>true</AllowUnsafeBlocks>
 		<Version>2.0.0</Version>
 		<FileVersion>2.0.0.0</FileVersion>
 		<AssemblyVersion>2.0.0.0</AssemblyVersion>
@@ -43,4 +44,17 @@
 		<None Include="../../README.md" Pack="true" PackagePath="\" />
 		<None Include="../../icon.png" Pack="true" PackagePath="\" />
 	</ItemGroup>
+
+	<!--
+		This package calls internals of the core package (InternalsVisibleTo), so it works only with
+		the core build it was compiled with: the packed dependency is that exact version ([2.0.0]),
+		not "2.0.0 or later", which would let a later core release break workers at startup.
+	-->
+	<Target Name="PinCoreDependencyVersion" AfterTargets="_GetProjectReferenceVersions">
+		<ItemGroup>
+			<_PinnedProjectReferences Include="@(_ProjectReferencesWithVersions)" ProjectVersion="[%(_ProjectReferencesWithVersions.ProjectVersion)]" />
+			<_ProjectReferencesWithVersions Remove="@(_ProjectReferencesWithVersions)" />
+			<_ProjectReferencesWithVersions Include="@(_PinnedProjectReferences)" />
+		</ItemGroup>
+	</Target>
 </Project>
