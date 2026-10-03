@@ -719,7 +719,7 @@ public abstract class PdfPageObject : IDisposable
 
 **Note:** Before 2.0, `GetMatrix()` used a wrong native signature and could crash the process. Fixed in 2.0.
 
-An object added to a page belongs to that page. An object removed with `PdfPage.RemoveObject` belongs to the caller again and is tracked by the document: dispose it, or the document disposes it when the document is disposed.
+An object added to a page belongs to that page. An object removed with `PdfPage.RemoveObject` belongs to the caller again and is tracked by the document: dispose it, or the document disposes it when the document is disposed. `RemoveObject` takes the live wrapper of an object on that page: it throws `ObjectDisposedException` for a disposed wrapper and returns `false` for an object that is not on the page (another page's, a form object's sub-object, or one already removed).
 
 ---
 
