@@ -159,7 +159,7 @@ PDFium allows one native call per process at a time, across all documents. Pdfiu
 
 - **Safe:** using different objects (documents, mergers) from different threads at the same time. Native work (loading, rendering, text, forms, saving) takes turns; image encoding and output writes overlap.
 - **Not supported:** using one `PdfDocument`, `PdfPage`, `PdfForm`, `PdfMerger`, or page object from two threads at once.
-- In async services, prefer the async methods (`SaveAsTiffAsync`, `StreamImageBytesAsync`, ...): they wait for the gate without blocking a thread.
+- In async services, prefer the async methods (`SaveAsTiffAsync`, `StreamImageBytesAsync`, ...): they wait for the gate without blocking a thread, and never resume on the caller's synchronization context.
 
 See [Best Practices](docs/BEST-PRACTICES.md) and [High-Throughput Processing](docs/HIGH-THROUGHPUT-PROCESSING.md) for multi-threaded scenarios and sizing.
 
@@ -172,6 +172,11 @@ See [Best Practices](docs/BEST-PRACTICES.md) and [High-Throughput Processing](do
 - A document owns the forms returned by `GetForm()` and the page objects removed from its pages; disposing the document disposes them.
 - `PdfImageObject.GetBitmap()` and `GetRenderedBitmap()` return managed BGRA pixels (`RawBitmap?`) instead of a native bitmap handle. `GetRenderedBitmap` takes a `PdfPage` instead of a page handle. `PdfImageObject.SetBitmap` and `SetImage`, which took native handles, are `internal`; add images with `PdfPage.AddImage`.
 - `StreamImageBytesAsync` and `StreamJpegBytesAsync` return without waiting for the native gate; an empty document is reported when enumeration starts rather than by the call.
+- Renders are capped at 268,435,456 pixels per bitmap (the `PdfiumWrapper.MaxRenderPixels` `AppContext` data key changes the cap). A larger page throws `InvalidOperationException` before PDFium allocates the bitmap. A DPI, width or height of zero or less throws `ArgumentOutOfRangeException`. A failed bitmap allocation is no longer reported as `OutOfMemoryException`. See [Render size limit](docs/API-REFERENCE.md#render-size-limit-and-dpi-validation).
+- The default JPEG quality is 90 for every entry point. `StreamImageBytes`, `StreamImageBytesAsync` and `SaveAsImages` used to default to 100.
+- Every output file (PNG, JPEG, TIFF) is opened by .NET, so non-ASCII directories and file names work on Windows. `LibTiff.TIFFOpen` is no longer exposed.
+- The async methods run page work on the thread pool and never post to the caller's `SynchronizationContext`. The delegate passed to `ProcessAllPagesAsync` therefore runs on a thread-pool thread. New: `SaveAsPngsAsync`, `SaveAsImagesAsync(Stream[], ...)`, and a `SaveAsImagesAsync` overload with default quality and DPI.
+- `PdfPage.GetEmbeddedThumbnail()` returns the thumbnail as BGRA pixels with its size and stride (`RawBitmap?`). `GetEmbeddedThumbnailBytes()` and `GetEmbeddedThumbnailSize()` are obsolete; the bytes are now BGRA as documented.
 - TIFF output (`SaveAsTiff`, `SaveAsTiffAsync`) renders pages in 8-bit gray instead of 32-bit color. It is faster and uses a quarter of the memory per page. Text is anti-aliased slightly differently at that depth, so TIFF files are not pixel-identical to those from 1.x: on text pages roughly 1-2% of pixels differ, at glyph edges.
 
 ## License

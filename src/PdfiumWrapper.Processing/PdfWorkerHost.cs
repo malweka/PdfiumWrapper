@@ -228,8 +228,6 @@ public static class PdfWorkerHost
             {
                 string directory = job.Output ?? throw new ArgumentException("Image jobs need an output directory.");
                 Directory.CreateDirectory(directory);
-                string prefix = job.FileNamePrefix ?? "page";
-                string extension = job.Kind == JobKind.ConvertToPng ? "png" : "jpg";
                 var format = job.Kind == JobKind.ConvertToPng ? ImageFormat.Png : ImageFormat.Jpeg;
                 var staged = new List<(string Temp, string Final)>(result.PageCount);
                 var files = new List<string>(result.PageCount);
@@ -246,7 +244,7 @@ public static class PdfWorkerHost
                     {
                         ct.ThrowIfCancellationRequested();
 
-                        string path = Path.Combine(directory, $"{prefix}_{staged.Count + 1:D3}.{extension}");
+                        string path = Path.Combine(directory, PdfDocument.PageFileName(job.FileNamePrefix, staged.Count + 1, format));
                         string temp = path + $".{job.Id}.tmp";
                         File.WriteAllBytes(temp, image);
                         staged.Add((temp, path));

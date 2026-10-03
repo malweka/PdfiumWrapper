@@ -576,13 +576,16 @@ public class PdfDocument : IDisposable
 
     /// <summary>
     /// Process all pages asynchronously with automatic disposal. Safe for high-throughput scenarios.
-    /// Uses Task.Yield() for UI responsiveness while processing sequentially.
+    /// Pages are processed sequentially on a thread-pool thread, never on the caller's
+    /// synchronization context, so <paramref name="processor"/> must not touch UI objects.
     /// </summary>
     /// <typeparam name="TResult">The type of result to return for each page</typeparam>
     /// <param name="processor">Function to process each page and return a result</param>
     /// <returns>Array of results from processing each page</returns>
     public async Task<TResult[]> ProcessAllPagesAsync<TResult>(Func<PdfPage, TResult> processor)
     {
+        await new ThreadPoolHop();
+
         int pageCount;
         using (await PdfiumRuntime.EnterAsync())
         {
@@ -595,7 +598,6 @@ public class PdfDocument : IDisposable
         var results = new TResult[pageCount];
         for (int i = 0; i < pageCount; i++)
         {
-            await Task.Yield();
             var page = await GetPageAsync(i).ConfigureAwait(false);
             try
             {
@@ -611,10 +613,14 @@ public class PdfDocument : IDisposable
 
     /// <summary>
     /// Process all pages asynchronously with automatic disposal. Safe for high-throughput scenarios.
+    /// Pages are processed sequentially on a thread-pool thread, never on the caller's
+    /// synchronization context, so <paramref name="action"/> must not touch UI objects.
     /// </summary>
     /// <param name="action">Action to perform on each page</param>
     public async Task ProcessAllPagesAsync(Action<PdfPage> action)
     {
+        await new ThreadPoolHop();
+
         int pageCount;
         using (await PdfiumRuntime.EnterAsync())
         {
@@ -626,7 +632,6 @@ public class PdfDocument : IDisposable
 
         for (int i = 0; i < pageCount; i++)
         {
-            await Task.Yield();
             var page = await GetPageAsync(i).ConfigureAwait(false);
             try
             {
@@ -691,9 +696,13 @@ public class PdfDocument : IDisposable
         var page = GetPageCore(pageIndex);
         try
         {
-            int widthPx = (int)Math.Round(page.WidthCore / 72.0 * dpiWidth);
-            int heightPx = (int)Math.Round(page.HeightCore / 72.0 * dpiHeight);
-            return page.RenderToBitmapLeaseCore(widthPx, heightPx, flags, gray);
+            // In double and checked before the cast: the page box comes from the file, and a huge
+            // one must fail here, not wrap an int or reach a multi-GiB native allocation. A page
+            // smaller than a pixel at this DPI still renders as one pixel.
+            double widthPx = Math.Max(1, Math.Round(page.WidthCore / 72.0 * dpiWidth));
+            double heightPx = Math.Max(1, Math.Round(page.HeightCore / 72.0 * dpiHeight));
+            RenderLimits.Check(widthPx, heightPx, pageIndex);
+            return page.RenderToBitmapLeaseCore((int)widthPx, (int)heightPx, flags, gray);
         }
         finally
         {
@@ -722,14 +731,70 @@ public class PdfDocument : IDisposable
             throw new ArgumentOutOfRangeException(nameof(format), "Use SaveAsTiff for TIFF output");
     }
 
+    /// <summary>Managed validation only; a non-positive DPI would otherwise reach PDFium as a 0-pixel bitmap.</summary>
+    private static void RequirePositiveDpi(int dpiWidth, int dpiHeight)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(dpiWidth);
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(dpiHeight);
+    }
+
     private static RawBitmap ToRawBitmap(BitmapLease lease)
         => new(lease.ToArray(), lease.Width, lease.Height, lease.Stride);
 
-    private static byte[] EncodeJpeg(JpegEncoder encoder, BitmapLease lease, int quality)
-        => encoder.Encode(lease.Buffer, lease.Width, lease.Height, lease.Stride, quality: quality);
+    /// <summary>JPEG quality used when the caller gives none, by every entry point and by the worker pool.</summary>
+    internal const int DefaultJpegQuality = 90;
 
-    private static byte[] EncodePng(BitmapLease lease)
-        => PngEncoder.Encode(lease.Buffer, lease.Width, lease.Height, lease.Stride);
+    internal const string DefaultFileNamePrefix = "page";
+
+    /// <summary>
+    /// The file name of one page of a directory export: <c>{prefix}_{pageNumber:D3}.{png|jpg|tiff}</c>,
+    /// with <paramref name="pageNumber"/> 1-based. The worker pool uses it as well, so its staging
+    /// and crash cleanup always agree with the names this library writes.
+    /// </summary>
+    internal static string PageFileName(string? prefix, int pageNumber, ImageFormat format)
+        => $"{prefix ?? DefaultFileNamePrefix}_{pageNumber:D3}.{GetExtensionForFormat(format)}";
+
+    /// <summary>A <see cref="Directory.GetFiles(string, string)"/> pattern matching every <see cref="PageFileName"/> of one export.</summary>
+    internal static string PageFileSearchPattern(string? prefix, ImageFormat format)
+        => $"{prefix ?? DefaultFileNamePrefix}_*.{GetExtensionForFormat(format)}";
+
+    private static string GetExtensionForFormat(ImageFormat format) => format switch
+    {
+        ImageFormat.Png => "png",
+        ImageFormat.Jpeg => "jpg",
+        ImageFormat.Tiff => "tiff",
+        _ => throw new ArgumentOutOfRangeException(nameof(format))
+    };
+
+    /// <summary>
+    /// The one place a rendered page becomes JPEG or PNG bytes. Every image output is "encode, then
+    /// write", so the streamed, file and stream variants cannot drift apart. Runs with the gate
+    /// free. Not thread-safe: a JPEG encoder holds a TurboJPEG compressor.
+    /// </summary>
+    private sealed class PageEncoder : IDisposable
+    {
+        private readonly JpegEncoder? _jpeg;
+        private readonly int _quality;
+
+        private PageEncoder(JpegEncoder? jpeg, int quality)
+        {
+            _jpeg = jpeg;
+            _quality = quality;
+        }
+
+        /// <param name="quality">JPEG quality 1-100; ignored for PNG.</param>
+        public static PageEncoder Create(ImageFormat format, int quality)
+        {
+            RequireStreamableFormat(format);
+            return new PageEncoder(format == ImageFormat.Jpeg ? new JpegEncoder() : null, quality);
+        }
+
+        public byte[] Encode(BitmapLease lease) => _jpeg != null
+            ? _jpeg.Encode(lease.Buffer, lease.Width, lease.Height, lease.Stride, quality: _quality)
+            : PngEncoder.Encode(lease.Buffer, lease.Width, lease.Height, lease.Stride);
+
+        public void Dispose() => _jpeg?.Dispose();
+    }
 
     private static void WriteTiffPage(TiffWriter writer, BitmapLease lease, int dpiWidth, int dpiHeight,
         TiffColorMode colorMode, byte threshold, int totalPages)
@@ -767,14 +832,24 @@ public class PdfDocument : IDisposable
     /// <summary>
     /// Renders all pages to raw BGRA pixel buffers.
     /// </summary>
+    /// <remarks>
+    /// Every page's pixels are held in memory at once (a US Letter page at 300 DPI is about 33 MB),
+    /// so prefer <see cref="StreamImageBytes(ImageFormat, int, int)"/> or one page at a time for
+    /// large documents. Each page is limited to 268,435,456 pixels by default (the
+    /// <c>PdfiumWrapper.MaxRenderPixels</c> AppContext data key changes it).
+    /// </remarks>
+    /// <exception cref="ArgumentOutOfRangeException">A DPI is zero or negative.</exception>
+    /// <exception cref="InvalidOperationException">The document has no pages, or a page exceeds the render pixel limit.</exception>
     public RawBitmap[] RenderPages(int dpi = 300)
     {
         return RenderPages(dpi, dpi);
     }
 
+    /// <inheritdoc cref="RenderPages(int)"/>
     public RawBitmap[] RenderPages(int dpiWidth, int dpiHeight)
     {
         int pageCount = RequirePages();
+        RequirePositiveDpi(dpiWidth, dpiHeight);
 
         var results = new RawBitmap[pageCount];
         for (int i = 0; i < pageCount; i++)
@@ -785,19 +860,23 @@ public class PdfDocument : IDisposable
         return results;
     }
 
+    /// <inheritdoc cref="RenderPages(int)"/>
     public Task<RawBitmap[]> RenderPagesAsync(int dpi = 300)
     {
         return RenderPagesAsync(dpi, dpi);
     }
 
+    /// <inheritdoc cref="RenderPages(int)"/>
     public async Task<RawBitmap[]> RenderPagesAsync(int dpiWidth, int dpiHeight)
     {
+        await new ThreadPoolHop();
+
         int pageCount = await RequirePagesAsync().ConfigureAwait(false);
+        RequirePositiveDpi(dpiWidth, dpiHeight);
 
         var results = new RawBitmap[pageCount];
         for (int i = 0; i < pageCount; i++)
         {
-            await Task.Yield();
             var lease = await RenderPageLeaseAsync(i, dpiWidth, dpiHeight, ImageRenderFlags).ConfigureAwait(false);
             await using var leaseScope = lease.ConfigureAwait(false);
             results[i] = ToRawBitmap(lease);
@@ -810,6 +889,9 @@ public class PdfDocument : IDisposable
     /// Only one page's encoded bytes exist in memory at any point.
     /// JPEG uses native libjpeg-turbo; PNG uses native libpng.
     /// </summary>
+    /// <param name="format">JPEG or PNG.</param>
+    /// <param name="quality">JPEG quality 1-100 (default 90); ignored for PNG.</param>
+    /// <param name="dpi">Resolution in dots per inch.</param>
     /// <example>
     /// <code>
     /// int i = 0;
@@ -819,7 +901,7 @@ public class PdfDocument : IDisposable
     /// }
     /// </code>
     /// </example>
-    public IEnumerable<byte[]> StreamImageBytes(ImageFormat format, int quality = 100, int dpi = 300)
+    public IEnumerable<byte[]> StreamImageBytes(ImageFormat format, int quality = DefaultJpegQuality, int dpi = 300)
     {
         return StreamImageBytes(format, quality, dpi, dpi);
     }
@@ -830,40 +912,27 @@ public class PdfDocument : IDisposable
         // Validate eagerly; the iterator below runs lazily.
         int pageCount = RequirePages();
         RequireStreamableFormat(format);
+        RequirePositiveDpi(dpiWidth, dpiHeight);
 
         return StreamImageBytesCore(format, quality, dpiWidth, dpiHeight, pageCount);
     }
 
+    /// <summary>
+    /// Renders and encodes one page at a time: the one loop behind every synchronous JPEG/PNG
+    /// output (streamed, to files, to streams). Rendering holds the gate; encoding, and whatever
+    /// the consumer does with the bytes, does not.
+    /// </summary>
     private IEnumerable<byte[]> StreamImageBytesCore(ImageFormat format, int quality, int dpiWidth, int dpiHeight, int pageCount)
     {
-        if (format == ImageFormat.Jpeg)
+        using var encoder = PageEncoder.Create(format, quality);
+        for (int i = 0; i < pageCount; i++)
         {
-            using var encoder = new JpegEncoder();
-            for (int i = 0; i < pageCount; i++)
+            byte[] bytes;
+            using (var lease = RenderPageLease(i, dpiWidth, dpiHeight, ImageRenderFlags))
             {
-                byte[] bytes;
-                using (var lease = RenderPageLease(i, dpiWidth, dpiHeight, ImageRenderFlags))
-                {
-                    bytes = EncodeJpeg(encoder, lease, quality);
-                }
-                yield return bytes;
+                bytes = encoder.Encode(lease);
             }
-        }
-        else if (format == ImageFormat.Png)
-        {
-            for (int i = 0; i < pageCount; i++)
-            {
-                byte[] bytes;
-                using (var lease = RenderPageLease(i, dpiWidth, dpiHeight, ImageRenderFlags))
-                {
-                    bytes = EncodePng(lease);
-                }
-                yield return bytes;
-            }
-        }
-        else
-        {
-            throw new ArgumentOutOfRangeException(nameof(format), "Use SaveAsTiff for TIFF output");
+            yield return bytes;
         }
     }
 
@@ -967,6 +1036,9 @@ public class PdfDocument : IDisposable
     /// making this significantly more memory-efficient than collecting all pages into a list.
     /// JPEG uses native libjpeg-turbo; PNG uses native libpng.
     /// </summary>
+    /// <param name="format">JPEG or PNG.</param>
+    /// <param name="quality">JPEG quality 1-100 (default 90); ignored for PNG.</param>
+    /// <param name="dpi">Resolution in dots per inch.</param>
     /// <example>
     /// <code>
     /// int i = 0;
@@ -979,11 +1051,12 @@ public class PdfDocument : IDisposable
     /// </example>
     /// <remarks>
     /// This call returns without waiting for the native gate. It throws at once if the document is
-    /// disposed or <paramref name="format"/> cannot be streamed. An empty document is reported
-    /// (<see cref="InvalidOperationException"/>) when enumeration starts, because reading the page
-    /// count is native work and is awaited there.
+    /// disposed, <paramref name="format"/> cannot be streamed or a DPI is not positive. An empty
+    /// document is reported (<see cref="InvalidOperationException"/>) when enumeration starts,
+    /// because reading the page count is native work and is awaited there. Pages are rendered and
+    /// encoded on the thread pool, never on the consumer's synchronization context.
     /// </remarks>
-    public IAsyncEnumerable<byte[]> StreamImageBytesAsync(ImageFormat format, int quality = 100, int dpi = 300)
+    public IAsyncEnumerable<byte[]> StreamImageBytesAsync(ImageFormat format, int quality = DefaultJpegQuality, int dpi = 300)
     {
         return StreamImageBytesAsync(format, quality, dpi, dpi);
     }
@@ -995,78 +1068,83 @@ public class PdfDocument : IDisposable
         // thread. The page count is native work and is awaited inside the iterator.
         ThrowIfDisposed();
         RequireStreamableFormat(format);
+        RequirePositiveDpi(dpiWidth, dpiHeight);
 
         return StreamImageBytesCoreAsync(format, quality, dpiWidth, dpiHeight);
     }
 
-    private async IAsyncEnumerable<byte[]> StreamImageBytesCoreAsync(ImageFormat format, int quality, int dpiWidth, int dpiHeight)
+    /// <summary>
+    /// The asynchronous counterpart of <see cref="StreamImageBytesCore"/>, behind every async
+    /// JPEG/PNG output. Reads the page count itself unless the caller already has it.
+    /// </summary>
+    private async IAsyncEnumerable<byte[]> StreamImageBytesCoreAsync(ImageFormat format, int quality, int dpiWidth, int dpiHeight,
+        int? knownPageCount = null)
     {
-        int pageCount = await RequirePagesAsync().ConfigureAwait(false);
+        int pageCount = knownPageCount ?? await RequirePagesAsync().ConfigureAwait(false);
 
-        if (format == ImageFormat.Jpeg)
+        using var encoder = PageEncoder.Create(format, quality);
+        for (int i = 0; i < pageCount; i++)
         {
-            using var encoder = new JpegEncoder();
-            for (int i = 0; i < pageCount; i++)
+            // The consumer resumes this iterator on its own thread for every page; move to the
+            // thread pool before rendering and encoding, without posting to its context.
+            await new ThreadPoolHop();
+
+            byte[] bytes;
+            var lease = await RenderPageLeaseAsync(i, dpiWidth, dpiHeight, ImageRenderFlags).ConfigureAwait(false);
+            await using (lease.ConfigureAwait(false))
             {
-                await Task.Yield();
-                byte[] bytes;
-                var lease = await RenderPageLeaseAsync(i, dpiWidth, dpiHeight, ImageRenderFlags).ConfigureAwait(false);
-                await using (lease.ConfigureAwait(false))
-                {
-                    bytes = EncodeJpeg(encoder, lease, quality);
-                }
-                yield return bytes;
+                bytes = encoder.Encode(lease);
             }
-        }
-        else if (format == ImageFormat.Png)
-        {
-            for (int i = 0; i < pageCount; i++)
-            {
-                await Task.Yield();
-                byte[] bytes;
-                var lease = await RenderPageLeaseAsync(i, dpiWidth, dpiHeight, ImageRenderFlags).ConfigureAwait(false);
-                await using (lease.ConfigureAwait(false))
-                {
-                    bytes = EncodePng(lease);
-                }
-                yield return bytes;
-            }
-        }
-        else
-        {
-            throw new ArgumentOutOfRangeException(nameof(format), "Use SaveAsTiff for TIFF output");
+            yield return bytes;
         }
     }
 
+    /// <summary>
+    /// Renders every page and writes page <c>i</c> to <c>outputStreams[i]</c> as JPEG or PNG.
+    /// The streams are written with the native gate free and are left open.
+    /// </summary>
+    /// <param name="outputStreams">One writable stream per page.</param>
+    /// <param name="format">JPEG or PNG.</param>
+    /// <param name="quality">JPEG quality 1-100; ignored for PNG.</param>
+    /// <param name="dpiWidth">Horizontal resolution in dots per inch.</param>
+    /// <param name="dpiHeight">Vertical resolution in dots per inch.</param>
     public void SaveAsImages(Stream[] outputStreams, ImageFormat format, int quality, int dpiWidth, int dpiHeight)
     {
-        int pageCount = PageCount;
+        int pageCount = RequirePages();
+        RequireOutputStreams(outputStreams, pageCount);
+        RequireStreamableFormat(format);
+        RequirePositiveDpi(dpiWidth, dpiHeight);
 
+        int index = 0;
+        foreach (var bytes in StreamImageBytesCore(format, quality, dpiWidth, dpiHeight, pageCount))
+            outputStreams[index++].Write(bytes);
+    }
+
+    /// <summary>
+    /// Async version of <see cref="SaveAsImages(Stream[], ImageFormat, int, int, int)"/>.
+    /// Writes each page with <see cref="Stream.WriteAsync(ReadOnlyMemory{byte}, CancellationToken)"/>.
+    /// </summary>
+    public async Task SaveAsImagesAsync(Stream[] outputStreams, ImageFormat format, int quality, int dpiWidth, int dpiHeight)
+    {
+        await new ThreadPoolHop();
+
+        int pageCount = await RequirePagesAsync().ConfigureAwait(false);
+        RequireOutputStreams(outputStreams, pageCount);
+        RequireStreamableFormat(format);
+        RequirePositiveDpi(dpiWidth, dpiHeight);
+
+        int index = 0;
+        await foreach (var bytes in StreamImageBytesCoreAsync(format, quality, dpiWidth, dpiHeight, pageCount).ConfigureAwait(false))
+            await outputStreams[index++].WriteAsync(bytes).ConfigureAwait(false);
+    }
+
+    private static void RequireOutputStreams(Stream[] outputStreams, int pageCount)
+    {
+        ArgumentNullException.ThrowIfNull(outputStreams);
         if (outputStreams.Length != pageCount)
-            throw new ArgumentException($"Number of output streams ({outputStreams.Length}) must match page count ({pageCount})");
-
-        if (format == ImageFormat.Jpeg)
-        {
-            using var encoder = new JpegEncoder();
-            for (int i = 0; i < pageCount; i++)
-            {
-                using var lease = RenderPageLease(i, dpiWidth, dpiHeight, ImageRenderFlags);
-                encoder.EncodeToStream(lease.Buffer, lease.Width, lease.Height, lease.Stride, outputStreams[i],
-                    quality: quality);
-            }
-        }
-        else if (format == ImageFormat.Png)
-        {
-            for (int i = 0; i < pageCount; i++)
-            {
-                using var lease = RenderPageLease(i, dpiWidth, dpiHeight, ImageRenderFlags);
-                PngEncoder.EncodeToStream(lease.Buffer, lease.Width, lease.Height, lease.Stride, outputStreams[i]);
-            }
-        }
-        else
-        {
-            throw new ArgumentOutOfRangeException(nameof(format), "Use SaveAsTiff for TIFF output");
-        }
+            throw new ArgumentException($"Number of output streams ({outputStreams.Length}) must match page count ({pageCount})", nameof(outputStreams));
+        if (Array.Exists(outputStreams, stream => stream is null))
+            throw new ArgumentException("Output streams must not be null.", nameof(outputStreams));
     }
 
     /// <summary>
@@ -1074,6 +1152,10 @@ public class PdfDocument : IDisposable
     /// Uses a direct PDFium-to-libtiff pipeline with no intermediate image encoding,
     /// making it significantly faster than going through SkiaSharp for high-throughput workloads.
     /// </summary>
+    /// <remarks>
+    /// The file is opened in managed code, so any path .NET accepts works, including non-ASCII
+    /// paths on Windows. If the export fails, the partly written file is deleted.
+    /// </remarks>
     /// <param name="outputPath">Path to the output .tiff file.</param>
     /// <param name="dpi">Resolution in dots per inch (default: 200).</param>
     /// <param name="colorMode">Bilevel (1-bit CCITT G4) or Grayscale (8-bit LZW). Default: Bilevel.</param>
@@ -1091,9 +1173,23 @@ public class PdfDocument : IDisposable
         TiffColorMode colorMode = TiffColorMode.Bilevel, byte threshold = 128)
     {
         int pageCount = RequirePages();
+        ArgumentException.ThrowIfNullOrWhiteSpace(outputPath);
+        RequirePositiveDpi(dpiWidth, dpiHeight);
 
-        using var writer = new TiffWriter(outputPath);
-        WriteAllPagesToTiff(writer, pageCount, dpiWidth, dpiHeight, colorMode, threshold);
+        var file = OpenTiffFile(outputPath);
+        try
+        {
+            using (file)
+            using (var writer = new TiffWriter(file))
+            {
+                WriteAllPagesToTiff(writer, pageCount, dpiWidth, dpiHeight, colorMode, threshold);
+            }
+        }
+        catch
+        {
+            TryDeletePartialFile(outputPath);
+            throw;
+        }
     }
 
     /// <summary>
@@ -1113,6 +1209,7 @@ public class PdfDocument : IDisposable
         TiffColorMode colorMode = TiffColorMode.Bilevel, byte threshold = 128)
     {
         int pageCount = RequirePages();
+        RequirePositiveDpi(dpiWidth, dpiHeight);
 
         using var writer = new TiffWriter(output);
         WriteAllPagesToTiff(writer, pageCount, dpiWidth, dpiHeight, colorMode, threshold);
@@ -1120,7 +1217,7 @@ public class PdfDocument : IDisposable
 
     /// <summary>
     /// Async version of <see cref="SaveAsTiff(string, int, TiffColorMode, byte)"/>.
-    /// Uses Task.Yield() between pages for UI responsiveness.
+    /// Pages are rendered and written on the thread pool, never on the caller's synchronization context.
     /// </summary>
     public Task SaveAsTiffAsync(string outputPath, int dpi = 200,
         TiffColorMode colorMode = TiffColorMode.Bilevel, byte threshold = 128)
@@ -1134,10 +1231,26 @@ public class PdfDocument : IDisposable
     public async Task SaveAsTiffAsync(string outputPath, int dpiWidth, int dpiHeight,
         TiffColorMode colorMode = TiffColorMode.Bilevel, byte threshold = 128)
     {
-        int pageCount = await RequirePagesAsync().ConfigureAwait(false);
+        await new ThreadPoolHop();
 
-        using var writer = new TiffWriter(outputPath);
-        await WriteAllPagesToTiffAsync(writer, pageCount, dpiWidth, dpiHeight, colorMode, threshold).ConfigureAwait(false);
+        int pageCount = await RequirePagesAsync().ConfigureAwait(false);
+        ArgumentException.ThrowIfNullOrWhiteSpace(outputPath);
+        RequirePositiveDpi(dpiWidth, dpiHeight);
+
+        var file = OpenTiffFile(outputPath);
+        try
+        {
+            using (file)
+            using (var writer = new TiffWriter(file))
+            {
+                await WriteAllPagesToTiffAsync(writer, pageCount, dpiWidth, dpiHeight, colorMode, threshold).ConfigureAwait(false);
+            }
+        }
+        catch
+        {
+            TryDeletePartialFile(outputPath);
+            throw;
+        }
     }
 
     /// <summary>
@@ -1155,7 +1268,10 @@ public class PdfDocument : IDisposable
     public async Task SaveAsTiffAsync(Stream output, int dpiWidth, int dpiHeight,
         TiffColorMode colorMode = TiffColorMode.Bilevel, byte threshold = 128)
     {
+        await new ThreadPoolHop();
+
         int pageCount = await RequirePagesAsync().ConfigureAwait(false);
+        RequirePositiveDpi(dpiWidth, dpiHeight);
 
         using var writer = new TiffWriter(output);
         await WriteAllPagesToTiffAsync(writer, pageCount, dpiWidth, dpiHeight, colorMode, threshold).ConfigureAwait(false);
@@ -1177,77 +1293,93 @@ public class PdfDocument : IDisposable
     {
         for (int i = 0; i < pageCount; i++)
         {
-            await Task.Yield();
             var lease = await RenderPageLeaseAsync(i, dpiWidth, dpiHeight, TiffRenderFlags, gray: true).ConfigureAwait(false);
             await using var leaseScope = lease.ConfigureAwait(false);
             WriteTiffPage(writer, lease, dpiWidth, dpiHeight, colorMode, threshold, pageCount);
         }
     }
 
-    // Convenience methods for saving to directory
-    public void SaveAsPngs(string outputDirectory, string fileNamePrefix = "page", int dpi = 300)
+    /// <summary>
+    /// Opened here, not by libtiff: TIFFOpen reads the path in the ANSI code page on Windows, so a
+    /// non-ASCII path would break. Read/write because libtiff reads directories back while closing.
+    /// </summary>
+    private static FileStream OpenTiffFile(string path) => new(path, new FileStreamOptions
     {
-        SaveAsImages(outputDirectory, fileNamePrefix, ImageFormat.Png, 100, dpi, dpi);
+        Access = FileAccess.ReadWrite,
+        Mode = FileMode.Create,
+        Share = FileShare.None,
+        BufferSize = 128 * 1024,
+    });
+
+    /// <summary>Best effort: the exception that ended the export is what the caller needs to see.</summary>
+    private static void TryDeletePartialFile(string path)
+    {
+        try
+        {
+            File.Delete(path);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+        }
     }
 
-    public void SaveAsJpegs(string outputDirectory, string fileNamePrefix = "page", int quality = 90, int dpi = 300)
+    /// <summary>
+    /// Saves every page as <c>{fileNamePrefix}_{n:D3}.png</c> (n from 001) in
+    /// <paramref name="outputDirectory"/>, creating the directory if needed.
+    /// </summary>
+    public void SaveAsPngs(string outputDirectory, string fileNamePrefix = DefaultFileNamePrefix, int dpi = 300)
+    {
+        SaveImagesToDirectory(outputDirectory, fileNamePrefix, ImageFormat.Png, DefaultJpegQuality, dpi, dpi);
+    }
+
+    /// <summary>Async version of <see cref="SaveAsPngs"/>.</summary>
+    public Task SaveAsPngsAsync(string outputDirectory, string fileNamePrefix = DefaultFileNamePrefix, int dpi = 300)
+    {
+        return SaveImagesToDirectoryAsync(outputDirectory, fileNamePrefix, ImageFormat.Png, DefaultJpegQuality, dpi, dpi);
+    }
+
+    /// <summary>
+    /// Saves every page as <c>{fileNamePrefix}_{n:D3}.jpg</c> (n from 001) in
+    /// <paramref name="outputDirectory"/>, creating the directory if needed.
+    /// </summary>
+    /// <param name="quality">JPEG quality 1-100 (default 90).</param>
+    public void SaveAsJpegs(string outputDirectory, string fileNamePrefix = DefaultFileNamePrefix, int quality = DefaultJpegQuality, int dpi = 300)
     {
         SaveAsJpegs(outputDirectory, fileNamePrefix, quality, dpi, dpi);
     }
 
+    /// <inheritdoc cref="SaveAsJpegs(string, string, int, int)"/>
     public void SaveAsJpegs(string outputDirectory, string fileNamePrefix, int quality, int dpiWidth, int dpiHeight)
     {
-        int pageCount = RequirePages();
-
-        if (!Directory.Exists(outputDirectory))
-            Directory.CreateDirectory(outputDirectory);
-
-        using var encoder = new JpegEncoder();
-
-        for (int i = 0; i < pageCount; i++)
-        {
-            using var lease = RenderPageLease(i, dpiWidth, dpiHeight, ImageRenderFlags);
-            encoder.EncodeToFile(lease.Buffer, lease.Width, lease.Height, lease.Stride,
-                Path.Combine(outputDirectory, $"{fileNamePrefix}_{i + 1:D3}.jpg"), quality: quality);
-        }
+        SaveImagesToDirectory(outputDirectory, fileNamePrefix, ImageFormat.Jpeg, quality, dpiWidth, dpiHeight);
     }
 
-    public Task SaveAsJpegsAsync(string outputDirectory, string fileNamePrefix = "page", int quality = 90, int dpi = 300)
+    /// <summary>Async version of <see cref="SaveAsJpegs(string, string, int, int)"/>.</summary>
+    public Task SaveAsJpegsAsync(string outputDirectory, string fileNamePrefix = DefaultFileNamePrefix, int quality = DefaultJpegQuality, int dpi = 300)
     {
         return SaveAsJpegsAsync(outputDirectory, fileNamePrefix, quality, dpi, dpi);
     }
 
-    public async Task SaveAsJpegsAsync(string outputDirectory, string fileNamePrefix, int quality, int dpiWidth, int dpiHeight)
+    /// <summary>Async version of <see cref="SaveAsJpegs(string, string, int, int, int)"/>.</summary>
+    public Task SaveAsJpegsAsync(string outputDirectory, string fileNamePrefix, int quality, int dpiWidth, int dpiHeight)
     {
-        int pageCount = await RequirePagesAsync().ConfigureAwait(false);
-
-        if (!Directory.Exists(outputDirectory))
-            Directory.CreateDirectory(outputDirectory);
-
-        using var encoder = new JpegEncoder();
-
-        for (int i = 0; i < pageCount; i++)
-        {
-            await Task.Yield();
-            var lease = await RenderPageLeaseAsync(i, dpiWidth, dpiHeight, ImageRenderFlags).ConfigureAwait(false);
-            await using var leaseScope = lease.ConfigureAwait(false);
-            encoder.EncodeToFile(lease.Buffer, lease.Width, lease.Height, lease.Stride,
-                Path.Combine(outputDirectory, $"{fileNamePrefix}_{i + 1:D3}.jpg"), quality: quality);
-        }
+        return SaveImagesToDirectoryAsync(outputDirectory, fileNamePrefix, ImageFormat.Jpeg, quality, dpiWidth, dpiHeight);
     }
 
     /// <summary>
     /// Streams JPEG bytes one page at a time using <c>IEnumerable</c>.
     /// Uses native libjpeg-turbo — no SkiaSharp involved.
     /// </summary>
-    public IEnumerable<byte[]> StreamJpegBytes(int quality = 90, int dpi = 300)
+    public IEnumerable<byte[]> StreamJpegBytes(int quality = DefaultJpegQuality, int dpi = 300)
     {
         return StreamJpegBytes(quality, dpi, dpi);
     }
 
+    /// <inheritdoc cref="StreamJpegBytes(int, int)"/>
     public IEnumerable<byte[]> StreamJpegBytes(int quality, int dpiWidth, int dpiHeight)
     {
         int pageCount = RequirePages();
+        RequirePositiveDpi(dpiWidth, dpiHeight);
 
         return StreamImageBytesCore(ImageFormat.Jpeg, quality, dpiWidth, dpiHeight, pageCount);
     }
@@ -1260,102 +1392,85 @@ public class PdfDocument : IDisposable
     /// This call returns without waiting for the native gate. An empty document is reported
     /// (<see cref="InvalidOperationException"/>) when enumeration starts.
     /// </remarks>
-    public IAsyncEnumerable<byte[]> StreamJpegBytesAsync(int quality = 90, int dpi = 300)
+    public IAsyncEnumerable<byte[]> StreamJpegBytesAsync(int quality = DefaultJpegQuality, int dpi = 300)
     {
         return StreamJpegBytesAsync(quality, dpi, dpi);
     }
 
+    /// <inheritdoc cref="StreamJpegBytesAsync(int, int)"/>
     public IAsyncEnumerable<byte[]> StreamJpegBytesAsync(int quality, int dpiWidth, int dpiHeight)
     {
         ThrowIfDisposed();
+        RequirePositiveDpi(dpiWidth, dpiHeight);
 
         return StreamImageBytesCoreAsync(ImageFormat.Jpeg, quality, dpiWidth, dpiHeight);
     }
 
-    public void SaveAsImages(string outputDirectory, string fileNamePrefix, ImageFormat format, int quality = 100, int dpi = 300)
+    /// <summary>
+    /// Saves every page as <c>{fileNamePrefix}_{n:D3}.png</c> or <c>.jpg</c> (n from 001) in
+    /// <paramref name="outputDirectory"/>, creating the directory if needed. TIFF is rejected
+    /// before anything is created; use <see cref="SaveAsTiff(string, int, TiffColorMode, byte)"/>.
+    /// </summary>
+    /// <param name="quality">JPEG quality 1-100 (default 90); ignored for PNG.</param>
+    public void SaveAsImages(string outputDirectory, string fileNamePrefix, ImageFormat format, int quality = DefaultJpegQuality, int dpi = 300)
     {
         SaveAsImages(outputDirectory, fileNamePrefix, format, quality, dpi, dpi);
     }
 
+    /// <inheritdoc cref="SaveAsImages(string, string, ImageFormat, int, int)"/>
     public void SaveAsImages(string outputDirectory, string fileNamePrefix, ImageFormat format, int quality, int dpiWidth, int dpiHeight)
     {
+        SaveImagesToDirectory(outputDirectory, fileNamePrefix, format, quality, dpiWidth, dpiHeight);
+    }
+
+    /// <summary>Async version of <see cref="SaveAsImages(string, string, ImageFormat, int, int)"/>.</summary>
+    public Task SaveAsImagesAsync(string outputDirectory, string fileNamePrefix, ImageFormat format, int quality = DefaultJpegQuality, int dpi = 300)
+    {
+        return SaveImagesToDirectoryAsync(outputDirectory, fileNamePrefix, format, quality, dpi, dpi);
+    }
+
+    /// <summary>Async version of <see cref="SaveAsImages(string, string, ImageFormat, int, int, int)"/>.</summary>
+    public Task SaveAsImagesAsync(string outputDirectory, string fileNamePrefix, ImageFormat format, int quality, int dpiWidth, int dpiHeight)
+    {
+        return SaveImagesToDirectoryAsync(outputDirectory, fileNamePrefix, format, quality, dpiWidth, dpiHeight);
+    }
+
+    /// <summary>
+    /// The directory output behind SaveAsPngs, SaveAsJpegs and SaveAsImages: validates everything
+    /// before the directory is created, then writes each page under <see cref="PageFileName"/>
+    /// with managed file I/O.
+    /// </summary>
+    private void SaveImagesToDirectory(string outputDirectory, string fileNamePrefix, ImageFormat format, int quality,
+        int dpiWidth, int dpiHeight)
+    {
         int pageCount = RequirePages();
+        ArgumentException.ThrowIfNullOrWhiteSpace(outputDirectory);
+        RequireStreamableFormat(format);
+        RequirePositiveDpi(dpiWidth, dpiHeight);
 
-        if (!Directory.Exists(outputDirectory))
-            Directory.CreateDirectory(outputDirectory);
+        Directory.CreateDirectory(outputDirectory);
 
-        string extension = GetExtensionForFormat(format);
-
-        if (format == ImageFormat.Jpeg)
-        {
-            using var encoder = new JpegEncoder();
-            for (int i = 0; i < pageCount; i++)
-            {
-                var filePath = Path.Combine(outputDirectory, $"{fileNamePrefix}_{i + 1:D3}.{extension}");
-                using var lease = RenderPageLease(i, dpiWidth, dpiHeight, ImageRenderFlags);
-                encoder.EncodeToFile(lease.Buffer, lease.Width, lease.Height, lease.Stride, filePath, quality: quality);
-            }
-        }
-        else if (format == ImageFormat.Png)
-        {
-            for (int i = 0; i < pageCount; i++)
-            {
-                var filePath = Path.Combine(outputDirectory, $"{fileNamePrefix}_{i + 1:D3}.{extension}");
-                using var lease = RenderPageLease(i, dpiWidth, dpiHeight, ImageRenderFlags);
-                PngEncoder.EncodeToFile(lease.Buffer, lease.Width, lease.Height, lease.Stride, filePath);
-            }
-        }
-        else
-        {
-            throw new ArgumentOutOfRangeException(nameof(format), "Use SaveAsTiff for TIFF output");
-        }
+        int pageNumber = 0;
+        foreach (var bytes in StreamImageBytesCore(format, quality, dpiWidth, dpiHeight, pageCount))
+            File.WriteAllBytes(Path.Combine(outputDirectory, PageFileName(fileNamePrefix, ++pageNumber, format)), bytes);
     }
 
-    public async Task SaveAsImagesAsync(string outputDirectory, string fileNamePrefix, ImageFormat format, int quality, int dpiWidth, int dpiHeight)
+    private async Task SaveImagesToDirectoryAsync(string outputDirectory, string fileNamePrefix, ImageFormat format, int quality,
+        int dpiWidth, int dpiHeight)
     {
+        await new ThreadPoolHop();
+
         int pageCount = await RequirePagesAsync().ConfigureAwait(false);
+        ArgumentException.ThrowIfNullOrWhiteSpace(outputDirectory);
+        RequireStreamableFormat(format);
+        RequirePositiveDpi(dpiWidth, dpiHeight);
 
-        if (!Directory.Exists(outputDirectory))
-            Directory.CreateDirectory(outputDirectory);
+        Directory.CreateDirectory(outputDirectory);
 
-        string extension = GetExtensionForFormat(format);
-
-        if (format == ImageFormat.Jpeg)
-        {
-            using var encoder = new JpegEncoder();
-            for (int i = 0; i < pageCount; i++)
-            {
-                await Task.Yield();
-                var filePath = Path.Combine(outputDirectory, $"{fileNamePrefix}_{i + 1:D3}.{extension}");
-                var lease = await RenderPageLeaseAsync(i, dpiWidth, dpiHeight, ImageRenderFlags).ConfigureAwait(false);
-                await using var leaseScope = lease.ConfigureAwait(false);
-                encoder.EncodeToFile(lease.Buffer, lease.Width, lease.Height, lease.Stride, filePath, quality: quality);
-            }
-        }
-        else if (format == ImageFormat.Png)
-        {
-            for (int i = 0; i < pageCount; i++)
-            {
-                await Task.Yield();
-                var filePath = Path.Combine(outputDirectory, $"{fileNamePrefix}_{i + 1:D3}.{extension}");
-                var lease = await RenderPageLeaseAsync(i, dpiWidth, dpiHeight, ImageRenderFlags).ConfigureAwait(false);
-                await using var leaseScope = lease.ConfigureAwait(false);
-                PngEncoder.EncodeToFile(lease.Buffer, lease.Width, lease.Height, lease.Stride, filePath);
-            }
-        }
-        else
-        {
-            throw new ArgumentOutOfRangeException(nameof(format), "Use SaveAsTiff for TIFF output");
-        }
+        int pageNumber = 0;
+        await foreach (var bytes in StreamImageBytesCoreAsync(format, quality, dpiWidth, dpiHeight, pageCount).ConfigureAwait(false))
+            File.WriteAllBytes(Path.Combine(outputDirectory, PageFileName(fileNamePrefix, ++pageNumber, format)), bytes);
     }
-
-    private static string GetExtensionForFormat(ImageFormat format) => format switch
-    {
-        ImageFormat.Png => "png",
-        ImageFormat.Jpeg => "jpg",
-        ImageFormat.Tiff => "tiff",
-        _ => throw new ArgumentOutOfRangeException(nameof(format))
-    };
 
     /// <summary>
     /// Gets the document's form, or null when it has none. The form belongs to this document and

@@ -34,16 +34,11 @@ internal sealed class TiffWriter : IDisposable
     private static readonly IntPtr s_warningHandlerPtr = Marshal.GetFunctionPointerForDelegate(s_warningHandler);
     private static bool s_handlersInstalled;
 
-    public TiffWriter(string outputPath)
-    {
-        _tiff = LibTiff.TIFFOpen(outputPath, "w");
-        if (_tiff == IntPtr.Zero)
-            throw new IOException($"libtiff: failed to open '{outputPath}' for writing.");
-    }
-
     /// <summary>
     /// Creates a TiffWriter that writes to a Stream via TIFFClientOpen.
-    /// The stream must be writable and seekable.
+    /// The stream must be writable and seekable. File output goes through a managed
+    /// <see cref="FileStream"/> as well: libtiff's TIFFOpen reads the path in the ANSI code page
+    /// on Windows, so non-ASCII paths would break.
     /// </summary>
     public TiffWriter(Stream stream)
     {

@@ -570,12 +570,13 @@ public sealed partial class PdfProcessingPool : IAsyncDisposable
                 {
                     if (!Directory.Exists(payload.Output))
                         return;
-                    string prefix = payload.FileNamePrefix ?? "page";
-                    string extension = payload.Kind == JobKind.ConvertToPng ? "png" : "jpg";
-                    foreach (var temp in Directory.GetFiles(payload.Output, $"{prefix}_*.{extension}.{job.Id}.tmp"))
+                    // The same naming contract the worker writes with (PdfDocument.PageFileName).
+                    var format = payload.Kind == JobKind.ConvertToPng ? ImageFormat.Png : ImageFormat.Jpeg;
+                    string pattern = PdfDocument.PageFileSearchPattern(payload.FileNamePrefix, format) + $".{job.Id}.tmp";
+                    foreach (var temp in Directory.GetFiles(payload.Output, pattern))
                         TryDelete(temp);
                     for (int page = 1; page <= job.CommittingPages; page++)
-                        TryDelete(Path.Combine(payload.Output, $"{prefix}_{page:D3}.{extension}"));
+                        TryDelete(Path.Combine(payload.Output, PdfDocument.PageFileName(payload.FileNamePrefix, page, format)));
                     break;
                 }
 

@@ -131,7 +131,11 @@ Resolution order: `libs/{rid}/{file}` -> `runtimes/{rid}/native/{file}` -> syste
 
 All image output uses native libraries directly — no managed image dependencies.
 
-Every pipeline renders inside the native gate and returns a `BitmapLease` (bitmap handle, buffer pointer, size, stride). Conversion, encoding and output read the lease's buffer with the gate free; disposing the lease reenters the gate to destroy the bitmap.
+Every pipeline renders inside the native gate and returns a `BitmapLease` (bitmap handle, buffer pointer, size, stride, PDFium format). Conversion, encoding and output read the lease's buffer with the gate free; disposing the lease reenters the gate to destroy the bitmap. A caller-owned bitmap that PDFium hands out (thumbnail, image object) is taken over with `BitmapLease.Adopt` under the gate and turned into a BGRA `RawBitmap` with `BitmapLease.ToBgraAndRelease` outside it.
+
+Every render size is checked by `RenderLimits.Check` before `FPDFBitmap_Create*`, in double arithmetic, against `PdfiumWrapper.MaxRenderPixels` (`AppContext` data, default 2^28 pixels); it throws `InvalidOperationException` naming the page, size and key. DPI, width and height must be positive (`ArgumentOutOfRangeException`). A new path that allocates a PDFium bitmap from a page box or caller size must call it too.
+
+JPEG/PNG output in `PdfDocument` has one sync loop (`StreamImageBytesCore`) and one async loop (`StreamImageBytesCoreAsync`), each encoding through the private `PageEncoder` (`Create(format, quality)`, `Encode(lease)`). Every sink (enumerable, files, streams) is "encode, then write". Page files are named only by `PdfDocument.PageFileName(prefix, pageNumber, format)` (`{prefix}_{n:D3}.{ext}`), which the worker pool uses too. Every output file is opened in managed code (`File.WriteAllBytes`, `FileStream` + `TiffWriter(Stream)`): native `fopen`/`TIFFOpen` read `char*` paths in the ANSI code page on Windows, so never pass a path to a native library. The default JPEG quality is `PdfDocument.DefaultJpegQuality` (90) everywhere.
 
 **TIFF:**
 ```
@@ -139,7 +143,7 @@ PdfPage.RenderToBitmapLeaseCore(gray: true) → BitmapLease (native 8-bit gray b
     → PixelConverter (unsafe pointer math, no managed copy)                    [outside the gate]
         → TiffWriter (pinned write, zero per-row allocation)                   [outside the gate]
 ```
-TIFF output is bilevel or grayscale, so its pages are rendered straight into an 8-bit gray PDFium bitmap (`FPDFBitmap_Gray`): a quarter of the memory of BGRA and one byte per pixel to threshold or copy. PDFium anti-aliases text with plain grayscale smoothing at that depth and with LCD-style smoothing at 32 bits, so TIFF glyph edges differ slightly from the PNG/JPEG render of the same page. `PixelConverter.cs` reads directly from the native IntPtr. `TiffWriter.cs` pins the output array once and writes all scanlines via pointer offsets. Stream-based TIFF output uses `TIFFClientOpen` with GCHandle-pinned callback delegates.
+TIFF output is bilevel or grayscale, so its pages are rendered straight into an 8-bit gray PDFium bitmap (`FPDFBitmap_Gray`): a quarter of the memory of BGRA and one byte per pixel to threshold or copy. PDFium anti-aliases text with plain grayscale smoothing at that depth and with LCD-style smoothing at 32 bits, so TIFF glyph edges differ slightly from the PNG/JPEG render of the same page. `PixelConverter.cs` reads directly from the native IntPtr. `TiffWriter.cs` pins the output array once and writes all scanlines via pointer offsets. All TIFF output, file and stream, uses `TIFFClientOpen` with GCHandle-pinned callback delegates; `SaveAsTiff(path)` opens a read/write `FileStream` (libtiff reads back while closing) and deletes the file if the export fails.
 
 **JPEG:**
 ```
@@ -151,7 +155,7 @@ BitmapLease (native BGRA buffer) → JpegEncoder (libjpeg-turbo, accepts BGRA na
 ```
 BitmapLease (native BGRA buffer) → PngEncoder (pdfium_png shim, uses png_set_bgr() internally)
 ```
-`PngEncoder` is stateless/static. The C shim (`src/native/pdfium_png.c`) handles setjmp/longjmp error recovery, BGRA↔RGBA conversion via `png_set_bgr()`, and memory I/O. Both libpng and zlib-ng (SIMD-accelerated) are statically linked into the shim binary.
+`PngEncoder` is stateless/static and encodes to memory only; files are written by managed code. The C shim (`src/native/pdfium_png.c`) handles setjmp/longjmp error recovery, BGRA↔RGBA conversion via `png_set_bgr()`, and memory I/O (its file-path functions are not imported). Both libpng and zlib-ng (SIMD-accelerated) are statically linked into the shim binary.
 
 ### Why pdfium_png Shim Exists
 
@@ -159,7 +163,7 @@ libpng uses `setjmp`/`longjmp` for error handling, which corrupts .NET's managed
 
 ### RawBitmap
 
-`RawBitmap` is a lightweight record (`byte[] Pixels, int Width, int Height, int Stride`) returned by `RenderPages()` / `RenderPagesAsync()`. It gives callers raw BGRA pixel data they can use with any framework. Not disposable — the `byte[]` is a managed array.
+`RawBitmap` is a lightweight record (`byte[] Pixels, int Width, int Height, int Stride`) returned by `RenderPages()` / `RenderPagesAsync()`, `PdfPage.GetEmbeddedThumbnail()` and `PdfImageObject.GetBitmap()` / `GetRenderedBitmap()`. It gives callers raw BGRA pixel data they can use with any framework. Not disposable — the `byte[]` is a managed array.
 
 ## Critical Rules
 
@@ -176,6 +180,7 @@ Rules for any code you add or change:
 - A non-async method that returns a `Task` or `IAsyncEnumerable` must not call `Enter()`: do managed validation there (disposed check, argument checks) and await the gate inside the async body. `StreamImageBytesAsync` checks the page count when enumeration starts for this reason.
 - Never hand a caller-owned native handle out of the public API (the raw destroy functions are internal). Copy to managed memory, or wrap it in a tracked disposable. `PdfImageObject.GetBitmap()` returns a `RawBitmap` for this reason.
 - Awaits inside the library use `ConfigureAwait(false)` (`EnterAsync()` already never resumes on a captured context). The gate is handed to an async waiter before its continuation runs; posted to a UI thread that is blocked in a synchronous call, that continuation would never run.
+- Never `await Task.Yield()`: it posts to the caller's `SynchronizationContext`, so `.Wait()` on a UI thread deadlocks. A public async method that does page work starts with `await new ThreadPoolHop();` (a no-op when already on a context-free pool thread), and an async iterator hops at the top of each page, because its consumer resumes it on its own thread.
 - Finalizers never call PDFium, never take a lock and never wait on the gate. They only call `PdfiumRuntime.EnqueueRelease(kind, handle)` in ascending `NativeHandleKind` order (page objects, forms, pages, document, then pinned buffers and native memory). A document's finalizer enqueues its pages, forms and detached page objects itself so none can be closed after the document.
 - No user I/O inside the gate. Read caller streams before entering (`SpooledInput`); serialize saves into a pooled buffer inside the gate (`PooledFileWriter`) and write to the caller's stream after leaving it.
 - Render inside the gate, encode outside it: return a `BitmapLease` from the gated scope and convert/encode/write from its buffer with the gate free.
@@ -234,8 +239,10 @@ Rules for pool code:
 **Image output (streaming, memory-efficient):**
 - `StreamImageBytes()` / `StreamImageBytesAsync()` — `IEnumerable<byte[]>` / `IAsyncEnumerable<byte[]>`, one page at a time
 - `SaveAsTiff()` / `SaveAsTiffAsync()` — multi-page TIFF to file or stream, bilevel (CCITT G4) or grayscale (LZW)
-- `SaveAsPngs()`, `SaveAsJpegs()`, `SaveAsImages()` — save to directory or streams
-- `RenderPages()` / `RenderPagesAsync()` — returns `RawBitmap[]` (BGRA pixel data, no disposal needed)
+- `SaveAsPngs()`, `SaveAsJpegs()`, `SaveAsImages()` and their `...Async` versions — save to directory (`PageFileName`) or streams
+- `RenderPages()` / `RenderPagesAsync()` — returns `RawBitmap[]` (BGRA pixel data, no disposal needed); holds every page at once
+- `PdfPage.GetEmbeddedThumbnail()` — `RawBitmap?` in one decode (`GetEmbeddedThumbnailBytes`/`Size` are obsolete); `HasEmbeddedThumbnail` measures the stream without decoding
+- JPEG quality defaults to 90 on every entry point, the pool included
 
 **PDF operations:**
 - `PdfDocument` — load from file/bytes/stream, create new, save to file/stream
@@ -256,7 +263,9 @@ Rules for pool code:
 
 - Native work is serialized process-wide; only conversion, encoding and output overlap between callers. More throughput than one process gives comes from more processes, not more threads
 - `RenderToBitmapLease()` exposes the native pixel buffer — encoders read it directly, avoiding the managed `byte[]` copy that `RenderToBytes()` makes
-- `RenderPages()` copies each lease into a managed `byte[]` with a single `Marshal.Copy`, outside the gate
+- `RenderPages()` copies each lease into a managed `byte[]` with a single `Marshal.Copy`, outside the gate, and keeps every page until it returns
+- Each bitmap is capped at `PdfiumWrapper.MaxRenderPixels` (default 2^28 pixels, 1 GiB BGRA), checked before PDFium allocates; concurrent callers each hold one bitmap while encoding
+- PNG and TIFF files are written by managed code (PNG: in-memory encode then `File.WriteAllBytes`, one extra copy per page; TIFF: libtiff callbacks into a buffered `FileStream`)
 - Stream inputs are spooled before the gate (copied into memory the document owns up to 64 MB, pooled for seekable streams, then a temp file; `PdfiumWrapper.SpoolThreshold` overrides); PDF saves are buffered in a pooled array and written after the gate is released
 - `PixelConverter` uses pre-scaled threshold comparison to avoid per-pixel division in bilevel conversion
 - PNG encoding uses zlib-ng (SIMD: NEON/AVX2) + `PNG_FILTER_SUB` for ~40% faster than SkiaSharp
