@@ -938,11 +938,15 @@ form.SetFormFieldValue("Email", "john@example.com");
 
 #### GetFormFieldChecked(string fieldName)
 
-Gets whether a checkbox or radio button is checked.
+Gets whether a checkbox or radio button is checked, from PDFium's checked state (`FPDFAnnot_IsChecked`), whatever the field's export value is ("On", "Yes", "1", ...). Reads the first widget with this name; for a radio button group that is its first button.
 
 ```csharp
 bool agreed = form.GetFormFieldChecked("AgreeToTerms");
 ```
+
+**Exceptions:**
+- `ArgumentException` — If field not found
+- `InvalidOperationException` — If the field is not a checkbox or radio button
 
 #### SetFormFieldChecked(string fieldName, bool isChecked)
 
@@ -963,11 +967,16 @@ form.SetListBoxSelection("Country", "United States");
 
 #### SetListBoxSelections(string fieldName, string[] selectedValues)
 
-Sets multiple selections for a multi-select list box.
+Selects exactly the given options of a list box and clears the others. Values are matched (ordinal, case-sensitive) against the option labels in `FormField.Options` and may contain commas. PDFium's form filler (`FORM_SetIndexSelected`) writes the field as a viewer does: `/I` holds the selected indexes and `/V` an array of the selected values. An empty array clears the selection.
 
 ```csharp
 form.SetListBoxSelections("Interests", new[] { "Music", "Sports", "Reading" });
 ```
+
+**Exceptions:**
+- `ArgumentNullException` — If `selectedValues` is null
+- `ArgumentException` — If field not found, a value is not one of the options, or more than one value is given for a list box without the multi-select flag
+- `InvalidOperationException` — If the field is not a list box, or PDFium did not apply the selection (for example a read-only field)
 
 ---
 
@@ -987,7 +996,7 @@ public class FormField
 |----------|------|-------------|
 | `Name` | `string` | Field name/identifier |
 | `Type` | `FormFieldType` | Type of form field |
-| `Value` | `string` | Current value |
+| `Value` | `string` | Current value. Checkboxes and radio buttons: `"true"` or `"false"` (checked state, whatever the export value). List boxes: the first selected value |
 | `PageIndex` | `int` | Page where field appears (0-indexed) |
 | `IsRequired` | `bool` | Whether the field is required |
 | `IsReadOnly` | `bool` | Whether the field is read-only |
@@ -1299,7 +1308,7 @@ public class PdfBookmark
 | Property | Type | Description |
 |----------|------|-------------|
 | `Title` | `string` | Bookmark title/label |
-| `PageIndex` | `int` | Target page (0-indexed) |
+| `PageIndex` | `int?` | Target page (0-indexed); `null` when the bookmark has no destination or GoTo action, or its destination does not resolve to a page of this document |
 | `ChildCount` | `int` | Number of child bookmarks |
 | `Children` | `List<PdfBookmark>` | Child bookmark entries |
 
