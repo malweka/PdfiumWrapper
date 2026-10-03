@@ -165,7 +165,12 @@ See [Best Practices](docs/BEST-PRACTICES.md) and [High-Throughput Processing](do
 
 ## Upgrading to 2.0
 
-- The raw native imports on the `PDFium` class (for example `PDFium.FPDF_LoadDocument`) are now `internal`. The class stays public for its constants and structs (`PDFium.FPDF_ANNOT`, `PDFium.FPDF_INCREMENTAL`, ...). There is no supported raw-call path in 2.0; use the wrapper types.
+- The raw native imports on the `PDFium` class (for example `PDFium.FPDF_LoadDocument`) are now `internal`, as are its interop structs and the `LibTiff` and `LibTurboJpeg` classes. The `PDFium` class stays public for its constants (`PDFium.FPDF_ANNOT`, `PDFium.FPDF_INCREMENTAL`, ...). There is no supported raw-call path in 2.0, and no public member takes or returns a native pointer; use the wrapper types.
+- `PdfPage.GetObject(index)` and `PdfFormObject.GetObject(index)` return the typed wrapper (`PdfTextObject`, `PdfPathObject`, ...) instead of an `IntPtr`. The `Create(IntPtr documentHandle, ...)` factories of the page object classes are internal; use `PdfPage.AddText`, `AddImage`, `AddPath` and `AddRectangle`.
+- A document that fails to load throws `PdfiumException` (derived from `InvalidOperationException`) with an `ErrorCode` such as `PdfiumErrorCode.Password` or `Format`. See [Load errors](docs/API-REFERENCE.md#load-errors).
+- `PdfMetadata` is read-only. Its setters and `SetMetadataString`, `SetCreationDateTime`, `SetModificationDateTime`, `SetAllMetadata` and `ClearAllMetadata` are removed: they called a function PDFium does not have and always threw `EntryPointNotFoundException`.
+- `DocumentId` no longer ends in `00` (PDFium's terminator was hex-encoded): a 16-byte ID is 32 hex characters.
+- The async render and save methods take an optional `CancellationToken`, checked before each page.
 - New `PdfiumRuntime` class: `Enter()`, `ReleasePending()`, `Shutdown()`, `IsHeldByCurrentThread`, `LiveHandleCount`. See the [API Reference](docs/API-REFERENCE.md#pdfiumruntime).
 - `new PdfDocument(Stream)` and `new PdfMerger(Stream)` read the stream to its end during construction, copying a `MemoryStream`'s bytes as well; the stream can be closed, reset or reused immediately afterwards. The `byte[]` constructors still use the array in place: do not modify it while the document is open.
 - Saving to a stream writes after the PDF has been serialized in memory. An exception thrown by the destination stream (for example `IOException`) now reaches the caller unchanged.

@@ -388,7 +388,7 @@ string text = page.ExtractText();
 
 ### Disposing Arrays of Pages
 
-When using `GetAllPages()`, dispose each page:
+`GetAllPages()` is obsolete: it loads every page at once. Prefer `ProcessAllPages`, which loads and disposes one page at a time. If you use it, dispose each page:
 
 ```csharp
 var pages = document.GetAllPages();
@@ -632,7 +632,7 @@ public PdfProcessResult ProcessPdf(byte[] pdfData, string? password = null)
             PageCount = document.PageCount 
         };
     }
-    catch (InvalidOperationException ex) when (ex.Message.Contains("password"))
+    catch (PdfiumException ex) when (ex.ErrorCode == PdfiumErrorCode.Password)
     {
         return new PdfProcessResult 
         { 
@@ -640,7 +640,7 @@ public PdfProcessResult ProcessPdf(byte[] pdfData, string? password = null)
             Error = "PDF is password protected" 
         };
     }
-    catch (InvalidOperationException ex) when (ex.Message.Contains("Failed to load"))
+    catch (PdfiumException)
     {
         return new PdfProcessResult 
         { 

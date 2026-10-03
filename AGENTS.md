@@ -209,9 +209,11 @@ After adding/modifying page objects, `page.GenerateContent()` MUST be called bef
 
 - Use `LibraryImport` (source-generated) for all non-variadic native functions
 - Use `DllImport` only when `LibraryImport` cannot handle the signature (currently: none — the shim eliminated this need)
-- PDFium imports are `internal static partial` (never `public`: a public raw import bypasses the gate). The `PDFium` class stays public for constants and structs only
-- Check `IntPtr.Zero` after native calls and throw `InvalidOperationException` with `PDFium.FPDF_GetLastError()`, read in the same gated scope as the failing call
-- Check each signature against the PDFium header. A struct pointer parameter (for example `FS_MATRIX*`) is one `ref`/`out` struct, not separate scalar parameters
+- PDFium imports are `internal static partial` (never `public`: a public raw import bypasses the gate). The `PDFium` class stays public for constants only; its interop structs, `LibTiff` and `LibTurboJpeg` are internal. No public or protected member may take or return `IntPtr` (`NativeBoundaryTests.PublicSurface_DoesNotTakeOrReturnNativePointers`); wrap native objects instead (`PdfPageObject.WrapExisting`)
+- Check `IntPtr.Zero` after native calls. A failed document load throws `PdfiumException.FromLastError(...)`, read in the same gated scope as the failing call. Other failures throw `InvalidOperationException` without an error code: only the `FPDF_Load*Document` functions set `FPDF_GetLastError`
+- Check each signature against the PDFium header and the shipped binary's exports (`NativeBoundaryTests.EveryImport_IsExportedByItsNativeLibrary`). C `unsigned long`/`long` (`FPDF_DWORD`, buffer lengths) is `CULong`/`CLong`, never `ulong`/`uint`; `size_t` is `nuint`; `FPDF_BYTESTRING` is UTF-8, `FPDF_WIDESTRING` UTF-16. A struct pointer parameter (for example `FS_MATRIX*`) is one `ref`/`out` struct, not separate scalar parameters
+- Read PDFium's "call for the length, then for the text" UTF-16 strings with `NativeText.ReadUtf16`, not a new copy of the loop
+- `FPDFPage_InsertObject` frees the object when it fails: insert through `PdfPage.InsertObject`, which marks the wrapper freed
 - Memory that PDFium keeps a pointer to after the call returns (for example `FPDF_FORMFILLINFO`) must be native memory or pinned for the whole lifetime, and released only after the owning native object is closed
 - The `PDFium` class is split into partial files by domain: `PDFium.cs` (core), `PDFium.Edit.cs`, `PDFium.FormFill.cs`, `PDFium.Metadata.cs`, `PDFium.Annot.cs`, `PDFium.Ppo.cs`
 

@@ -838,55 +838,9 @@ foreach (var (key, value) in allMetadata)
 }
 ```
 
-### Set Metadata
+### Writing Metadata
 
-```csharp
-using var document = new PdfDocument("document.pdf");
-var metadata = document.Metadata;
-
-metadata.Title = "Annual Report 2024";
-metadata.Author = "Finance Department";
-metadata.Subject = "Q4 Financial Results";
-metadata.Keywords = "finance, quarterly, 2024, annual report";
-metadata.Creator = "My Application";
-
-document.Save("document_with_metadata.pdf");
-```
-
-### Set All Metadata at Once
-
-```csharp
-using var document = new PdfDocument("document.pdf");
-
-document.Metadata.SetAllMetadata(
-    title: "Project Documentation",
-    author: "Development Team",
-    subject: "Technical Specification",
-    keywords: "api, documentation, v2.0",
-    creator: "DocGenerator v1.0",
-    producer: "PdfiumWrapper"
-);
-
-document.Save("documented.pdf");
-```
-
-### Update Modification Date
-
-```csharp
-using var document = new PdfDocument("document.pdf");
-
-document.Metadata.SetModificationDateTime(DateTime.UtcNow);
-document.Save("document.pdf");
-```
-
-### Clear All Metadata (Privacy)
-
-```csharp
-using var document = new PdfDocument("document.pdf");
-
-document.Metadata.ClearAllMetadata();
-document.Save("clean_document.pdf");
-```
+Metadata is read-only. PDFium has no function to write the Info dictionary, so `PdfMetadata` has no setters (the 1.x setters always failed with `EntryPointNotFoundException`). To change metadata, edit the saved PDF with a library that writes PDF objects.
 
 ---
 
