@@ -14,6 +14,9 @@ public abstract class BenchmarkBase
         new PdfTestDocument("doc-3-pages-with-comments.pdf", 3),
         new PdfTestDocument("contract.pdf", 10),
         new PdfTestDocument("fw2.pdf", 11),
+        // presentation.pdf has 37 pages. The label says 30 and is kept as is, because the label is part
+        // of the document name stored in benchmark.db and changing it would break comparisons with
+        // earlier runs. CorpusPages() uses the real count.
         new PdfTestDocument("presentation.pdf", 30),
     };
 
@@ -56,7 +59,16 @@ public abstract class BenchmarkBase
         => TestDocuments.Select(d => Path.GetFullPath(Path.Combine(DocsDirectory, d.FileName))).ToArray();
 
     /// <summary>Total pages across the corpus.</summary>
-    public static int CorpusPages() => TestDocuments.Sum(d => d.Pages);
+    public static int CorpusPages()
+    {
+        int total = 0;
+        foreach (var file in CorpusFiles())
+        {
+            using var doc = new PdfDocument(file);
+            total += doc.PageCount;
+        }
+        return total;
+    }
 }
 
 public class PdfTestDocument

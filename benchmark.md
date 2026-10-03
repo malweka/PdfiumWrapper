@@ -422,7 +422,7 @@ Native library SHA-256:
 | `linux-x64/libtiff_shim.so` | `F42A08D616A96EB4C28F9E9CCD5C4F8B7F33D39D9E4B2AF3AA4BA1541E6B7CFB` |
 | `linux-x64/libturbojpeg.so` | `75E641AB1B0EB33C8A23ADC92FE7A695C2250A8A86743C4FE4A1684C65927F38` |
 
-All numbers below are from this one machine. They size nothing else; rerun on the deployment hardware with the deployment documents.
+All numbers below are from this one machine. Document labels come from the benchmark parameters: the presentation is labeled `(30p)` but has 37 pages; the label is kept so results stay comparable with earlier runs in `benchmark.db`. They size nothing else; rerun on the deployment hardware with the deployment documents.
 
 ### How to run
 
@@ -512,22 +512,22 @@ A document-first start is about 5 ms slower: initialization now also loads libti
 
 ### In-process scaling (`ConcurrentCallersBenchmark`)
 
-Each caller converts the whole corpus (55 pages) with its own documents. TIFF at 200 DPI bilevel, PNG and JPEG at 150 DPI. pages/sec = callers x 55 / mean seconds.
+Each caller converts the whole corpus (62 pages) with its own documents. TIFF at 200 DPI bilevel, PNG and JPEG at 150 DPI. pages/sec = callers x 62 / mean seconds. (These pages/sec figures were first recorded with 55 pages per caller: the presentation is labeled 30p but has 37 pages. Corrected 2026-10-02; the speedups are unchanged.)
 
 | Format | Callers | Mean (s) | Pages/sec | Speedup over 1 caller |
 |---|---|---|---|---|
-| TIFF | 1 | 3.436 | 16.0 | 1.00 |
-| | 2 | 6.186 | 17.8 | 1.11 |
-| | 4 | 12.397 | 17.7 | 1.11 |
-| | 8 | 24.669 | 17.8 | 1.11 |
-| PNG | 1 | 3.276 | 16.8 | 1.00 |
-| | 2 | 4.857 | 22.6 | 1.35 |
-| | 4 | 9.267 | 23.7 | 1.41 |
-| | 8 | 18.130 | 24.3 | 1.45 |
-| JPEG | 1 | 2.453 | 22.4 | 1.00 |
-| | 2 | 4.524 | 24.3 | 1.08 |
-| | 4 | 9.107 | 24.2 | 1.08 |
-| | 8 | 18.086 | 24.3 | 1.09 |
+| TIFF | 1 | 3.436 | 18.0 | 1.00 |
+| | 2 | 6.186 | 20.0 | 1.11 |
+| | 4 | 12.397 | 20.0 | 1.11 |
+| | 8 | 24.669 | 20.1 | 1.11 |
+| PNG | 1 | 3.276 | 18.9 | 1.00 |
+| | 2 | 4.857 | 25.5 | 1.35 |
+| | 4 | 9.267 | 26.8 | 1.41 |
+| | 8 | 18.130 | 27.4 | 1.45 |
+| JPEG | 1 | 2.453 | 25.3 | 1.00 |
+| | 2 | 4.524 | 27.4 | 1.08 |
+| | 4 | 9.107 | 27.2 | 1.08 |
+| | 8 | 18.086 | 27.4 | 1.09 |
 
 Rendering is the serialized part and it dominates. A second caller recovers the encode share (large for PNG, small for JPEG and bilevel TIFF); callers beyond two add nothing.
 
@@ -620,6 +620,28 @@ Processes scale where threads in one process do not: near-linear up to the 8 per
 - The rule builds the pool only if `1.30 docs/sec < N / T` **and** the consumer cannot add replicas, or the consumer requires isolation from native aborts.
 - `N` and `T` were not supplied. Whether the consumer can run replicas was not supplied. The crash probe found no process-fatal input (25 damaged files, win-x64 and linux-x64), so there is no measured case for abort isolation.
 - Outcome: the pool was not built. For any burst above about 1.3 docs/sec of this mix, one process is not enough; more processes are. Eight replicas gave 9.05 docs/sec on this machine. If the consumer cannot run replicas behind its queue, the pool (plan Phases 5 to 7) is the remaining route and the decision should be reopened with `N`, `T` and that constraint.
+
+## TIFF: rendering in 8-bit gray (2.0)
+
+Recorded 2026-10-02 on the machine described above. `SaveAsTiff` now renders each page into an 8-bit gray PDFium bitmap instead of 32-bit BGRA, then thresholds (bilevel) or copies (grayscale) one byte per pixel.
+
+`PdfToTiffBenchmark` (bilevel G4, 200 DPI), mean ms. The three runs are in `benchmark.db` as `pre-gate-1.0.0`, `gated-2.0.0` and `gray-tiff-2.0.0`.
+
+| Document | 1.0.0 | 2.0.0, BGRA render | 2.0.0, gray render | Change from BGRA |
+|---|---|---|---|---|
+| doc-1-page (1p) | 18.86 | 18.68 | 11.32 | -39% |
+| doc-3-pages (3p) | 51.51 | 52.11 | 35.43 | -32% |
+| contract (10p) | 158.17 | 161.33 | 107.27 | -34% |
+| fw2 (11p) | 175.05 | 176.09 | 128.14 | -27% |
+| presentation (30p) | 3,038.32 | 3,061.41 | 2,997.41 | -2% |
+
+Stage breakdown from a stopwatch prototype (whole document, median of 7 runs, pinned to the performance cores), contract.pdf: render 80.5 ms to 50.3 ms, convert 38.1 ms to 18.7 ms, TIFF write unchanged at about 40 ms. Grayscale (LZW) TIFF gained 26% to 32% on the four text documents and its files came out 23% to 26% smaller; the presentation gained 5%.
+
+- The presentation does not gain: nearly all of its time is page rendering, which takes the same time in gray.
+- A page bitmap is a quarter of the size: 3.7 MB instead of 15 MB for US Letter at 200 DPI.
+- Output is not pixel-identical to the BGRA path. PDFium anti-aliases text with plain grayscale smoothing below 16 bits per pixel and with LCD-style smoothing, reduced to gray, at 32 bits. After thresholding, 0.6% to 1.9% of pixels differ on the text documents, at glyph edges; on the contract's first page the gray render has about 2% fewer black pixels.
+- Rendering BGRA with PDFium's `FPDF_GRAYSCALE` flag gave output nearly identical to the old path and no speedup.
+- Measurement note: on this hybrid CPU an unpinned stopwatch run showed the same render taking about 2.9 s or about 6.0 s depending on the core it landed on. Pin such experiments to the performance cores (BenchmarkDotNet's runs did not show the split).
 
 ## Files To Remember
 

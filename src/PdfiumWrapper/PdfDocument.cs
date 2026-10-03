@@ -652,7 +652,7 @@ public class PdfDocument : IDisposable
     /// Loads a page, renders it at the given resolution and closes it again, all in one gated scope.
     /// The native gate must be held.
     /// </summary>
-    private BitmapLease RenderPageLeaseCore(int pageIndex, int dpiWidth, int dpiHeight, int flags)
+    private BitmapLease RenderPageLeaseCore(int pageIndex, int dpiWidth, int dpiHeight, int flags, bool gray = false)
     {
         PdfiumRuntime.AssertHeld();
 
@@ -661,7 +661,7 @@ public class PdfDocument : IDisposable
         {
             int widthPx = (int)Math.Round(page.WidthCore / 72.0 * dpiWidth);
             int heightPx = (int)Math.Round(page.HeightCore / 72.0 * dpiHeight);
-            return page.RenderToBitmapLeaseCore(widthPx, heightPx, flags);
+            return page.RenderToBitmapLeaseCore(widthPx, heightPx, flags, gray);
         }
         finally
         {
@@ -670,17 +670,17 @@ public class PdfDocument : IDisposable
     }
 
     /// <summary>Render inside the gate. The caller encodes from the lease with the gate free.</summary>
-    private BitmapLease RenderPageLease(int pageIndex, int dpiWidth, int dpiHeight, int flags)
+    private BitmapLease RenderPageLease(int pageIndex, int dpiWidth, int dpiHeight, int flags, bool gray = false)
     {
         using var _ = PdfiumRuntime.Enter();
-        return RenderPageLeaseCore(pageIndex, dpiWidth, dpiHeight, flags);
+        return RenderPageLeaseCore(pageIndex, dpiWidth, dpiHeight, flags, gray);
     }
 
-    private async ValueTask<BitmapLease> RenderPageLeaseAsync(int pageIndex, int dpiWidth, int dpiHeight, int flags)
+    private async ValueTask<BitmapLease> RenderPageLeaseAsync(int pageIndex, int dpiWidth, int dpiHeight, int flags, bool gray = false)
     {
         using (await PdfiumRuntime.EnterAsync())
         {
-            return RenderPageLeaseCore(pageIndex, dpiWidth, dpiHeight, flags);
+            return RenderPageLeaseCore(pageIndex, dpiWidth, dpiHeight, flags, gray);
         }
     }
 
@@ -702,15 +702,20 @@ public class PdfDocument : IDisposable
     private static void WriteTiffPage(TiffWriter writer, BitmapLease lease, int dpiWidth, int dpiHeight,
         TiffColorMode colorMode, byte threshold, int totalPages)
     {
+        // TIFF pages are rendered into an 8-bit gray bitmap (see RenderToBitmapLeaseCore).
         switch (colorMode)
         {
             case TiffColorMode.Bilevel:
-                var bilevelData = PixelConverter.BgraToPackedBilevel(lease.Buffer, lease.Width, lease.Height, lease.Stride, threshold);
+                var bilevelData = lease.IsGray
+                    ? PixelConverter.GrayToPackedBilevel(lease.Buffer, lease.Width, lease.Height, lease.Stride, threshold)
+                    : PixelConverter.BgraToPackedBilevel(lease.Buffer, lease.Width, lease.Height, lease.Stride, threshold);
                 writer.WriteBilevelPage(bilevelData, lease.Width, lease.Height, dpiWidth, dpiHeight, totalPages);
                 break;
 
             case TiffColorMode.Grayscale:
-                var grayData = PixelConverter.BgraToGrayscale(lease.Buffer, lease.Width, lease.Height, lease.Stride);
+                var grayData = lease.IsGray
+                    ? PixelConverter.GrayToGrayscale(lease.Buffer, lease.Width, lease.Height, lease.Stride)
+                    : PixelConverter.BgraToGrayscale(lease.Buffer, lease.Width, lease.Height, lease.Stride);
                 writer.WriteGrayscalePage(grayData, lease.Width, lease.Height, dpiWidth, dpiHeight, totalPages);
                 break;
 
@@ -1127,7 +1132,7 @@ public class PdfDocument : IDisposable
         for (int i = 0; i < pageCount; i++)
         {
             // Render under the gate; convert, compress and write with the gate free.
-            using var lease = RenderPageLease(i, dpiWidth, dpiHeight, TiffRenderFlags);
+            using var lease = RenderPageLease(i, dpiWidth, dpiHeight, TiffRenderFlags, gray: true);
             WriteTiffPage(writer, lease, dpiWidth, dpiHeight, colorMode, threshold, pageCount);
         }
     }
@@ -1138,7 +1143,7 @@ public class PdfDocument : IDisposable
         for (int i = 0; i < pageCount; i++)
         {
             await Task.Yield();
-            var lease = await RenderPageLeaseAsync(i, dpiWidth, dpiHeight, TiffRenderFlags).ConfigureAwait(false);
+            var lease = await RenderPageLeaseAsync(i, dpiWidth, dpiHeight, TiffRenderFlags, gray: true).ConfigureAwait(false);
             await using var leaseScope = lease.ConfigureAwait(false);
             WriteTiffPage(writer, lease, dpiWidth, dpiHeight, colorMode, threshold, pageCount);
         }

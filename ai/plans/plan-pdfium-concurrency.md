@@ -1,6 +1,6 @@
 # PDFium Concurrency and Burst Throughput Plan
 
-Status: Release 1 (Phases 0 to 4 and 8) implemented and measured on 2026-10-02. Release 2 (Phases 5 to 7, the process pool) was not built: the Phase 4 decision gate did not call for it. See "Implementation record" below for what was done, where the code departs from the reference design in section 4, and the measured results.
+Status: Release 1 (Phases 0 to 4 and 8) implemented and measured on 2026-10-02. Release 2 (Phases 5 to 7, the worker pool) was approved by the owner the same day after the throughput measurements and is specified in section 4.9 and Phases 5 to 7; implementation has not started. See "Implementation record" below for what was done in Release 1, where the code departs from the reference design in section 4, and the measured results.
 
 This document is written so that an agent can implement it without further design decisions. Section 3 contains the binding design rules. Section 4 contains reference code for every new component. Phases 0 to 8 are the ordered checklist. Where this document and existing code disagree, this document wins; where this document is silent, follow existing patterns in `AGENTS.md`.
 
@@ -127,9 +127,12 @@ Ship correctness first as its own release (Release 1). Obtain parallelism second
 
 | # | Rule | Reason |
 |---|------|--------|
-| R13 | The process pool is built only if the Phase 4 decision gate says so: measured in-process capacity cannot meet `N / T` with 25% headroom and the consumer cannot run more replicas, or the consumer requires isolation from native aborts. | Avoid building a job system nobody needs. |
-| R14 | Crash isolation is the lead justification for the pool. PDFium can abort on malformed input; today that kills the service. | Holds even when parallelism adds nothing. |
-| R15 | Worker and coordinator ship as separate opt-in packages. The core package never launches processes. | Small consumers keep the simple API. |
+| R13 | ~~The process pool is built only if the Phase 4 decision gate says so.~~ **Superseded 2026-10-02:** the owner decided to build the pool after the 1,000-request measurement showed one process at 2.2 requests/s against 10.9 for 8 processes, and because the developer otherwise has to write the orchestration (bounded loops, replicas or a hand-built process pool) themselves. | A single-process application has no other way past the per-process ceiling. |
+| R14 | Crash isolation is a justification of its own. PDFium can abort on malformed input; in one process that kills the service. In the pool it costs one job attempt. | Holds even when parallelism adds nothing. |
+| R15 | The pool ships as one opt-in package, `PdfiumWrapper.Processing`. The core package never launches processes. The worker is not a deployable of its own: by default the consumer's executable is re-launched as the worker (`PdfWorkerHost.TryRun()` first in `Main`); a dedicated worker executable is optional (`WorkerPath`). | Small consumers keep the simple API; no per-RID worker to publish, and the natives are already in the consumer's output. |
+| R16 | Worker count is dynamic between `MinWorkers` and `MaxWorkers`: up by one when all workers are busy and jobs wait longer than `ScaleUpAfter` (500 ms); down by one when a worker idles longer than `IdleTimeout` (60 s). `MinWorkers` are pre-warmed. `MaxWorkers` defaults to half the logical processors. Workers are replaced on crash, timeout or a memory limit, never recycled on a schedule. | Scale up fast, down slowly, no thrash; a worker is one core, so past the fast cores more workers add memory and little throughput; scheduled recycling hides leaks. |
+| R17 | Only file paths, options and small results cross the process boundary, as length-prefixed JSON frames. Never pixels, handles, delegates or shell commands. Large text results go through a temp file. | Keeps IPC cheap and the attack surface small. |
+| R18 | A job failure never fails the pool. Crash, hang, malformed frame or memory limit: the worker is killed or retired and replaced; the job is reported with a status and retried up to `MaxAttempts`; other jobs are unaffected. `SubmitAsync` throws only for argument errors and after disposal. | The pool exists to contain native failures. |
 
 ### 3.3 Approach table
 
@@ -138,7 +141,7 @@ Ship correctness first as its own release (Release 1). Obtain parallelism second
 | Operation-level gate in one process | Required. Ships alone in Release 1. |
 | Gated render plus ungated encode/output | Release 1. First source of in-process parallel capacity. |
 | Replica scale-out of the consumer's service | First recommendation for consumers with an existing queue. Needs only the published single-lane capacity. |
-| Persistent process pool, one job per worker | Release 2, conditional (R13). |
+| Persistent worker pool, one job per worker, dynamic size (PdfiumWrapper.Processing) | Release 2, approved 2026-10-02. Section 4.9 and Phases 5 to 7. |
 | Single dedicated native thread | Fallback if the semaphore gate measures badly in Phase 4. |
 | Separate DLL copies or load contexts | Excluded. Native state isolation is not established. R4 applies instead. |
 | Fork PDFium for internal thread safety | Excluded. |
@@ -676,6 +679,106 @@ internal static HostResult RunHost(string scenario, TimeSpan timeout, params str
 
 ---
 
+### 4.9 Release 2: `PdfProcessingPool` (package `PdfiumWrapper.Processing`)
+
+The developer-facing API. Everything below runs in the consumer's process; the PDF work runs in worker processes it starts and manages.
+
+```csharp
+using PdfiumWrapper.Processing;
+
+await using var pool = new PdfProcessingPool(new PdfPoolOptions
+{
+    MinWorkers = 1,                                   // kept alive and warm
+    MaxWorkers = PdfPoolOptions.DefaultMaxWorkers,    // Environment.ProcessorCount / 2, at least 1
+    ScaleUpAfter = TimeSpan.FromMilliseconds(500),    // all workers busy and jobs waiting for this long: add one
+    IdleTimeout = TimeSpan.FromSeconds(60),           // a worker idle for this long is stopped, down to MinWorkers
+    JobTimeout = TimeSpan.FromMinutes(2),             // per attempt; the worker is killed and replaced
+    MaxAttempts = 2,                                  // a job whose worker crashed or timed out runs again on a fresh worker
+    QueueCapacity = 1_000,                            // SubmitAsync waits when this many jobs are queued (backpressure)
+    MaxWorkerMemoryBytes = null,                      // optional: retire a worker whose working set exceeds this, after its current job
+    WorkerPath = null,                                // null: re-launch this executable as the worker (see PdfWorkerHost)
+});
+
+// Typed operations. Each is one job on one worker.
+PdfJobResult<int>            pages = await pool.GetPageCountAsync("in.pdf", ct);
+PdfJobResult<ImageFiles>     png   = await pool.ConvertToPngAsync("in.pdf", "out/in", dpi: 150, ct: ct);
+PdfJobResult<ImageFiles>     jpeg  = await pool.ConvertToJpegAsync("in.pdf", "out/in", quality: 90, dpi: 300, ct: ct);
+PdfJobResult<TiffFile>       tiff  = await pool.ConvertToTiffAsync("in.pdf", "out/in.tiff", dpi: 200, TiffColorMode.Bilevel, ct: ct);
+PdfJobResult<string[]>       text  = await pool.ExtractTextAsync("in.pdf", ct);
+
+// Batches: results in completion order, as they finish; the enumerable completes when all have.
+await foreach (var r in pool.ConvertToPngAsync(files, outputRoot, dpi: 150, ct: ct))
+    Console.WriteLine($"{r.Input}: {r.Status} {r.Value?.Files.Count} files in {r.Timings.Processing.TotalMilliseconds} ms");
+
+// Inputs may also be byte[] or Stream; the pool spools them to a temp file for the worker.
+
+// Observability
+pool.Workers; pool.BusyWorkers; pool.QueuedJobs;
+pool.Statistics;                      // jobs succeeded/failed/timed out/retried, worker starts/stops/crashes, scale-ups/downs
+pool.Events += (s, e) => log.Information("{Kind} worker={Pid} job={JobId} {Detail}", e.Kind, e.WorkerPid, e.JobId, e.Detail);
+```
+
+```csharp
+public sealed record PdfJobResult<T>(
+    string Input,                     // the path or the name given with a byte[]/Stream input
+    PdfJobStatus Status,              // Succeeded, Failed, TimedOut, Cancelled, WorkerCrashed
+    T? Value,                         // set when Succeeded
+    string? Error,                    // exception type and message from the worker, or the pool's reason
+    int Attempts,
+    int WorkerPid,
+    PdfJobTimings Timings);           // Queued (submit to dispatch), Processing (dispatch to result), Total
+
+public sealed record ImageFiles(int PageCount, IReadOnlyList<string> Files);
+public sealed record TiffFile(int PageCount, string Path, long Bytes);
+
+public enum PdfPoolEventKind
+{
+    WorkerStarting, WorkerReady, WorkerStopped, WorkerCrashed, WorkerRetiredForMemory,
+    ScaledUp, ScaledDown, JobDispatched, JobCompleted, JobFailed, JobTimedOut, JobRetried, JobCancelled, QueueFull
+}
+```
+
+A job never fails the pool: a worker that crashes or hangs is killed and replaced, its job is reported as `WorkerCrashed`/`TimedOut` and retried up to `MaxAttempts`, and every other job proceeds. Disposing the pool stops accepting jobs, cancels queued ones (`Cancelled`), lets in-flight ones finish up to `JobTimeout`, then sends `Shutdown` to every worker.
+
+**Worker hosting.** The worker is not a separate executable to deploy. By default the pool re-launches the consumer's own executable with the environment variable `PDFIUMWRAPPER_WORKER=1`, and the consumer makes this the first statement of `Main`:
+
+```csharp
+public static async Task<int> Main(string[] args)
+{
+    if (PdfWorkerHost.TryRun())      // true: this process is a worker; it has already run its loop and should exit
+        return 0;
+
+    // normal application startup
+}
+```
+
+The relaunched process has the consumer's assemblies and native libraries available (they are in its own output directory, framework-dependent or self-contained), so there is nothing to publish per RID. The pool handles the `dotnet app.dll` case by launching `dotnet` with the entry assembly path. `WorkerPath` points at a dedicated worker executable instead, for hosts whose `Main` cannot be changed (the test project uses `PdfiumWrapper.Tests.Host` this way).
+
+**Sizing policy.** On a 250 ms timer the coordinator reads `QueuedJobs` and `BusyWorkers`:
+
+- Scale up by one worker when `QueuedJobs > 0` and `BusyWorkers == Workers` for at least `ScaleUpAfter`, until `MaxWorkers`. A burst therefore reaches `MaxWorkers` in `(MaxWorkers - MinWorkers) x ~0.5 s`; with the default 500 ms a single stray job never starts a process.
+- Scale down by one worker when a worker has been idle for `IdleTimeout`, until `MinWorkers`. The timeout is long on purpose: an idle worker costs memory and nothing else, and a service with bursts every few minutes keeps them warm.
+- Replace, don't recycle: a worker runs until it crashes, times out, exceeds `MaxWorkerMemoryBytes`, or is scaled down. No "restart after N jobs": that would hide leaks instead of exposing them.
+- `MinWorkers` are started and pre-warmed (one small built-in page rendered) when the pool is constructed, so the first request never pays a cold start.
+
+Measured basis (this machine, 1,000 PNG requests, `ai/tmp/throughput-comparison.md` for the full run): a worker reaches its first render about 75 to 85 ms after process start, uses 117 to 142 MB, and is CPU-bound on rendering, so one worker is one core. Throughput against worker count for this scenario, 2 request threads per process, PdfiumWrapper 2.0.0:
+
+| Processes | Requests/sec | Pages/sec | Peak memory, all processes |
+|---|---|---|---|
+| 1 (4 threads) | 2.21 | 27.4 | 159 MB |
+| 4 | 7.19 | 89.1 | 492 MB |
+| 8 | 10.87 | 134.8 | 949 MB |
+| 12 | 12.28 | 152.3 | 1,423 MB |
+| 16 | 13.06 | 161.9 | 1,880 MB |
+
+Past the fast cores each worker adds little, which is why `MaxWorkers` defaults to half the logical processors rather than all of them.
+
+**Protocol** (coordinator to worker over the worker's stdin/stdout): length-prefixed (4-byte little-endian) UTF-8 JSON frames, 16 MiB maximum; the worker's stderr is drained to `Events`. Frames: `Hello {protocolVersion, pdfiumVersion, pid}` (worker, once), `Job {id, kind, input, output, options}`, `Progress {id, pagesDone}`, `Cancel {id}`, `Result {id, status, value, error, timings}`, `Shutdown`. `input` and `output` are file paths; text results above 4 MiB are written to a temp file the result points at. No delegates, handles, pixels or shell commands cross the boundary. A worker that receives a malformed frame reports it and continues; a coordinator that receives one kills that worker.
+
+**Rules for the worker loop:** one job at a time, synchronous core APIs, `PdfiumRuntime` initialized once at start; between pages it checks for `Cancel`; on any exception it writes `Result{Failed}` and continues; on `Shutdown` or a closed stdin it exits 0. It never writes to stdout except protocol frames.
+
+---
+
 ## Phase 0 — Immediate fixes that do not wait on design
 
 - [x] Correct `docs/HIGH-THROUGHPUT-PROCESSING.md` (sections at `:49`, `:262` to `:460`, `:728`, summary table `:820`), `docs/BEST-PRACTICES.md:30` and `:53`, `README.md:152`, `AGENTS.md` Thread Safety, `docs/API-REFERENCE.md:44`, `docs/TROUBLESHOOTING.md:415`. Replace with: PDFium allows one native call per process at a time across all documents; until Release 1 ships, callers must serialize all PdfiumWrapper use in a process (one `SemaphoreSlim(1,1)` around every operation); file copies, byte arrays, and one document per thread do not help. Remove forced-GC batch advice and the `GC.GetTotalMemory` native-memory claim.
@@ -842,53 +945,63 @@ dotnet run -c Release --project src/PdfiumWrapper.Benchmarks -- burst \
 
 Exit: regression criteria verified, in-process scaling measured and recorded, documented go/no-go for the process pool.
 
-## Phase 5 — Persistent process workers (Release 2, conditional)
+## Phase 5 — `PdfiumWrapper.Processing`: worker pool (Release 2)
 
-> Not built (2026-10-02). The Phase 4 decision gate did not call for it: `N`, `T` and whether the consumer can run replicas were not supplied, and the crash probe found no process-fatal input. Phases 5 to 7 remain as specified for when the decision is reopened. See "Results and decision" in the implementation record.
+> Revised 2026-10-02. The owner asked for the pool after the 1,000-request throughput measurement (one process: 2.2 requests/s; 8 processes: 10.9; 16: 13.1). The design is in section 4.9; the rows below are the build order. The earlier "conditional" status and the separate per-RID worker package are withdrawn.
 
-- [ ] Add `src/PdfiumWrapper.Worker` (executable, `PackAsTool=false`, published per RID with its natives) and `src/PdfiumWrapper.Processing` (coordinator library). Neither is referenced by the core package.
-- [ ] Protocol: length-prefixed (4-byte little-endian) UTF-8 JSON frames over redirected stdin/stdout, max frame 1 MiB; stderr drained concurrently to the coordinator log. `Hello {protocolVersion, pdfiumVersion, rid}`, `Job {id, kind, inputRef, outputRef, options, deadlineUtc}`, `Progress {id, pagesDone}`, `Result {id, status, outputRef, pages, error, timings}`, `Shutdown`. `inputRef`/`outputRef` are file paths or spool ids only. No delegates, handles, or shell commands.
-- [ ] Job kinds: `ConvertToImages`, `ExtractText`, `Merge`, `FillForm`. Options are typed records mirroring the public API parameters.
-- [ ] Worker main loop: `PdfiumRuntime` initialized and a representative page rendered at startup (prewarm), then read frames, execute one job at a time with sync core APIs, write `Result`, loop. On any unhandled exception write `Result{status=Failed}` and continue; on `Shutdown` exit 0.
-- [ ] Coordinator: `ProcessPool(options)` with `MinWorkers`, `MaxWorkers`, `RunnableCapacity`, `JobTimeout`, `MaxRetries`, `WorkerPath`. `SubmitAsync(job, ct)` returns a `Task<JobResult>`; admission beyond `RunnableCapacity` awaits a bounded `Channel`. Durable spool is the caller's responsibility; the coordinator exposes `PendingCount` and `RunnableCount` for integration.
-- [ ] Scheduling: FIFO with a cost estimate `pages * (dpi/100)^2 * formatFactor`; long jobs are not dispatched ahead of shorter ones that have waited more than `AgingThreshold`. Per-document output order preserved by the worker; output paths are unique per attempt (`<out>.<jobId>.<attempt>.tmp`) and renamed on success.
-- [ ] Failure handling: worker exit or frame timeout marks the in-flight job `Failed(WorkerCrashed)`; retry up to `MaxRetries` on a fresh worker; the pool replaces the worker. Hard timeout kills the process (`Kill(entireProcessTree: true)`). Partial temp outputs deleted.
+Build order; run the full suite after each step.
+
+- [ ] **Project and packaging.** Add `src/PdfiumWrapper.Processing` (library, `PackageId` `PdfiumWrapper.Processing`, references `PdfiumWrapper`; `InternalsVisibleTo` the test project). Add it to the solution and the PR/release workflows. The core package is unchanged and never launches processes (R15).
+- [ ] **Protocol.** `Frames.cs`: the record types in 4.9, `System.Text.Json` source-generated; `FrameReader`/`FrameWriter` over a `Stream` with the 4-byte prefix, 16 MiB limit, and a unit test for a truncated prefix, an oversize frame and an unknown kind.
+- [ ] **Worker.** `PdfWorkerHost.TryRun()`: returns false unless `PDFIUMWRAPPER_WORKER=1`; otherwise sends `Hello`, pre-warms (renders an embedded one-page PDF at 36 DPI), then loops per 4.9. Job execution for the five kinds (`PageCount`, `ConvertToPng`, `ConvertToJpeg`, `ConvertToTiff`, `ExtractText`) by calling the core APIs; output files written as `<name>.<jobId>.tmp` and renamed on success; partial outputs deleted on failure or cancel.
+- [ ] **Worker launch.** `WorkerLauncher`: `WorkerPath` when set; otherwise `Environment.ProcessPath` plus, when that is the `dotnet` host, the entry assembly path; working directory the consumer's base directory; stdin/stdout redirected, stderr drained to events; the `Hello` frame expected within `WorkerStartTimeout` (default 30 s) or the process is killed and the start reported as failed.
+- [ ] **Coordinator core.** `PdfProcessingPool`: bounded job queue (`Channel`, `QueueCapacity`), worker table, FIFO dispatch to idle workers, result routing to the job's `TaskCompletionSource`, `JobTimeout` per attempt, `MaxAttempts`, cancellation (queued: removed; in flight: `Cancel` frame, then kill after a 2 s grace), `DisposeAsync` semantics from 4.9, `Statistics` and `Events`.
+- [ ] **Sizing.** `Sizer`: the 250 ms timer and the scale-up/scale-down rules in 4.9, `MinWorkers` pre-warmed at construction, `MaxWorkerMemoryBytes` check after each job (working set read from the `Process`). Every decision raises an event.
+- [ ] **Typed API.** The operations and batch overloads in 4.9, `byte[]`/`Stream` inputs spooled through `SpooledInput` to a temp file owned by the job and deleted with it.
+- [ ] **Test host.** `PdfiumWrapper.Tests.Host` gains a `worker` scenario that calls `PdfWorkerHost.TryRun()`; the tests set `WorkerPath` to it. Add scenarios `worker-crash` (aborts after `Hello` on a given job id, via `Environment.FailFast`), `worker-hang` (never answers a given job id) and `worker-garbage` (writes a malformed frame).
 - [ ] Validate under a service account and paths containing spaces on win-x64 and linux-x64.
 
-Exit: jobs run in independent PIDs, failures are isolated, admission is bounded, startup is amortized.
+Exit: jobs run in independent PIDs through a typed API; a crashed or hung worker costs one job attempt, never the pool; admission is bounded; worker count follows load between `MinWorkers` and `MaxWorkers`.
 
-## Phase 6 — Verify parallel native execution and recovery (Release 2)
+## Phase 6 — Verify parallel native execution, recovery and sizing (Release 2)
 
-- [ ] Cross-PID overlap: workers write `Render` intervals (host `Stopwatch.GetTimestamp()` is per process, so workers report `DateTime.UtcNow` ticks with offset calibration via a ping at startup). Assert at least one pair of overlapping render intervals from different PIDs and `MaxActiveNative == 1` inside each worker's own diagnostics.
-- [ ] Oversubscription: submit `4 * RunnableCapacity` jobs; assert backpressure (submit awaits), every job reaches a final status, no output path collisions, outputs match the Phase 3 oracle, coordinator working set bounded.
-- [ ] Fault injection: kill a busy worker; send a malformed frame; make the worker path invalid; set a 1 ms deadline; cancel mid-job; call `DisposeAsync` with jobs running. Assert explicit final statuses, no partial outputs with success status, remaining workers complete.
-- [ ] Run the crash-probe corpus through the pool; assert the coordinator survives and reports `WorkerCrashed` for the fatal inputs.
-- [ ] Qualification job (not in PR CI): 10,000-job burst and 30-minute soak on win-x64 and linux-x64; smoke only on macOS. Sample resident memory per 1,000 jobs; investigate growth above 10% after warmup rather than recycling workers by default.
+All in `src/PdfiumWrapper.Tests/Processing/`, every test with a bounded timeout, workers from the test host.
 
-Exit: cross-PID overlap demonstrated, results correct, recovery and bounds validated.
+- [ ] **Correctness oracle.** 200 PNG and TIFF jobs over the five documents through a pool of 4; outputs byte-identical to the single-process results of the same calls (same DPI, same code path), page counts equal, no path collisions, every job `Succeeded` with `Attempts == 1`.
+- [ ] **Cross-PID overlap.** Workers started with `PdfiumWrapper.Diagnostics` on report their `Render` intervals in `Result.timings` as UTC ticks (calibrated by a ping at `Hello`). Assert at least one pair of overlapping render intervals from different PIDs, and `MaxActiveNative == 1` inside every worker.
+- [ ] **Backpressure.** `QueueCapacity = 8`, submit 64 jobs from one task: `SubmitAsync` must await (the 9th submission is still pending 200 ms later while workers are blocked by a `worker-hang` document), then every job reaches a final status; the coordinator's working set stays bounded.
+- [ ] **Fault injection.** Kill a busy worker (`WorkerCrashed`, retried once, then `Succeeded`); `worker-hang` with `JobTimeout = 1 s` (`TimedOut`, worker replaced, other jobs unaffected); `worker-garbage` (worker killed, job retried); invalid `WorkerPath` (constructor throws `PdfPoolException` naming the path); cancel a queued job and an in-flight job (`Cancelled`, no partial output); `DisposeAsync` with jobs running (in-flight finish or time out, queued are `Cancelled`, all worker processes gone within 5 s).
+- [ ] **Crash isolation.** Run the Phase 3 crash-probe corpus through the pool; the pool survives every input and reports `Failed` or `WorkerCrashed` per job, never an exception from `SubmitAsync`.
+- [ ] **Sizing.** `MinWorkers = 1`, `MaxWorkers = 4`, `ScaleUpAfter = 200 ms`, `IdleTimeout = 2 s`: submit 40 jobs at once; assert `Workers` reaches 4 within 3 s (`ScaledUp` events), all jobs complete, then `Workers` returns to 1 within `IdleTimeout + 3 s` (`ScaledDown` events). Then one job at a time with 1 s gaps: assert no scale-up. `MinWorkers == MaxWorkers`: assert no sizing events at all. `MaxWorkerMemoryBytes` set below a worker's steady working set: assert `WorkerRetiredForMemory` and the next job still succeeds.
+- [ ] **Hosting.** A test console app re-launched as its own worker (`WorkerPath = null`) on win-x64 and linux-x64, framework-dependent (`dotnet app.dll`) and self-contained; a worker that starts but never says `Hello` is killed after `WorkerStartTimeout`.
+- [ ] **Qualification job (not in PR CI).** 10,000-job burst and a 30-minute soak with `MinWorkers = 2`, `MaxWorkers = 8`, on win-x64 and linux-x64; smoke only on macOS. Sample each worker's working set per 1,000 jobs; investigate growth above 10% after warm-up rather than recycling workers.
 
-## Phase 7 — Tune against the completion window (Release 2)
+Exit: cross-PID overlap demonstrated, results identical to in-process output, recovery and bounds validated, sizing behaves as specified.
 
-- [ ] Compare in the burst runner: sequential baseline, gated single caller, in-process `W` callers, pool of 1/2/4/8 workers. Report the Phase 4 JSON fields plus `ipcMsPerJob`.
-- [ ] Size workers from measured scaling and per-worker peak memory with headroom for coordinator, OS, and output buffers.
-- [ ] Encode in the worker; never ship raw BGRA over IPC. Prefer `StreamImageBytes` over `RenderPages` for large documents.
-- [ ] Page-range splitting across workers only if a single document cannot meet the window after document-level scheduling.
+## Phase 7 — Tune against the measurements (Release 2)
 
-Provisional criteria, to confirm after Phase 1 inputs: at least 2x end-to-end throughput at four workers versus one gated process on a 4+ core CPU-bound mixed corpus. Primary acceptance remains all `N` jobs within `T` with correct outputs and 25% headroom; otherwise report required capacity or a realistic window.
+- [ ] Add `--engine pool` to the comparison project's `throughput` runner (and a `pool` mode to the burst runner): the same 1,000-request scenario through `PdfProcessingPool` with `MaxWorkers` 4, 8, 12, 16 and `MinWorkers` 1 (cold) and `= MaxWorkers` (warm). Report the Phase 4 JSON fields plus `ipcMsPerJob`, `scaleUpSeconds` (submit of the first job to `Workers == MaxWorkers`) and worker count over time.
+- [ ] **Acceptance.** Warm pool at 8 workers within 10% of the measured 8 independent processes (10.87 requests/s on this machine for the PNG scenario); cold pool from `MinWorkers = 1` reaches `MaxWorkers = 8` within 5 s of the burst and finishes within 15% of the warm pool; coordinator CPU under 5% of one core at 16 workers.
+- [ ] Set `DefaultMaxWorkers` from the measurement (half the logical processors, which is 12 here, gave 12.3 requests/s against 13.1 for 16 at twice the memory); document the rule and when to raise it.
+- [ ] Encode in the worker; never ship raw BGRA over IPC. Page-range splitting across workers only if one document cannot meet the window after document-level scheduling.
+- [ ] Record the pool's numbers (PdfiumWrapper's only) in `benchmark.md` and the sizing guidance in `docs/HIGH-THROUGHPUT-PROCESSING.md`; replace the "no built-in batch or worker-pool API" note with the pool.
+
+Primary acceptance remains all `N` jobs within `T` with correct outputs and 25% headroom on the deployment hardware.
 
 ## Phase 8 — Documentation and release qualification
 
-- [x] Update `README.md`, `AGENTS.md`, XML remarks, `docs/API-REFERENCE.md`, `docs/BEST-PRACTICES.md`, `docs/HIGH-THROUGHPUT-PROCESSING.md`, `docs/TROUBLESHOOTING.md`: gate semantics; what concurrent submission does and does not provide; finalizer behavior and `ReleasePending()`; stream spooling and the threshold; encode overlap; measured single-lane and in-process capacity tables; replica scale-out guidance; the pool, if built.
+- [x] Update `README.md`, `AGENTS.md`, XML remarks, `docs/API-REFERENCE.md`, `docs/BEST-PRACTICES.md`, `docs/HIGH-THROUGHPUT-PROCESSING.md`, `docs/TROUBLESHOOTING.md`: gate semantics; what concurrent submission does and does not provide; finalizer behavior and `ReleasePending()`; stream spooling and the threshold; encode overlap; measured single-lane and in-process capacity tables; replica scale-out guidance.
+- [ ] Document the pool (Release 2): `PdfProcessingPool` and `PdfWorkerHost` in `docs/API-REFERENCE.md`; a "Worker pool" section in `docs/HIGH-THROUGHPUT-PROCESSING.md` replacing the "no built-in batch or worker-pool API" note, with the sizing policy and the measured pool numbers; `README.md` package list; `AGENTS.md` project layout and the worker rules.
 - [x] Document the 2.0 break: raw `PDFium` imports are internal; `PdfiumRuntime.Enter()`, `ReleasePending()`, `Shutdown()`, `IsHeldByCurrentThread`.
 - [x] Pin and report PDFium version and DLL checksums in `benchmark.md` and release notes. Recorded in `benchmark.md`; the repository has no release-notes file, so the 2.0 break is described in `README.md` ("Upgrading to 2.0").
 - [x] Run the full suite plus Phase 3 tests on all supported RIDs; recheck native resolution. Record results and open platform limits in `/docs` and `ai/current-state.md`. Done for win-x64 and linux-x64 (219 tests each). **Not run on osx-x64 or osx-arm64**: no macOS machine was available; recorded as an open platform check.
 
 ## First implementation step
 
-Execute Phase 0 now: doc correction, test collection attribute, resolver barrier, test host with `init-race`. Tag `bench-baseline-pre-gate` and run Phase 1. Then build `PdfiumRuntime` per Phase 2 in the listed order, with the deferred-release queue and `BitmapLease` split, before any Phase 3 stress. Decide on Release 2 only after the Phase 4 decision gate.
+Release 1 is done. Next: Phase 5 in its listed order (project, protocol, worker, launcher, coordinator, sizer, typed API, test host scenarios), then Phase 6 tests, then the Phase 7 measurements, then the Phase 8 pool documentation. Build on a branch from `main`; the gray TIFF rendering change (`feature/tiff-gray-render`) should merge first.
 
 ## Open inputs
 
-- Exact `N`, `T`, page-count distribution, dominant operations/formats/DPI, input and output sizes, production hardware and storage.
-- Whether the consumer can scale by replicas behind its existing queue, and whether it needs in-memory results or output references.
-- Deployment and packaging expectations for the worker and coordinator packages, if Release 2 is approved.
+- Exact `N`, `T`, page-count distribution, dominant operations/formats/DPI, input and output sizes, production hardware and storage. The pool's defaults (section 4.9) were chosen from this machine's measurements and the owner's scenario (1,000 requests, page count plus PNG); confirm or change them on the deployment hardware.
+- Whether the consumer needs results in memory (today: page count and text come back inline, images as files on disk).
+- Second-wave operations for the pool: merge, form filling, bookmarks and attachments. The first version covers page count, PNG, JPEG, TIFF and text.
