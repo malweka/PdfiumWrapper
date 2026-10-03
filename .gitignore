@@ -580,3 +580,9 @@ cython_debug/
 _native_build/
 src/native/*.zip
 src/native/*.tgz
+
+# License files for commercial libraries used by opt-in comparison benchmarks. Never commit these.
+*.lic
+
+# Local-only reports (for example comparisons against other PDF engines). Not for publication.
+ai/tmp/
