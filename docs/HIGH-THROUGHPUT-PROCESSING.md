@@ -464,12 +464,58 @@ One process has one PDFium and one gate. When a single process cannot meet the r
 - Size the replica count from the measured single-process rate with 25% headroom: `replicas = ceil(1.25 * (N / T) / measured docs per second per process)`.
 - Give each replica enough memory for its callers in flight (one rendered page per caller) plus the documents it has open.
 
-> **Note: there is no built-in batch or worker-pool API.** PdfiumWrapper processes one document per call. For a large volume of files you currently write the orchestration yourself:
->
-> - **Within one process:** a bounded parallel loop or a bounded channel, as in [Pattern 1](#pattern-1-bounded-parallel-conversion-of-different-files) and [Pattern 2](#pattern-2-producer-consumer-with-bounded-channel). This reaches the single-process ceiling (about 1.25x sequential on the mix above), not more.
-> - **Beyond one process:** run several instances of your service (replicas), each pulling from your queue. This is where most of the throughput comes from (8 processes: 5.7x), and it is deployment configuration rather than code.
->
-> If your application must stay a single process from the outside (for example one API that receives a document and returns the result), the only way past the single-process ceiling is to run conversions in separate worker processes started and managed by your application. PdfiumWrapper does not provide that yet; a worker-pool package that does is planned.
+### Worker Pool
+
+If your application must stay one deployable (one API that receives a document and returns the result), or you would rather not hand-build the orchestration, the `PdfiumWrapper.Processing` package runs the conversions in worker processes it starts and manages:
+
+```bash
+dotnet add package PdfiumWrapper.Processing
+```
+
+```csharp
+using PdfiumWrapper.Processing;
+
+public static async Task<int> Main(string[] args)
+{
+    if (PdfWorkerHost.TryRun())            // first statement: a copy of this app started as a worker runs here
+        return 0;
+
+    await using var pool = await PdfProcessingPool.CreateAsync(new PdfPoolOptions
+    {
+        MinWorkers = 2,                    // kept warm
+        MaxWorkers = 8,                    // default: half the logical processors
+    });
+
+    await foreach (var r in pool.ConvertToPngAsync(files, "out", dpi: 150))
+        Console.WriteLine($"{r.Input}: {r.Status}");
+
+    return 0;
+}
+```
+
+What it gives you over the patterns above:
+
+- **Parallel rendering.** Each worker is a separate process with its own PDFium, so workers render at the same time. The pool reaches the throughput of the replica table above from inside one application.
+- **Dynamic size.** Workers are added when every worker is busy and jobs are waiting (after `ScaleUpAfter`, 500 ms) and removed when idle (after `IdleTimeout`, 60 s), between `MinWorkers` and `MaxWorkers`. A burst scales up within seconds; quiet periods cost only `MinWorkers` of memory.
+- **Crash isolation.** A native abort on a damaged PDF kills one worker, which is replaced; the job is reported as `WorkerCrashed` (after a retry) and every other job proceeds. In-process, that abort would take the service down.
+- **Backpressure, timeouts, retries, cancellation**, and a typed API: `GetPageCountAsync`, `ConvertToPngAsync`, `ConvertToJpegAsync`, `ConvertToTiffAsync`, `ExtractTextAsync`, single or batch. See the [API reference](API-REFERENCE.md#pdfprocessingpool-pdfiumwrapperprocessing).
+
+What it costs: about 120 to 140 MB per worker on the mix above, and a few hundred milliseconds of process start when the pool grows.
+
+Measured on the machine above with the same 1,000-request scenario (page count plus PNG at 150 DPI, 12,400 pages), `JobsPerWorker = 2`:
+
+| Shape | Requests/sec | Peak memory, all processes |
+|---|---|---|
+| One process, 4 threads, no pool | 2.21 | 159 MB |
+| Pool, 4 workers | 6.89 | 562 MB |
+| Pool, 8 workers | 10.07 | 999 MB |
+| Pool, 1 to 8 workers, cold start | 9.80 | 1,008 MB |
+| Pool, 16 workers | 12.11 | 1,823 MB |
+| 8 independent processes (replicas) | 10.86 | 953 MB |
+
+A warm pool of 8 is within 7% of 8 replicas; a cold pool reached 8 workers 4.5 s into the burst. Full record in `benchmark.md`.
+
+When you already run replicas behind a queue, keep doing that; the pool is for the single-deployable case and for applications that want the orchestration done for them.
 
 ---
 
@@ -858,6 +904,7 @@ service.MergeWithOptions(new MergeOptions(
 | Bound parallel operations | Each caller in flight holds a rendered page; extra callers only wait for the gate |
 | Use async methods in services | Wait for the native gate without blocking thread-pool threads |
 | More replicas for more throughput | Each process has its own PDFium and its own gate |
+| `PdfiumWrapper.Processing` worker pool for a single deployable | Parallel rendering, crash isolation and dynamic sizing without hand-built orchestration |
 
 ---
 

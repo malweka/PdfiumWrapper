@@ -19,6 +19,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\PdfiumWrapper\PdfiumWrapper.csproj" />
+    <ProjectReference Include="..\PdfiumWrapper.Processing\PdfiumWrapper.Processing.csproj" />
     <!-- Built first so HostRunner can launch it; its assembly is not referenced. -->
     <ProjectReference Include="..\PdfiumWrapper.Tests.Host\PdfiumWrapper.Tests.Host.csproj" ReferenceOutputAssembly="false" Private="false" />
     <!-- The burst runner is exercised as a child process by BurstRunnerTests. -->

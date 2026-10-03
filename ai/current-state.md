@@ -2,6 +2,14 @@
 
 ## Current focus
 
+Release 2 (worker pool) is implemented and measured on branch `feature/worker-pool` (from `main` after PRs 16 and 17): `src/PdfiumWrapper.Processing` (`PdfProcessingPool`, `PdfWorkerHost`, protocol, sizing, `JobsPerWorker`), 29 tests in `src/PdfiumWrapper.Tests/Processing/`, `PdfiumWrapper.Tests.Host` as the test worker with fault injection, `--engine pool` in the comparison project's throughput runner, documentation, and the Phase 7 numbers in `benchmark.md`. 267 tests pass on win-x64 and linux-x64.
+
+Phase 7 result: a warm pool of 8 does 10.07 requests/s against 10.86 for 8 independent processes (within the 10% acceptance); cold start to 8 in 4.5 s. The first version, one job per worker, was 16% behind; `JobsPerWorker = 2` (a worker encodes one document while PDFium renders another) recovered it.
+
+Open after Release 2: the 10,000-job qualification and 30-minute soak (Phase 6, not in PR CI), a self-contained-publish hosting run, macOS, isolating the coordinator's own CPU (the harness measured 0.12 cores including its own submitters and sampler), a `pool` mode in the burst runner, and the second-wave operations (merge, forms, bookmarks, attachments).
+
+### Earlier focus (2026-10-02, before the pool)
+
 Release 2 of `ai/plans/plan-pdfium-concurrency.md` (the worker pool, package `PdfiumWrapper.Processing`) was approved by the owner on 2026-10-02 and the plan was revised: section 4.9 holds the API, hosting model, sizing policy and protocol; Phases 5 to 7 are the build order, tests and acceptance. Implementation has not started. Also on the working tree, uncommitted, on branch `feature/tiff-gray-render`: gray TIFF rendering, the comparison harness, and documentation notes.
 
 ### Earlier focus

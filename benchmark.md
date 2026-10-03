@@ -643,6 +643,30 @@ Stage breakdown from a stopwatch prototype (whole document, median of 7 runs, pi
 - Rendering BGRA with PDFium's `FPDF_GRAYSCALE` flag gave output nearly identical to the old path and no speedup.
 - Measurement note: on this hybrid CPU an unpinned stopwatch run showed the same render taking about 2.9 s or about 6.0 s depending on the core it landed on. Pin such experiments to the performance cores (BenchmarkDotNet's runs did not show the split).
 
+## Worker Pool (PdfiumWrapper.Processing, 2.0)
+
+Recorded 2026-10-02 on the machine described above. The scenario is the one the pool was built for: 1,000 requests arrive at once, each reads a document's page count and converts every page to PNG at 150 DPI, written to disk; the requests cycle through the five test documents (12,400 pages). Clock from arrival to the last completion. Harness: the `throughput` command of `src/PdfiumWrapper.Benchmarks.Comparison` with `--engine pool` (one `PdfProcessingPool` in the harness process, workers re-launched from the harness executable) and `--engine pdfium` with `--processes` (independent copies of the harness, 2 request threads each, the "replicas" shape).
+
+| Shape | Total time | Requests/sec | Pages/sec | Peak memory, all processes |
+|---|---|---|---|---|
+| One process, 4 threads (no pool) | 453.0 s | 2.21 | 27.4 | 159 MB |
+| Pool, 4 workers warm | 145.2 s | 6.89 | 85.4 | 562 MB |
+| Pool, 8 workers warm | 99.3 s | 10.07 | 124.9 | 999 MB |
+| Pool, 1 to 8 workers (cold start) | 102.0 s | 9.80 | 121.5 | 1,008 MB |
+| Pool, 12 workers warm | 87.5 s | 11.42 | 141.7 | 1,422 MB |
+| Pool, 16 workers warm | 82.6 s | 12.11 | 150.1 | 1,823 MB |
+| 8 independent processes x 2 threads | 92.1 s | 10.86 | 134.7 | 953 MB |
+| 16 independent processes x 2 threads (earlier run) | 76.6 s | 13.06 | 161.9 | 1,880 MB |
+
+Pool settings: `JobsPerWorker = 2`, `QueueCapacity = 1000`, submitters = 2 x workers; cold start is `MinWorkers = 1`, `MaxWorkers = 8`, `ScaleUpAfter = 500 ms`.
+
+- **Against independent processes:** the warm pool of 8 is within 7% of 8 replicas (10.07 against 10.86 requests/sec); at 16 it is within 8%. The difference is the per-job round trip and the pool's file handling (temp name and rename per page). Acceptance was 10%.
+- **Cold start:** from one worker the pool reached 8 within 4.5 s of the burst and finished within 3% of the warm pool. Acceptance was 5 s and 15%.
+- **Jobs per worker matters.** With one job per worker (the first design) the warm pool of 8 did 9.15 requests/sec, 16% behind the replicas: a worker could not overlap encoding with rendering. Two slots per worker recovered it; that is the same overlap a single process gets from concurrent callers.
+- **Coordinator cost:** the harness process used 0.12 cores at 8 workers and 0.13 at 16. That figure includes the harness's own 16 to 32 submitter threads and a memory sampler that enumerates processes ten times a second, so the pool's own share was not isolated; it is bounded by this.
+- **Memory:** about 115 to 125 MB per worker on this mix, slightly above a replica, because each worker holds two documents in flight.
+- **`DefaultMaxWorkers`** stays at half the logical processors (12 here): 12 workers gave 11.42 requests/sec against 12.11 for 16 at 28% more memory, the same shape as the replica measurement.
+
 ## Files To Remember
 
 - `benchmark.md`

@@ -22,6 +22,11 @@ This document provides complete API documentation for all public classes in Pdfi
 - [PdfAttachment](#pdfattachment)
 - [PdfiumRuntime](#pdfiumruntime)
 - [The PDFium Class in 2.0](#the-pdfium-class-in-20)
+- [PdfProcessingPool (PdfiumWrapper.Processing)](#pdfprocessingpool-pdfiumwrapperprocessing)
+  - [PdfPoolOptions](#pdfpooloptions)
+  - [PdfJobResult](#pdfjobresult)
+  - [PdfWorkerHost](#pdfworkerhost)
+  - [Events and Statistics](#events-and-statistics)
 
 ---
 
@@ -1382,3 +1387,165 @@ The `PDFium` class itself stays public for its constants and structs, for exampl
 - `PDFium.FPDF_ANNOT`, `PDFium.FPDF_PRINTING` and the other render flags for `PdfPage.RenderToBytes`
 - `PDFium.FPDF_INCREMENTAL` and the other save flags for `Save` / `SaveToStream`
 
+---
+
+## PdfProcessingPool (PdfiumWrapper.Processing)
+
+Package `PdfiumWrapper.Processing`, namespace `PdfiumWrapper.Processing`. Runs PDF operations in a dynamically sized set of worker processes. Each worker has its own PDFium, so workers render in parallel, and a native failure in one costs that job rather than the process that owns the pool. Use it when one process is not enough (see [High-Throughput Processing](HIGH-THROUGHPUT-PROCESSING.md#worker-pool)); for a handful of documents the core library alone is simpler.
+
+```csharp
+public sealed class PdfProcessingPool : IAsyncDisposable
+```
+
+Create one pool per application and keep it for the application's lifetime. All members are thread-safe.
+
+```csharp
+using PdfiumWrapper.Processing;
+
+await using var pool = await PdfProcessingPool.CreateAsync(new PdfPoolOptions
+{
+    MinWorkers = 2,
+    MaxWorkers = 8,
+});
+
+var result = await pool.ConvertToPngAsync("invoice.pdf", "out/invoice", dpi: 150);
+if (result.IsSuccess)
+    Console.WriteLine($"{result.Value.PageCount} pages, {result.Value.Files.Count} files");
+else
+    Console.WriteLine($"{result.Status}: {result.Error}");
+```
+
+#### Hosting the workers
+
+By default the pool starts **copies of your own executable** as workers. Make this the first statement of `Main`:
+
+```csharp
+public static async Task<int> Main(string[] args)
+{
+    if (PdfWorkerHost.TryRun())   // this process was started as a worker: it has run its loop and should exit
+        return 0;
+
+    // normal application start-up
+}
+```
+
+Nothing has to be published per platform: the worker is your application, with your native libraries already in its output directory. Framework-dependent (`dotnet app.dll`) and self-contained deployments both work. Set `PdfPoolOptions.WorkerPath` to use a dedicated worker executable instead, for hosts whose `Main` cannot be changed.
+
+#### Construction
+
+| Member | Description |
+|--------|-------------|
+| `static Task<PdfProcessingPool> CreateAsync(PdfPoolOptions? options = null, CancellationToken ct = default)` | Creates the pool and starts `MinWorkers` workers, waiting until they are ready. Throws `PdfPoolException` if a worker cannot start. Preferred |
+| `PdfProcessingPool(PdfPoolOptions? options = null)` | Creates the pool; `MinWorkers` start in the background and the first jobs wait for them |
+
+#### Operations
+
+Each call is one job on one worker. Inputs are `PdfInput` values; a `string` path converts implicitly.
+
+| Method | Returns |
+|--------|---------|
+| `GetPageCountAsync(PdfInput input, CancellationToken ct = default)` | `Task<PdfJobResult<int>>` |
+| `ConvertToPngAsync(PdfInput input, string outputDirectory, int dpi = 300, string fileNamePrefix = "page", CancellationToken ct = default)` | `Task<PdfJobResult<ImageFiles>>`: one `{prefix}_{page:D3}.png` per page |
+| `ConvertToJpegAsync(PdfInput input, string outputDirectory, int quality = 90, int dpi = 300, string fileNamePrefix = "page", CancellationToken ct = default)` | `Task<PdfJobResult<ImageFiles>>` |
+| `ConvertToTiffAsync(PdfInput input, string outputPath, int dpi = 200, TiffColorMode colorMode = TiffColorMode.Bilevel, byte threshold = 128, CancellationToken ct = default)` | `Task<PdfJobResult<TiffFile>>`: one multi-page file |
+| `ExtractTextAsync(PdfInput input, CancellationToken ct = default)` | `Task<PdfJobResult<string[]>>`: one string per page |
+
+Batch overloads take `IEnumerable<PdfInput>` and return `IAsyncEnumerable<PdfJobResult<T>>`, yielding results **in completion order** as they finish. Image and TIFF batches take an `outputRoot` and write each document to `{outputRoot}/{document name without extension}` (`.tiff` appended for TIFF); a name that repeats within the batch gets `-2`, `-3`, ... appended so documents never overwrite each other.
+
+```csharp
+await foreach (var r in pool.ConvertToPngAsync(files, "out", dpi: 150, ct: ct))
+    Console.WriteLine($"{r.Input}: {r.Status} in {r.Timings.Total.TotalMilliseconds:F0} ms");
+```
+
+`PdfInput`:
+
+| Member | Description |
+|--------|-------------|
+| `PdfInput.FromFile(string path, string? password = null)` | The worker reads the file directly |
+| `PdfInput.FromBytes(byte[] bytes, string name, string? password = null)` | Written to a temporary file for the job; `name` is what the result reports |
+| `PdfInput.FromStream(Stream stream, string name, string? password = null)` | Read to its end during submission; the stream may be closed afterwards |
+
+Output files are written to a temporary name and renamed when complete, so a crashed or cancelled job leaves no half-written file.
+
+#### Behavior
+
+- **Backpressure:** at most `QueueCapacity` jobs wait for a worker; a submission beyond that awaits a slot. No exception, no unbounded growth.
+- **Failures never fail the pool.** A worker that crashes (for example a native abort on a damaged PDF), hangs past `JobTimeout` or sends malformed data is killed and replaced. Its job is reported as `WorkerCrashed` or `TimedOut` and retried on a fresh worker up to `MaxAttempts`. A job the document itself rejects (bad file, wrong password) is `Failed` and not retried. Other jobs are unaffected.
+- **Cancellation:** a cancelled job that has not started is dropped; one in flight is asked to stop between pages and its partial output removed. Either way the result is `Cancelled`.
+- **`DisposeAsync`:** stops accepting jobs, cancels queued ones, lets in-flight ones finish (up to `JobTimeout`), then stops every worker. Submitting afterwards throws `ObjectDisposedException`.
+
+#### Properties
+
+| Property | Description |
+|----------|-------------|
+| `int Workers` | Workers alive, including ones still starting |
+| `int BusyWorkers` | Workers with at least one job in flight |
+| `int RunningJobs` | Jobs in flight across all workers |
+| `int QueuedJobs` | Jobs waiting for a worker |
+| `PdfPoolStatistics Statistics` | Counters since creation (see below) |
+
+### PdfPoolOptions
+
+Validated when the pool is created (`ArgumentOutOfRangeException`, or `PdfPoolException` for a missing `WorkerPath`).
+
+| Property | Default | Description |
+|----------|---------|-------------|
+| `MinWorkers` | 1 | Workers kept alive and warm. Started when the pool is created |
+| `MaxWorkers` | `DefaultMaxWorkers` (half the logical processors, at least 1) | Upper bound. A worker is one core, so beyond the fast cores extra workers add memory and little throughput |
+| `JobsPerWorker` | 2 | Jobs a worker runs at once. PDFium serializes rendering inside a process, so a second job lets one document encode and write while the other renders. More mostly adds memory (one rendered page per job in flight) |
+| `ScaleUpAfter` | 500 ms | A worker is added when every slot of every worker has been busy and jobs have been waiting for this long. A burst reaches `MaxWorkers` in seconds; a single stray job never starts a process |
+| `IdleTimeout` | 60 s | A worker idle for this long is stopped, down to `MinWorkers` |
+| `JobTimeout` | 2 min | Per attempt. On expiry the worker is killed and replaced |
+| `MaxAttempts` | 2 | Attempts for a job whose worker crashed or timed out |
+| `QueueCapacity` | 1,000 | Jobs that may wait. Submissions beyond this wait for a slot |
+| `MaxWorkerMemoryBytes` | null | When set, a worker whose working set exceeds this after a job is retired and replaced |
+| `WorkerStartTimeout` | 30 s | Time a new worker gets to report ready |
+| `WorkerPath` | null | Executable (or `.dll`, run through `dotnet`) to start as a worker. Null re-launches this process |
+| `WorkerArguments` | empty | Arguments for `WorkerPath` |
+| `WorkerEnvironment` | empty | Extra environment variables for workers |
+| `TempDirectory` | system temp | Where spooled inputs and large text results go |
+
+Fixed size is `MinWorkers == MaxWorkers`.
+
+### PdfJobResult
+
+```csharp
+public sealed record PdfJobResult<T>(string Input, PdfJobStatus Status, T? Value, string? Error,
+    int Attempts, int WorkerPid, PdfJobTimings Timings)
+{
+    public bool IsSuccess { get; }   // Status == Succeeded
+}
+```
+
+| `PdfJobStatus` | Meaning |
+|---|---|
+| `Succeeded` | `Value` is set |
+| `Failed` | The document or request was rejected (bad file, wrong password, missing output path). Not retried |
+| `TimedOut` | The last attempt exceeded `JobTimeout` |
+| `Cancelled` | Cancelled by the caller, or the pool was disposed while the job waited |
+| `WorkerCrashed` | The worker process died during the last attempt |
+
+`PdfJobTimings` has `Queued` (submission to dispatch), `Processing` (dispatch to result, last attempt) and `Total`. `ImageFiles` is `(int PageCount, IReadOnlyList<string> Files, long TotalBytes)`; `TiffFile` is `(int PageCount, string Path, long Bytes)`.
+
+### PdfWorkerHost
+
+```csharp
+public static class PdfWorkerHost
+{
+    public const string EnvironmentVariable = "PDFIUMWRAPPER_WORKER";   // "1" in a worker process
+    public const string DiagnosticsVariable = "PDFIUMWRAPPER_DIAGNOSTICS"; // "1" turns on wrapper diagnostics in a worker (tests, measurements)
+    public static bool TryRun();
+}
+```
+
+`TryRun()` returns `false` immediately in a normal process. In a worker it runs the job loop until the pool shuts it down and then returns `true`; the process should exit. A worker writes protocol frames to its standard output, so nothing else in the process may write there; calling `TryRun()` first in `Main` guarantees that.
+
+### Events and Statistics
+
+```csharp
+pool.Events += (sender, e) => logger.LogInformation("{Kind} worker={Pid} job={JobId} {Detail}", e.Kind, e.WorkerPid, e.JobId, e.Detail);
+```
+
+`PdfPoolEventKind`: `WorkerStarting`, `WorkerReady`, `WorkerStopped`, `WorkerCrashed`, `WorkerStartFailed`, `WorkerRetiredForMemory`, `ScaledUp`, `ScaledDown`, `JobDispatched`, `JobCompleted`, `JobFailed`, `JobTimedOut`, `JobRetried`, `JobCancelled`, `QueueFull`. A worker's standard error arrives as `WorkerStopped` events whose detail starts with `stderr:`. Handlers run on pool threads and must be quick and must not throw.
+
+`PdfPoolStatistics` counts jobs submitted, succeeded, failed, timed out, cancelled, crashed and retried, and workers started, stopped, crashed and retired for memory, plus scale-ups and scale-downs.

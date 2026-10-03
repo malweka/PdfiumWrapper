@@ -12,6 +12,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\PdfiumWrapper\PdfiumWrapper.csproj" />
+    <ProjectReference Include="..\PdfiumWrapper.Processing\PdfiumWrapper.Processing.csproj" />
   </ItemGroup>
 
 </Project>

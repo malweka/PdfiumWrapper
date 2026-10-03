@@ -1,0 +1,50 @@
+<Project Sdk="Microsoft.NET.Sdk">
+	<PropertyGroup>
+		<TargetFramework>net8.0</TargetFramework>
+		<ImplicitUsings>enable</ImplicitUsings>
+		<Nullable>enable</Nullable>
+		<Version>2.0.0</Version>
+		<FileVersion>2.0.0.0</FileVersion>
+		<AssemblyVersion>2.0.0.0</AssemblyVersion>
+		<Authors>Emmanuel Hameyie</Authors>
+		<Copyright>Copyright © 2025 Emmanuel Hameyie</Copyright>
+		<PackageId>PdfiumWrapper.Processing</PackageId>
+		<Product>PdfiumWrapper</Product>
+		<Title>PdfiumWrapper.Processing</Title>
+		<Description>Worker pool for PdfiumWrapper: runs PDF conversions in a dynamically sized set of worker processes so that rendering runs in parallel and a native failure costs one job, not the service. Page count, PNG, JPEG, TIFF and text extraction through a typed API.</Description>
+		<PackageTags>pdf;pdfium;worker-pool;throughput;batch;cross-platform</PackageTags>
+		<RepositoryUrl>https://github.com/malweka/PdfiumWrapper</RepositoryUrl>
+		<RepositoryType>git</RepositoryType>
+		<PackageLicenseExpression>MIT</PackageLicenseExpression>
+		<PackageProjectUrl>https://github.com/malweka/PdfiumWrapper</PackageProjectUrl>
+		<PackageReadmeFile>README.md</PackageReadmeFile>
+		<PackageIcon>icon.png</PackageIcon>
+	</PropertyGroup>
+
+	<PropertyGroup>
+		<PublishRepositoryUrl>true</PublishRepositoryUrl>
+		<EmbedUntrackedSources>true</EmbedUntrackedSources>
+		<IncludeSymbols>true</IncludeSymbols>
+		<SymbolPackageFormat>snupkg</SymbolPackageFormat>
+		<Deterministic>true</Deterministic>
+		<ContinuousIntegrationBuild Condition="'$(GITHUB_ACTIONS)' == 'true'">true</ContinuousIntegrationBuild>
+	</PropertyGroup>
+
+	<ItemGroup>
+		<InternalsVisibleTo Include="PdfiumWrapper.Tests" />
+		<InternalsVisibleTo Include="PdfiumWrapper.Tests.Host" />
+	</ItemGroup>
+
+	<ItemGroup>
+		<PackageReference Include="Microsoft.SourceLink.GitHub" Version="8.0.0" PrivateAssets="All" />
+	</ItemGroup>
+
+	<ItemGroup>
+		<ProjectReference Include="..\PdfiumWrapper\PdfiumWrapper.csproj" />
+	</ItemGroup>
+
+	<ItemGroup>
+		<None Include="../../README.md" Pack="true" PackagePath="\" />
+		<None Include="../../icon.png" Pack="true" PackagePath="\" />
+	</ItemGroup>
+</Project>

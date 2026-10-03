@@ -26,6 +26,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\PdfiumWrapper\PdfiumWrapper.csproj" />
+    <ProjectReference Include="..\PdfiumWrapper.Processing\PdfiumWrapper.Processing.csproj" />
   </ItemGroup>
 
   <!-- The same corpus as PdfiumWrapper.Benchmarks. -->

@@ -3,6 +3,7 @@ using System.Diagnostics;
 using System.Globalization;
 using System.Text.Json;
 using Aspose.Pdf.Devices;
+using PdfiumWrapper.Processing;
 
 namespace PdfiumWrapper.Benchmarks.Comparison;
 
@@ -13,9 +14,15 @@ namespace PdfiumWrapper.Benchmarks.Comparison;
 /// </summary>
 /// <remarks>
 /// <code>
-/// dotnet run -c Release -- throughput --engine pdfium|ghostscript|aspose --n 1000 --concurrency 8 \
-///   [--processes 4] [--dpi 150] [--input &lt;dir&gt;] [--out &lt;dir&gt;] [--report &lt;file&gt;]
+/// dotnet run -c Release -- throughput --engine pdfium|pool|ghostscript|aspose --n 1000 --concurrency 8 \
+///   [--processes 4] [--pool-min 1] [--dpi 150] [--input &lt;dir&gt;] [--out &lt;dir&gt;] [--report &lt;file&gt;]
 /// </code>
+/// <para>
+/// <c>--engine pool</c> is PdfiumWrapper.Processing: one PdfProcessingPool in this process with
+/// <c>--processes</c> as MaxWorkers and <c>--pool-min</c> as MinWorkers (default: a warm pool of
+/// MaxWorkers), fed by <c>--concurrency</c> submitting threads. Workers are copies of this
+/// executable, re-launched by the pool.
+/// </para>
 /// <para>
 /// <c>--concurrency</c> is the number of requests in flight per process. <c>--processes</c> splits
 /// the batch over that many copies of this program (PdfiumWrapper and Aspose.PDF); Ghostscript is
@@ -34,6 +41,9 @@ internal static class ThroughputRunner
         public string Input = Path.Combine(AppContext.BaseDirectory, "Docs");
         public string Out = Path.Combine(Path.GetTempPath(), "PdfiumThroughput");
         public string? Report;
+
+        /// <summary>Pool engine: workers kept warm from the start. Default: all of them (a warm pool).</summary>
+        public int? PoolMinWorkers;
 
         // Worker mode: this process handles the requests whose index is congruent to WorkerIndex
         // modulo Processes, and reports to the parent through WorkerResults.
@@ -85,6 +95,37 @@ internal static class ThroughputRunner
             : RunCoordinator(options, inputs);
     }
 
+    // ---- Pool engine ----
+
+    private static PdfProcessingPool? s_pool;
+    private static long s_poolCreatedAt;
+    private static double s_scaleUpSeconds = -1;
+
+    /// <summary>
+    /// The pool engine: this process submits requests to a PdfProcessingPool whose workers are
+    /// copies of this executable (WorkerPath null). --processes is MaxWorkers; --pool-min is
+    /// MinWorkers (default MaxWorkers, a warm pool); --concurrency is how many requests are submitted at once.
+    /// </summary>
+    private static void CreatePool(Options options)
+    {
+        int max = options.Processes;
+        int min = Math.Min(options.PoolMinWorkers ?? max, max);
+        var pool = PdfProcessingPool.CreateAsync(new PdfPoolOptions
+        {
+            MinWorkers = min,
+            MaxWorkers = max,
+            QueueCapacity = Math.Max(options.N, 1),
+        }).GetAwaiter().GetResult();
+
+        s_poolCreatedAt = Stopwatch.GetTimestamp();
+        pool.Events += (_, e) =>
+        {
+            if (e.Kind == PdfPoolEventKind.ScaledUp && pool.Workers >= max && s_scaleUpSeconds < 0)
+                s_scaleUpSeconds = Stopwatch.GetElapsedTime(s_poolCreatedAt).TotalSeconds;
+        };
+        s_pool = pool;
+    }
+
     // ---- Coordinator ----
 
     private static int RunCoordinator(Options options, string[] inputs)
@@ -98,7 +139,16 @@ internal static class ThroughputRunner
             double wallSeconds;
             double sampledPeakMb = 0;
 
-            if (options.Processes > 1 && options.Engine != Comparison.Engine.Ghostscript)
+            if (options.Engine == Comparison.Engine.Pool)
+            {
+                CreatePool(options);
+                long startTicks = DateTime.UtcNow.Ticks;
+                s_poolCreatedAt = Stopwatch.GetTimestamp();
+                var summary = Execute(options, inputs, runDirectory, startTicks, workerIndex: 0, processes: 1, out sampledPeakMb);
+                summaries = new[] { summary };
+                wallSeconds = summary.Requests.Max(r => r.EndMs) / 1000.0;
+            }
+            else if (options.Processes > 1 && options.Engine != Comparison.Engine.Ghostscript)
             {
                 (summaries, wallSeconds) = RunWorkerProcesses(options, runDirectory);
             }
@@ -114,7 +164,7 @@ internal static class ThroughputRunner
             var requests = summaries.SelectMany(s => s.Requests).OrderBy(r => r.Id).ToArray();
             var succeeded = requests.Where(r => r.Error == null).ToArray();
             int pages = succeeded.Sum(r => r.Pages);
-            double peakMb = options.Engine == Comparison.Engine.Ghostscript
+            double peakMb = options.Engine is Comparison.Engine.Ghostscript or Comparison.Engine.Pool
                 ? sampledPeakMb
                 : summaries.Sum(s => s.PeakWorkingSetMb);
 
@@ -124,6 +174,9 @@ internal static class ThroughputRunner
                 ["requests"] = options.N,
                 ["concurrencyPerProcess"] = options.Concurrency,
                 ["processes"] = options.Engine == Comparison.Engine.Ghostscript ? options.Concurrency : options.Processes,
+                ["poolMinWorkers"] = options.Engine == Comparison.Engine.Pool ? Math.Min(options.PoolMinWorkers ?? options.Processes, options.Processes) : null,
+                ["poolScaleUpSeconds"] = options.Engine == Comparison.Engine.Pool && s_scaleUpSeconds >= 0 ? Round(s_scaleUpSeconds) : null,
+                ["poolStatistics"] = s_pool?.Statistics,
                 ["dpi"] = options.Dpi,
                 ["documents"] = inputs.Select(Path.GetFileName).ToArray(),
                 ["succeeded"] = succeeded.Length,
@@ -162,6 +215,8 @@ internal static class ThroughputRunner
         }
         finally
         {
+            if (s_pool != null)
+                s_pool.DisposeAsync().AsTask().GetAwaiter().GetResult();
             TryDeleteDirectory(runDirectory);
         }
     }
@@ -234,8 +289,8 @@ internal static class ThroughputRunner
     {
         if (options.Engine == Comparison.Engine.Aspose)
             AsposeEngine.EnsureLicensed();
-        if (options.Engine == Comparison.Engine.Ghostscript)
-            return; // every Ghostscript request is a fresh process; there is nothing to warm
+        if (options.Engine is Comparison.Engine.Ghostscript or Comparison.Engine.Pool)
+            return; // Ghostscript: every request is a fresh process. Pool: workers warm themselves.
 
         string warmDirectory = Path.Combine(directory, $"warm-{Environment.ProcessId}");
         Directory.CreateDirectory(warmDirectory);
@@ -264,18 +319,19 @@ internal static class ThroughputRunner
         }) { IsBackground = true, Name = "cleanup" };
         cleaner.Start();
 
-        // Ghostscript's memory lives in its child processes; sample their working sets.
+        // Ghostscript's and the pool's memory lives in child processes; sample their working sets.
         double peakChildrenMb = 0;
         using var stopSampling = new CancellationTokenSource();
         var sampler = new Thread(() =>
         {
             while (!stopSampling.IsCancellationRequested)
             {
-                peakChildrenMb = Math.Max(peakChildrenMb, Ghostscript.LiveWorkingSetBytes() / (1024.0 * 1024.0));
+                long bytes = options.Engine == Comparison.Engine.Pool ? ChildProcesses.LiveWorkingSetBytes() : Ghostscript.LiveWorkingSetBytes();
+                peakChildrenMb = Math.Max(peakChildrenMb, bytes / (1024.0 * 1024.0));
                 stopSampling.Token.WaitHandle.WaitOne(100);
             }
         }) { IsBackground = true, Name = "sampler" };
-        if (options.Engine == Comparison.Engine.Ghostscript)
+        if (options.Engine is Comparison.Engine.Ghostscript or Comparison.Engine.Pool)
             sampler.Start();
 
         var threads = Enumerable.Range(0, options.Concurrency).Select(t => new Thread(() =>
@@ -344,6 +400,16 @@ internal static class ThroughputRunner
                 return pages;
             }
 
+            case Comparison.Engine.Pool:
+            {
+                // One job: the conversion result carries the page count, as the in-process engine
+                // reads it from the same open document.
+                var png = s_pool!.ConvertToPngAsync(input, outputDirectory, options.Dpi).GetAwaiter().GetResult();
+                if (!png.IsSuccess)
+                    throw new InvalidOperationException($"png {png.Status}: {png.Error}");
+                return png.Value!.PageCount;
+            }
+
             case Comparison.Engine.Ghostscript:
             {
                 // One process does the conversion; the page count is the number of files it wrote.
@@ -406,7 +472,8 @@ internal static class ThroughputRunner
                         "pdfium" or "pdfiumwrapper" => Comparison.Engine.Pdfium,
                         "ghostscript" or "gs" => Comparison.Engine.Ghostscript,
                         "aspose" => Comparison.Engine.Aspose,
-                        _ => throw new ArgumentException("--engine must be pdfium, ghostscript or aspose"),
+                        "pool" => Comparison.Engine.Pool,
+                        _ => throw new ArgumentException("--engine must be pdfium, pool, ghostscript or aspose"),
                     };
                     break;
                 case "--n": options.N = int.Parse(value, CultureInfo.InvariantCulture); break;
@@ -416,6 +483,7 @@ internal static class ThroughputRunner
                 case "--input": options.Input = value; break;
                 case "--out": options.Out = value; break;
                 case "--report": options.Report = value; break;
+                case "--pool-min": options.PoolMinWorkers = int.Parse(value, CultureInfo.InvariantCulture); break;
                 case "--worker-index": options.WorkerIndex = int.Parse(value, CultureInfo.InvariantCulture); break;
                 case "--start-utc-ticks": options.StartUtcTicks = long.Parse(value, CultureInfo.InvariantCulture); break;
                 case "--worker-results": options.WorkerResults = value; break;

@@ -35,6 +35,7 @@
 	<ItemGroup>
 		<InternalsVisibleTo Include="PdfiumWrapper.Tests" />
 		<InternalsVisibleTo Include="PdfiumWrapper.Tests.Host" />
+		<InternalsVisibleTo Include="PdfiumWrapper.Processing" />
 		<InternalsVisibleTo Include="PdfiumWrapper.Benchmarks" />
 	</ItemGroup>
 

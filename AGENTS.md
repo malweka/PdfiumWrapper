@@ -99,6 +99,8 @@ PdfiumWrapper is a .NET 8 library wrapping Google's PDFium for PDF manipulation 
 ## Architecture
 
 ```
+Worker pool (PdfiumWrapper.Processing: PdfProcessingPool, PdfWorkerHost; separate package, optional)
+       |
 High-level API (PdfDocument, PdfPage, PdfForm, PdfMerger, TiffWriter, PngEncoder, JpegEncoder/Decoder)
        |
 Native coordination (PdfiumRuntime: process-wide gate, init, deferred release; BitmapLease; SpooledInput; PooledFileWriter)
@@ -204,6 +206,21 @@ After adding/modifying page objects, `page.GenerateContent()` MUST be called bef
 - Memory that PDFium keeps a pointer to after the call returns (for example `FPDF_FORMFILLINFO`) must be native memory or pinned for the whole lifetime, and released only after the owning native object is closed
 - The `PDFium` class is split into partial files by domain: `PDFium.cs` (core), `PDFium.Edit.cs`, `PDFium.FormFill.cs`, `PDFium.Metadata.cs`, `PDFium.Annot.cs`, `PDFium.Ppo.cs`
 
+### Worker Pool (`src/PdfiumWrapper.Processing`)
+
+Separate package `PdfiumWrapper.Processing`; the core package never launches processes. `PdfProcessingPool` keeps a dynamically sized set of worker processes (between `MinWorkers` and `MaxWorkers`), hands each job to an idle worker over stdin/stdout as length-prefixed JSON frames (`Protocol/Frames.cs`, `Protocol/FrameStream.cs`), and reports every outcome as a `PdfJobResult<T>` status rather than an exception. Workers are copies of the consumer's own executable (`PdfWorkerHost.TryRun()` first in `Main`) or a dedicated executable (`WorkerPath`); the test project uses `PdfiumWrapper.Tests.Host` as its worker.
+
+Rules for pool code:
+
+- Only file paths, options and small results cross the process boundary. Never pixels, handles or delegates. Large text goes through a temp file.
+- A worker writes nothing to stdout except protocol frames; diagnostics go to stderr, which the pool forwards as events.
+- A job failure never fails the pool: crash, hang, malformed frame and memory limit all end with the worker replaced and the job given a status (`WorkerCrashed`, `TimedOut`, `Failed`) and retried up to `MaxAttempts`.
+- The dispatcher takes a job out of its queue only once a worker has a free slot, so `QueueCapacity` is exact. Retries go through their own unbounded channel, ahead of new jobs.
+- A worker runs `JobsPerWorker` jobs at once (default 2) so encoding overlaps rendering inside the worker, as it does for concurrent callers in one process. Slots are tracked per worker (`Worker.Slots`, `InUse`, `Active`); the sizer counts free slots, not idle workers.
+- Output files are written as `<name>.<jobId>.tmp` and renamed on success.
+- Sizing decisions happen on one 250 ms timer; every decision raises an event. Workers are replaced, never recycled on a schedule.
+- Fault injection for tests lives in `PdfiumWrapper.Tests.Host/WorkerFaults.cs` (`PDFIUMWRAPPER_TEST_FAULT=crash|hang|garbage:<input substring>`), passed through `PdfPoolOptions.WorkerEnvironment`.
+
 ## Key APIs
 
 **Image output (streaming, memory-efficient):**
@@ -246,7 +263,8 @@ After adding/modifying page objects, `page.GenerateContent()` MUST be called bef
 - `Bootstrapper.cs` uses `[ModuleInitializer]` to set up `TestOutput/` and to enable the `PdfiumWrapper.Diagnostics` switch
 - Tests implement `IDisposable` and use `CreateTempDirectory()` for file output
 - `src/PdfiumWrapper.Tests/Concurrency/` — gate coverage (`GateCoverageTests`), concurrent callers against a sequential oracle with an independent detector (`PdfiumConcurrencyTests`), and child-process scenarios (`PdfiumHostTests`)
-- `src/PdfiumWrapper.Tests.Host` — console host for tests that change process-global state, need a fresh process, or may abort natively (init race, cold start, thread-pool starvation, deferred release, shared gate across load contexts, shutdown, crash probe). Launched through `HostRunner`
+- `src/PdfiumWrapper.Tests.Host` — console host for tests that change process-global state, need a fresh process, or may abort natively (init race, cold start, thread-pool starvation, deferred release, shared gate across load contexts, shutdown, crash probe). Launched through `HostRunner`. It is also the worker executable for the pool tests (`PdfWorkerHost.TryRun()` at the top of its `Main`)
+- `src/PdfiumWrapper.Tests/Processing/` — protocol framing, pool behaviour (correctness against in-process output, crash/hang/garbage workers, cancellation, backpressure, disposal), sizing policy, cross-process render overlap, damaged inputs
 - A new public PDFium-touching member needs no test registration: `GateCoverageTests` discovers it. If it takes an argument type the fixture does not know, add it to `GateCoverageTests.Fixture.Argument`
 - Run: `dotnet test src/PdfiumWrapper.Tests/PdfiumWrapper.Tests.csproj`
 
@@ -280,6 +298,6 @@ The `.csproj` auto-detects the platform RID and includes native binaries with `E
 - Update relevant documentation when adding or changing public API
 - Follow existing patterns for disposal, error handling, and P/Invoke signatures
 - Follow the gate rules under "Thread Safety and the Native Gate" for every member that touches PDFium
-- Run the test suite after changes: all 239+ tests should pass (win-x64 and linux-x64)
+- Run the test suite after changes: all 267+ tests should pass (win-x64 and linux-x64)
 - Coordinate system: PDF uses bottom-left origin (see `docs/PDF-EDITING.md`)
 - Standard page sizes in points: US Letter = 612x792, A4 = 595x842
