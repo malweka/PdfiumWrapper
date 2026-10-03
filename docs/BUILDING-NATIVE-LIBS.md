@@ -35,12 +35,15 @@ Both scripts create `_native_build/` for downloaded sources and intermediates, t
 
 ## Source Versions
 
+Both scripts pin these versions. Override one through its environment variable (`PDFIUM_VERSION`, `LIBTIFF_VERSION`, `LIBJPEG_TURBO_VERSION`, `ZLIB_NG_VERSION`, `LIBPNG_VERSION`) or, in the Unix script, its `--*-version` flag. `PDFIUM_VERSION` takes a build number (`8076`) or `latest`, which downloads again on every run.
+
 | Library | Version | Source |
 |---|---|---|
-| libtiff | 4.7.1 | https://download.osgeo.org/libtiff/tiff-4.7.1.zip |
-| libjpeg-turbo | 3.1.4.1 | https://github.com/libjpeg-turbo/libjpeg-turbo/archive/refs/tags/3.1.4.1.zip |
-| zlib-ng | 2.2.4 | https://github.com/zlib-ng/zlib-ng/archive/refs/tags/2.2.4.zip |
-| libpng | 1.6.56 | https://github.com/pnggroup/libpng/archive/refs/tags/v1.6.56.zip |
+| PDFium (prebuilt) | chromium/8076 | https://github.com/bblanchon/pdfium-binaries/releases/tag/chromium/8076 |
+| libtiff | 4.7.2 | https://download.osgeo.org/libtiff/tiff-4.7.2.zip |
+| libjpeg-turbo | 3.2.0 | https://github.com/libjpeg-turbo/libjpeg-turbo/archive/refs/tags/3.2.0.zip |
+| zlib-ng | 2.3.3 | https://github.com/zlib-ng/zlib-ng/archive/refs/tags/2.3.3.zip |
+| libpng | 1.6.59 | https://github.com/pnggroup/libpng/archive/refs/tags/v1.6.59.zip |
 
 ## Prerequisites
 
@@ -95,9 +98,9 @@ dnf install gcc gcc-c++ cmake zlib-devel libjpeg-turbo-devel nasm
 Download the source distribution:
 
 ```bash
-curl -LO https://download.osgeo.org/libtiff/tiff-4.7.1.zip
-unzip tiff-4.7.1.zip
-cd tiff-4.7.1
+curl -LO https://download.osgeo.org/libtiff/tiff-4.7.2.zip
+unzip tiff-4.7.2.zip
+cd tiff-4.7.2
 ```
 
 ### macOS ARM64 (native on Apple Silicon)
@@ -129,9 +132,9 @@ Use a Docker container for a clean, reproducible build:
 ```bash
 docker run --rm -v "$(pwd):/src" -w /src ubuntu:22.04 bash -c "
     apt-get update && apt-get install -y build-essential cmake zlib1g-dev libjpeg-dev curl unzip &&
-    curl -LO https://download.osgeo.org/libtiff/tiff-4.7.1.zip &&
-    unzip tiff-4.7.1.zip &&
-    cd tiff-4.7.1 &&
+    curl -LO https://download.osgeo.org/libtiff/tiff-4.7.2.zip &&
+    unzip tiff-4.7.2.zip &&
+    cd tiff-4.7.2 &&
     cmake -B build -DBUILD_SHARED_LIBS=ON \
         -Dtiff-tools=OFF -Dtiff-tests=OFF -Dtiff-docs=OFF &&
     cmake --build build --config Release &&
@@ -164,7 +167,7 @@ The shim source is at `src/native/tiff_shim.c`. It must be compiled against the 
 
 ```bash
 cc -shared -o libtiff_shim.dylib src/native/tiff_shim.c \
-    -I/path/to/tiff-4.7.1/libtiff \
+    -I/path/to/tiff-4.7.2/libtiff \
     -L src/libs/osx-arm64 -ltiff
 
 cp libtiff_shim.dylib src/libs/osx-arm64/
@@ -184,7 +187,7 @@ cp libtiff_shim.dylib src/libs/osx-arm64/
 
 ```bash
 cc -shared -target x86_64-apple-macos10.15 -o libtiff_shim.dylib src/native/tiff_shim.c \
-    -I/path/to/tiff-4.7.1/libtiff \
+    -I/path/to/tiff-4.7.2/libtiff \
     -Lsrc/libs/osx-x64 -ltiff
 
 cp libtiff_shim.dylib src/libs/osx-x64/
@@ -207,7 +210,7 @@ Alternatively, if you built libtiff from source in the previous step, point at t
 docker run --rm -v "$(pwd):/src" -w /src ubuntu:22.04 bash -c "
     apt-get update && apt-get install -y build-essential zlib1g-dev libjpeg-dev &&
     cc -shared -fPIC -o libtiff_shim.so src/native/tiff_shim.c \
-        -I/path/to/tiff-4.7.1/libtiff \
+        -I/path/to/tiff-4.7.2/libtiff \
         -Lsrc/libs/linux-x64 -ltiff
 "
 ```
@@ -217,7 +220,7 @@ docker run --rm -v "$(pwd):/src" -w /src ubuntu:22.04 bash -c "
 From a **x64 Native Tools Command Prompt**:
 
 ```cmd
-cl /LD src\native\tiff_shim.c /I \path\to\tiff-4.7.1\libtiff ^
+cl /LD src\native\tiff_shim.c /I \path\to\tiff-4.7.2\libtiff ^
     /link src\libs\win-x64\tiff.lib /out:tiff_shim.dll
 
 copy tiff_shim.dll src\libs\win-x64\
@@ -230,9 +233,9 @@ copy tiff_shim.dll src\libs\win-x64\
 Download the source distribution:
 
 ```bash
-curl -LO https://github.com/libjpeg-turbo/libjpeg-turbo/archive/refs/tags/3.1.4.1.zip
-unzip 3.1.4.1.zip
-cd libjpeg-turbo-3.1.4.1
+curl -LO https://github.com/libjpeg-turbo/libjpeg-turbo/archive/refs/tags/3.2.0.zip
+unzip 3.2.0.zip
+cd libjpeg-turbo-3.2.0
 ```
 
 ### macOS ARM64 (native on Apple Silicon)
@@ -297,9 +300,9 @@ zlib-ng is a SIMD-accelerated drop-in replacement for zlib (AVX2 on x86, NEON on
 Download the source:
 
 ```bash
-curl -LO https://github.com/zlib-ng/zlib-ng/archive/refs/tags/2.2.4.zip
-unzip 2.2.4.zip
-cd zlib-ng-2.2.4
+curl -LO https://github.com/zlib-ng/zlib-ng/archive/refs/tags/2.3.3.zip
+unzip 2.3.3.zip
+cd zlib-ng-2.3.3
 ```
 
 #### macOS ARM64 (static)
@@ -350,9 +353,9 @@ rem output: build\Release\zlibstatic.lib
 Download the source:
 
 ```bash
-curl -L -o libpng-1.6.56.zip https://github.com/pnggroup/libpng/archive/refs/tags/v1.6.56.zip
-unzip libpng-1.6.56.zip
-cd libpng-1.6.56
+curl -L -o libpng-1.6.59.zip https://github.com/pnggroup/libpng/archive/refs/tags/v1.6.59.zip
+unzip libpng-1.6.59.zip
+cd libpng-1.6.59
 ```
 
 Point CMake at the zlib-ng headers and static library from Step 1.
@@ -362,8 +365,8 @@ Point CMake at the zlib-ng headers and static library from Step 1.
 ```bash
 cmake -B build-arm64-static -DBUILD_SHARED_LIBS=OFF -DCMAKE_OSX_ARCHITECTURES=arm64 \
     -DPNG_TESTS=OFF -DPNG_TOOLS=OFF -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
-    -DZLIB_INCLUDE_DIR=/path/to/zlib-ng-2.2.4 \
-    -DZLIB_LIBRARY=/path/to/zlib-ng-2.2.4/build-arm64/libz.a
+    -DZLIB_INCLUDE_DIR=/path/to/zlib-ng-2.3.3 \
+    -DZLIB_LIBRARY=/path/to/zlib-ng-2.3.3/build-arm64/libz.a
 cmake --build build-arm64-static --config Release
 # output: build-arm64-static/libpng16.a
 ```
@@ -373,8 +376,8 @@ cmake --build build-arm64-static --config Release
 ```bash
 cmake -B build-x64-static -DBUILD_SHARED_LIBS=OFF -DCMAKE_OSX_ARCHITECTURES=x86_64 \
     -DPNG_TESTS=OFF -DPNG_TOOLS=OFF -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
-    -DZLIB_INCLUDE_DIR=/path/to/zlib-ng-2.2.4 \
-    -DZLIB_LIBRARY=/path/to/zlib-ng-2.2.4/build-x64/libz.a
+    -DZLIB_INCLUDE_DIR=/path/to/zlib-ng-2.3.3 \
+    -DZLIB_LIBRARY=/path/to/zlib-ng-2.3.3/build-x64/libz.a
 cmake --build build-x64-static --config Release
 # output: build-x64-static/libpng16.a
 ```
@@ -402,8 +405,8 @@ From a **x64 Native Tools Command Prompt**:
 ```cmd
 cmake -B build-static -DBUILD_SHARED_LIBS=OFF -DPNG_TESTS=OFF -DPNG_TOOLS=OFF ^
     -DCMAKE_POSITION_INDEPENDENT_CODE=ON -A x64 ^
-    -DZLIB_INCLUDE_DIR=\path\to\zlib-ng-2.2.4 ^
-    -DZLIB_LIBRARY=\path\to\zlib-ng-2.2.4\build\Release\zlibstatic.lib
+    -DZLIB_INCLUDE_DIR=\path\to\zlib-ng-2.3.3 ^
+    -DZLIB_LIBRARY=\path\to\zlib-ng-2.3.3\build\Release\zlibstatic.lib
 cmake --build build-static --config Release
 rem output: build-static\Release\libpng16_static.lib
 ```
@@ -417,11 +420,11 @@ Link against both libpng and zlib-ng static libraries. No `-lz` flag needed — 
 ```bash
 clang -shared -o libpdfium_png.dylib \
     -arch arm64 \
-    -I/path/to/libpng-1.6.56 -I/path/to/libpng-1.6.56/build-arm64-static \
-    -I/path/to/zlib-ng-2.2.4 \
+    -I/path/to/libpng-1.6.59 -I/path/to/libpng-1.6.59/build-arm64-static \
+    -I/path/to/zlib-ng-2.3.3 \
     src/native/pdfium_png.c \
-    /path/to/libpng-1.6.56/build-arm64-static/libpng16.a \
-    /path/to/zlib-ng-2.2.4/build-arm64/libz.a \
+    /path/to/libpng-1.6.59/build-arm64-static/libpng16.a \
+    /path/to/zlib-ng-2.3.3/build-arm64/libz.a \
     -O2 -fPIC -fvisibility=hidden \
     -Wl,-install_name,@rpath/libpdfium_png.dylib
 
@@ -433,11 +436,11 @@ cp libpdfium_png.dylib src/libs/osx-arm64/
 ```bash
 clang -shared -o libpdfium_png.dylib \
     -arch x86_64 \
-    -I/path/to/libpng-1.6.56 -I/path/to/libpng-1.6.56/build-x64-static \
-    -I/path/to/zlib-ng-2.2.4 \
+    -I/path/to/libpng-1.6.59 -I/path/to/libpng-1.6.59/build-x64-static \
+    -I/path/to/zlib-ng-2.3.3 \
     src/native/pdfium_png.c \
-    /path/to/libpng-1.6.56/build-x64-static/libpng16.a \
-    /path/to/zlib-ng-2.2.4/build-x64/libz.a \
+    /path/to/libpng-1.6.59/build-x64-static/libpng16.a \
+    /path/to/zlib-ng-2.3.3/build-x64/libz.a \
     -O2 -fPIC -fvisibility=hidden \
     -Wl,-install_name,@rpath/libpdfium_png.dylib
 
@@ -453,8 +456,8 @@ docker run --rm --platform linux/amd64 \
     apt-get update && apt-get install -y gcc g++ cmake curl unzip &&
 
     # Build zlib-ng
-    curl -sLO https://github.com/zlib-ng/zlib-ng/archive/refs/tags/2.2.4.zip &&
-    unzip -q 2.2.4.zip && cd zlib-ng-2.2.4 &&
+    curl -sLO https://github.com/zlib-ng/zlib-ng/archive/refs/tags/2.3.3.zip &&
+    unzip -q 2.3.3.zip && cd zlib-ng-2.3.3 &&
     cmake -B build -DBUILD_SHARED_LIBS=OFF -DZLIB_COMPAT=ON \
         -DCMAKE_POSITION_INDEPENDENT_CODE=ON -DZLIB_ENABLE_TESTS=OFF &&
     cmake --build build --config Release &&
@@ -462,8 +465,8 @@ docker run --rm --platform linux/amd64 \
     cd /build &&
 
     # Build libpng against zlib-ng
-    curl -sL -o libpng-1.6.56.zip https://github.com/pnggroup/libpng/archive/refs/tags/v1.6.56.zip &&
-    unzip -q libpng-1.6.56.zip && cd libpng-1.6.56 &&
+    curl -sL -o libpng-1.6.59.zip https://github.com/pnggroup/libpng/archive/refs/tags/v1.6.59.zip &&
+    unzip -q libpng-1.6.59.zip && cd libpng-1.6.59 &&
     cmake -B build-static -DBUILD_SHARED_LIBS=OFF -DPNG_TESTS=OFF -DPNG_TOOLS=OFF \
         -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
         -DZLIB_INCLUDE_DIR=/build/zlib-ng-install/include \
@@ -473,10 +476,10 @@ docker run --rm --platform linux/amd64 \
 
     # Build shim
     gcc -shared -o /shim/libpdfium_png.so \
-        -I/build/libpng-1.6.56 -I/build/libpng-1.6.56/build-static \
+        -I/build/libpng-1.6.59 -I/build/libpng-1.6.59/build-static \
         -I/build/zlib-ng-install/include \
         /shim/pdfium_png.c \
-        /build/libpng-1.6.56/build-static/libpng16.a \
+        /build/libpng-1.6.59/build-static/libpng16.a \
         /build/zlib-ng-install/lib/libz.a \
         -O2 -fPIC -fvisibility=hidden -lm
 "
@@ -489,10 +492,10 @@ cp src/native/libpdfium_png.so src/libs/linux-x64/
 From a **x64 Native Tools Command Prompt** (build zlib-ng and libpng static libs first using CMake):
 
 ```cmd
-cl /LD src\native\pdfium_png.c /I \path\to\libpng-1.6.56 /I \path\to\libpng-1.6.56\build-static ^
-    /I \path\to\zlib-ng-2.2.4 ^
-    \path\to\libpng-1.6.56\build-static\Release\libpng16_static.lib ^
-    \path\to\zlib-ng-2.2.4\build\Release\zlibstatic.lib ^
+cl /LD src\native\pdfium_png.c /I \path\to\libpng-1.6.59 /I \path\to\libpng-1.6.59\build-static ^
+    /I \path\to\zlib-ng-2.3.3 ^
+    \path\to\libpng-1.6.59\build-static\Release\libpng16_static.lib ^
+    \path\to\zlib-ng-2.3.3\build\Release\zlibstatic.lib ^
     /O2 /link /out:pdfium_png.dll
 
 copy pdfium_png.dll src\libs\win-x64\
@@ -544,11 +547,11 @@ The script will:
 2. Download and extract source archives (skipped if already present from a prior run)
 3. Build each library in order:
    - **PDFium** → `pdfium.dll`
-   - **libtiff 4.7.1** → `tiff.dll`
+   - **libtiff 4.7.2** → `tiff.dll`
    - **tiff_shim** → `tiff_shim.dll` (compiled against the libtiff from step 1)
-   - **libjpeg-turbo 3.1.4.1** → `turbojpeg.dll`
-   - **zlib-ng 2.2.4** → `zlibstatic.lib` (static, SIMD-accelerated)
-   - **libpng 1.6.56** → `libpng16_static.lib` (static, linked against zlib-ng)
+   - **libjpeg-turbo 3.2.0** → `turbojpeg.dll`
+   - **zlib-ng 2.3.3** → `zlibstatic.lib` (static, SIMD-accelerated)
+   - **libpng 1.6.59** → `libpng16_static.lib` (static, linked against zlib-ng)
    - **pdfium_png shim** → `pdfium_png.dll` (statically embeds libpng + zlib-ng)
 4. Copy all DLLs to `src\libs\win-x64\`
 
@@ -566,7 +569,7 @@ src\native\build-natives.cmd --no-pdfium
 Library versions can be overridden from the caller environment:
 
 ```cmd
-set LIBPNG_VERSION=1.6.56
+set LIBPNG_VERSION=1.6.59
 src\native\build-natives.cmd --only pdfium_png
 ```
 

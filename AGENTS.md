@@ -90,10 +90,10 @@ Before ending a session, always update `/ai/current-state.md` with:
 
 ## Project Overview
 
-PdfiumWrapper is a .NET 8 library wrapping Google's PDFium for PDF manipulation and native libtiff for TIFF export. It targets high-throughput document processing services handling thousands of files.
+PdfiumWrapper is a .NET 10 library wrapping Google's PDFium for PDF manipulation and native libtiff for TIFF export. It targets high-throughput document processing services handling thousands of files.
 
 **Version:** 2.0.0 (the raw `PDFium.*` imports are `internal`; all native work goes through `PdfiumRuntime`)
-**Target framework:** `net8.0` with `AllowUnsafeBlocks=true`
+**Target framework:** `net10.0` with `AllowUnsafeBlocks=true`
 **Dependencies:** Native PDFium, libtiff + tiff_shim (TIFF), libjpeg-turbo (JPEG), pdfium_png (PNG; statically links libpng + zlib-ng)
 
 ## Architecture

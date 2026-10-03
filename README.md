@@ -2,7 +2,7 @@
 
 <img src="icon.png" alt="PdfiumWrapper Icon" width="64" height="64" align="left" />
 
-A modern, high-level .NET 8 wrapper for PDFium that makes PDF manipulation easy and intuitive. This library provides a clean C# API for working with PDF documents, including creation, rendering, merging, form filling, metadata management, and more.
+A modern, high-level .NET 10 wrapper for PDFium that makes PDF manipulation easy and intuitive. This library provides a clean C# API for working with PDF documents, including creation, rendering, merging, form filling, metadata management, and more.
 
 ## Features
 
@@ -36,7 +36,7 @@ See [High-Throughput Processing](docs/HIGH-THROUGHPUT-PROCESSING.md#worker-pool)
 
 ## Requirements
 
-- .NET 8.0 or later
+- .NET 10.0 or later
 - Platform-specific PDFium binaries (included in the package)
 - Platform-specific native libraries (included): libtiff + tiff_shim (TIFF), libjpeg-turbo (JPEG), pdfium_png (PNG)
 
