@@ -82,11 +82,6 @@ public static partial class PDFium
     #region Rendering
 
     [LibraryImport(LibraryName)]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    internal static partial bool FPDF_RenderPage(IntPtr dc, IntPtr page, int start_x, int start_y,
-        int size_x, int size_y, int rotate, int flags);
-
-    [LibraryImport(LibraryName)]
     internal static partial void FPDF_RenderPageBitmap(IntPtr bitmap, IntPtr page, int start_x, int start_y,
         int size_x, int size_y, int rotate, int flags);
 
