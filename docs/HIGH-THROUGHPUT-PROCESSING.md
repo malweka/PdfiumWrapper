@@ -717,10 +717,10 @@ public async Task ProcessWithMemoryMonitoringAsync(string[] pdfPaths, string out
 
 ### Consideration: Large Input Streams
 
-`new PdfDocument(stream)` and `new PdfMerger(stream)` read the stream from its current position to its end during construction, before any native work starts, and leave it positioned at its end. A slow stream therefore delays only its own caller, and the source stream can be closed as soon as the constructor returns.
+`new PdfDocument(stream)` and `new PdfMerger(stream)` read the stream from its current position to its end during construction, before any native work starts, and leave it positioned at its end. A slow stream therefore delays only its own caller, and the source stream can be closed, reset or reused as soon as the constructor returns.
 
-- If the stream is a `MemoryStream` with an exposable buffer, the wrapper uses and pins that buffer in place, without a copy.
-- Other streams of up to 64 MB are read into a managed `byte[]` that is pinned for the lifetime of the document.
+- Streams of up to 64 MB are copied into a buffer the document owns, pinned for the lifetime of the document. For a seekable stream (a `MemoryStream` included) the buffer is rented from `ArrayPool<byte>.Shared` and returned once the document is closed.
+- A `MemoryStream`'s own buffer is never used in place. PDFium reads pages from its input lazily for as long as the document is open, so a pooled or reused stream overwritten after construction would otherwise change, or break, the pages of a document that is still open.
 - Larger inputs are copied to a temporary file that PDFium reads directly. The file is deleted when the document or merger is disposed.
 
 The threshold can be changed before loading:
@@ -731,9 +731,9 @@ AppContext.SetData("PdfiumWrapper.SpoolThreshold", 16L * 1024 * 1024); // bytes
 
 For very large PDFs or high-volume stream ingestion pipelines, consider these tradeoffs:
 
-- If you already have the full PDF in memory, prefer a `MemoryStream` with an exposable buffer or pass a `byte[]` directly.
+- If you already have the full PDF in a `byte[]` that you will not modify until the document is disposed, pass it directly: it is used in place, without a copy.
 - If the PDF is already a file, open it by path. PDFium then reads it from disk as needed and nothing is copied into managed memory.
-- Inputs under the threshold that are not an exposable `MemoryStream` are copied once into managed memory.
+- Stream inputs under the threshold, `MemoryStream` included, are copied once into memory the document owns.
 
 ### Large Stream Examples
 
@@ -756,12 +756,12 @@ public void ProcessPdfBytes(byte[] pdfBytes)
 Why use this:
 
 - No extra copy inside the wrapper
-- Clear ownership
 - Good when your upstream already gives you a `byte[]`
+- The array is pinned and read for as long as the document is open: do not modify, reuse or return it to a pool before disposing the document
 
-#### 2. If You Control the In-Memory Stream
+#### 2. If the PDF Is in a Stream You Will Reuse
 
-If you receive or build the PDF in memory yourself, prefer an exposable `MemoryStream`:
+If the PDF arrives in a `MemoryStream` (or any stream) that you reset or return to a pool after loading, pass the stream:
 
 ```csharp
 public void ProcessPdfMemoryStream(byte[] pdfBytes)
@@ -782,8 +782,8 @@ public void ProcessPdfMemoryStream(byte[] pdfBytes)
 
 Why use this:
 
-- `PdfDocument` can reuse the `MemoryStream` backing buffer when it is exposable
-- Avoids an extra managed copy compared with a generic stream
+- The document copies the bytes into a pooled buffer it owns, so the stream can be reset, reused or returned to a pool as soon as the constructor returns
+- The copy is one `memcpy` into a rented array, returned to the pool when the document is disposed
 
 #### 3. For Very Large Streams, Spool to a Temporary File
 
@@ -860,8 +860,8 @@ public async Task<IActionResult> ProcessUpload(IFormFile file, CancellationToken
 
 Rule of thumb:
 
-- Small payload already in memory: use `byte[]`
-- In-memory stream you control: use `MemoryStream`
+- Small payload already in memory, left untouched while the document is open: use `byte[]`
+- In-memory stream that is reused or pooled: pass the stream (its bytes are copied)
 - Any other stream: pass it to the constructor (read up front; spooled to a temporary file above 64 MB)
 - Large or slow stream in async code: copy it to a file asynchronously, then open by path
 

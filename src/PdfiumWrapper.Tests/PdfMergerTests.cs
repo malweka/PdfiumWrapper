@@ -19,26 +19,29 @@ public class PdfMergerTests : IDisposable
         _testOutputHelper = testOutputHelper;
     }
 
-    private static GCHandle GetDocumentBytesHandle(PdfMerger merger)
+    /// <summary>The merger's private document, which owns the native handle and the loaded input.</summary>
+    private static PdfDocument GetTarget(PdfMerger merger)
     {
-        var field = typeof(PdfMerger).GetField("_documentBytesHandle", BindingFlags.Instance | BindingFlags.NonPublic);
+        var field = typeof(PdfMerger).GetField("_target", BindingFlags.Instance | BindingFlags.NonPublic);
         Assert.NotNull(field);
-        return (GCHandle)field.GetValue(merger)!;
+        return (PdfDocument)field.GetValue(merger)!;
     }
+
+    private static object? GetTargetField(PdfMerger merger, string name)
+    {
+        var field = typeof(PdfDocument).GetField(name, BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(field);
+        return field.GetValue(GetTarget(merger));
+    }
+
+    private static GCHandle GetDocumentBytesHandle(PdfMerger merger)
+        => (GCHandle)GetTargetField(merger, "_documentBytesHandle")!;
 
     private static byte[]? GetDocumentBytes(PdfMerger merger)
-    {
-        var field = typeof(PdfMerger).GetField("_documentBytes", BindingFlags.Instance | BindingFlags.NonPublic);
-        Assert.NotNull(field);
-        return (byte[]?)field.GetValue(merger);
-    }
+        => (byte[]?)GetTargetField(merger, "_documentBytes");
 
     private static string? GetSpoolPath(PdfMerger merger)
-    {
-        var field = typeof(PdfMerger).GetField("_spoolPath", BindingFlags.Instance | BindingFlags.NonPublic);
-        Assert.NotNull(field);
-        return (string?)field.GetValue(merger);
-    }
+        => (string?)GetTargetField(merger, "_spoolPath");
 
     public void Dispose()
     {
@@ -302,7 +305,7 @@ public class PdfMergerTests : IDisposable
     }
 
     [Fact]
-    public void Constructor_WithExposableMemoryStream_ShouldReuseBackingBuffer()
+    public void Constructor_WithExposableMemoryStream_ShouldCopyBackingBuffer()
     {
         // Arrange
         var bytes = (byte[])Doc1PageBytes.Clone();
@@ -315,9 +318,56 @@ public class PdfMergerTests : IDisposable
         // Act
         using var merger = new PdfMerger(stream);
 
-        // Assert
-        Assert.Same(segment.Array, GetDocumentBytes(merger));
+        // Assert: PDFium reads from the merger's own copy, never from the caller's buffer
+        Assert.NotSame(segment.Array, GetDocumentBytes(merger));
         Assert.True(GetDocumentBytesHandle(merger).IsAllocated);
+    }
+
+    [Fact]
+    public void Constructor_WithMemoryStream_ShouldNotDependOnTheStreamAfterwards()
+    {
+        // Arrange: the baseline is rendered from a document loaded by path
+        const string sourcePath = "Docs/doc-3-pages-with-comments.pdf";
+        var baseline = PdfDocumentTests.RenderEveryPage(sourcePath);
+
+        using var stream = new MemoryStream();
+        stream.Write(Doc3PagesBytes, 0, Doc3PagesBytes.Length);
+        stream.Position = 0;
+        Assert.True(stream.TryGetBuffer(out var segment));
+
+        using var merger = new PdfMerger(stream);
+
+        // Act: reuse the stream the way a pooled stream is reused for the next request, after
+        // wiping the buffer the merger was loaded from
+        Array.Clear(segment.Array!);
+        stream.SetLength(0);
+        stream.Write(Doc1PageBytes, 0, Doc1PageBytes.Length);
+        stream.Position = 0;
+
+        // Assert: the merger still holds every original page, and they render exactly as before
+        Assert.Equal(baseline.Length, merger.PageCount);
+        using var saved = new PdfDocument(merger.ToBytes());
+        Assert.Equal(baseline.Length, saved.PageCount);
+        for (int i = 0; i < baseline.Length; i++)
+        {
+            using var page = saved.GetPage(i);
+            Assert.Equal(baseline[i], PdfDocumentTests.RenderForComparison(page));
+        }
+    }
+
+    [Fact]
+    public void Constructor_WithStreamThatFailsToLoad_ShouldThrowLikePdfDocument()
+    {
+        // Arrange
+        using var stream = new MemoryStream(new byte[] { 1, 2, 3, 4, 5 });
+
+        // Act
+        var mergerError = Assert.Throws<InvalidOperationException>(() => new PdfMerger(stream));
+        stream.Position = 0;
+        var documentError = Assert.Throws<InvalidOperationException>(() => new PdfDocument(stream));
+
+        // Assert
+        Assert.Equal(documentError.Message, mergerError.Message);
     }
 
     [Fact]
@@ -1078,6 +1128,64 @@ public class PdfMergerTests : IDisposable
 
         // Act & Assert
         Assert.Throws<ObjectDisposedException>(() => _ = merger.PageCount);
+    }
+
+    [Fact]
+    public void Members_AfterDispose_ShouldThrowObjectDisposedExceptionNamingTheMerger()
+    {
+        // Arrange
+        var merger = new PdfMerger((byte[])Doc1PageBytes.Clone());
+        using var source = new PdfDocument((byte[])Doc1PageBytes.Clone());
+        merger.Dispose();
+
+        // Act & Assert
+        var calls = new Action[]
+        {
+            () => _ = merger.PageCount,
+            () => merger.AppendDocument(source),
+            () => merger.DeletePage(0),
+            () => merger.Save(GetUniqueTestFilePath("disposed")),
+            () => merger.Save(new MemoryStream()),
+            () => merger.ToBytes(),
+        };
+        foreach (var call in calls)
+        {
+            var error = Assert.Throws<ObjectDisposedException>(call);
+            Assert.Equal(typeof(PdfMerger).FullName, error.ObjectName);
+        }
+    }
+
+    [Fact]
+    public void Dispose_ShouldCloseTheDocumentAndReleaseTheInput()
+    {
+        // Arrange
+        using var stream = new MemoryStream((byte[])Doc1PageBytes.Clone());
+        var merger = new PdfMerger(stream);
+        var target = GetTarget(merger);
+
+        // Act
+        merger.Dispose();
+
+        // Assert
+        Assert.True(target.IsDisposed);
+        Assert.Equal(IntPtr.Zero, target.Document);
+        Assert.False(GetDocumentBytesHandle(merger).IsAllocated);
+        Assert.Null(GetDocumentBytes(merger));
+    }
+
+    [Fact]
+    public void DeletePage_OutOfRange_ShouldUseTheDocumentRangeMessage()
+    {
+        // Arrange
+        using var merger = new PdfMerger((byte[])Doc1PageBytes.Clone());
+        using var doc = new PdfDocument((byte[])Doc1PageBytes.Clone());
+
+        // Act
+        var mergerError = Assert.Throws<ArgumentOutOfRangeException>(() => merger.DeletePage(5));
+        var documentError = Assert.Throws<ArgumentOutOfRangeException>(() => doc.DeletePage(5));
+
+        // Assert
+        Assert.Equal(documentError.Message, mergerError.Message);
     }
 
     [Fact]

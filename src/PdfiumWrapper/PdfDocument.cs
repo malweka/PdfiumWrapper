@@ -27,6 +27,7 @@ public class PdfDocument : IDisposable
     private PdfAttachments? _attachments;
     private byte[]? _documentBytes;
     private GCHandle _documentBytesHandle;
+    private bool _documentBytesPooled;
     private string? _spoolPath;
 
     /// <summary>
@@ -53,7 +54,9 @@ public class PdfDocument : IDisposable
 
     /// <summary>
     /// Load a PDF from a stream. The stream is read from its current position to its end before
-    /// any native work starts, so the document is independent of the stream afterwards.
+    /// any native work starts, into a buffer the document owns, so the document is independent of
+    /// the stream afterwards. This holds for a <see cref="MemoryStream"/> too: its buffer may be
+    /// reset, overwritten or reused as soon as the constructor returns.
     /// Inputs larger than the spool threshold (64 MB by default) are copied to a temporary file
     /// that is deleted when the document is disposed.
     /// </summary>
@@ -81,16 +84,21 @@ public class PdfDocument : IDisposable
         }
         else
         {
-            LoadPinnedMemoryDocument(spool.Buffer!, spool.Offset, spool.Length, password);
+            LoadPinnedMemoryDocument(spool.Buffer!, spool.Offset, spool.Length, password, spool.IsPooled);
         }
     }
 
+    /// <summary>
+    /// Load a PDF from a byte array. The array is used in place, without a copy: it is pinned and
+    /// PDFium reads pages from it lazily for as long as the document is open, so it must not be
+    /// modified until the document is disposed. Pass a copy if the array may be reused.
+    /// </summary>
     public PdfDocument(byte[] data, string? password = null)
     {
         ArgumentNullException.ThrowIfNull(data);
 
         using var _ = PdfiumRuntime.Enter();
-        LoadPinnedMemoryDocument(data, 0, data.Length, password);
+        LoadPinnedMemoryDocument(data, 0, data.Length, password, pooled: false);
     }
 
     [NoNativeCall]
@@ -336,11 +344,16 @@ public class PdfDocument : IDisposable
         PdfiumRuntime.HandleOpened();
     }
 
-    private void LoadPinnedMemoryDocument(byte[] data, int offset, int length, string? password)
+    /// <param name="pooled">
+    /// <paramref name="data"/> was rented from <see cref="ArrayPool{T}.Shared"/> and is returned to it
+    /// once the document is closed (see <see cref="ReleasePinnedMemoryDocument"/>).
+    /// </param>
+    private void LoadPinnedMemoryDocument(byte[] data, int offset, int length, string? password, bool pooled)
     {
         PdfiumRuntime.AssertHeld();
 
         _documentBytes = data;
+        _documentBytesPooled = pooled;
         _documentBytesHandle = GCHandle.Alloc(data, GCHandleType.Pinned);
 
         try
@@ -363,6 +376,12 @@ public class PdfDocument : IDisposable
         }
     }
 
+    /// <summary>
+    /// Unpins the document's input buffer and returns it to the pool if it was rented. Only called
+    /// when PDFium no longer reads from it: after the document is closed, or when the load failed.
+    /// The finalizer path never comes here: it queues the pin behind the document's close and leaves
+    /// a rented buffer to the GC, because nothing tells it when that queued close has run.
+    /// </summary>
     private void ReleasePinnedMemoryDocument()
     {
         if (_documentBytesHandle.IsAllocated)
@@ -370,7 +389,13 @@ public class PdfDocument : IDisposable
             _documentBytesHandle.Free();
         }
 
+        if (_documentBytesPooled && _documentBytes != null)
+        {
+            ArrayPool<byte>.Shared.Return(_documentBytes);
+        }
+
         _documentBytes = null;
+        _documentBytesPooled = false;
     }
 
     #endregion
@@ -424,6 +449,13 @@ public class PdfDocument : IDisposable
     public void DeletePage(int pageIndex)
     {
         using var _ = PdfiumRuntime.Enter();
+        DeletePageCore(pageIndex);
+    }
+
+    /// <summary>The native gate must be held.</summary>
+    internal void DeletePageCore(int pageIndex)
+    {
+        PdfiumRuntime.AssertHeld();
         ThrowIfDisposed();
 
         int pageCount = PDFium.FPDF_GetPageCount(Document);
@@ -446,7 +478,7 @@ public class PdfDocument : IDisposable
         if (page == null)
             throw new ArgumentNullException(nameof(page));
 
-        DeletePage(page.PageIndex);
+        DeletePageCore(page.PageIndex);
     }
 
     /// <summary>
@@ -1405,9 +1437,34 @@ public class PdfDocument : IDisposable
         }
     }
 
+    /// <summary>
+    /// Saves the PDF document to a new byte array. Serialized into a pooled buffer under the gate,
+    /// copied out after the gate is released. Used by <see cref="PdfMerger.ToBytes"/>.
+    /// </summary>
+    internal byte[] SaveToArray(uint flags)
+    {
+        byte[] buffer;
+        int length;
+        using (PdfiumRuntime.Enter())
+        {
+            ThrowIfDisposed();
+            (buffer, length) = SaveCore(flags);
+        }
+
+        try
+        {
+            return buffer.AsSpan(0, length).ToArray();
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(buffer);
+        }
+    }
+
     /// <summary>Serializes into a pooled buffer the caller must return. The native gate must be held.</summary>
     private (byte[] Buffer, int Length) SaveCore(uint flags)
     {
+        PdfiumRuntime.AssertHeld();
         if (!PooledFileWriter.TrySave(Document, flags, out var buffer, out int length, out uint error))
             throw new InvalidOperationException($"Failed to save PDF document. PDFium error code: {error}");
 

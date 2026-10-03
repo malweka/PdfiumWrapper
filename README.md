@@ -167,7 +167,7 @@ See [Best Practices](docs/BEST-PRACTICES.md) and [High-Throughput Processing](do
 
 - The raw native imports on the `PDFium` class (for example `PDFium.FPDF_LoadDocument`) are now `internal`. The class stays public for its constants and structs (`PDFium.FPDF_ANNOT`, `PDFium.FPDF_INCREMENTAL`, ...). There is no supported raw-call path in 2.0; use the wrapper types.
 - New `PdfiumRuntime` class: `Enter()`, `ReleasePending()`, `Shutdown()`, `IsHeldByCurrentThread`, `LiveHandleCount`. See the [API Reference](docs/API-REFERENCE.md#pdfiumruntime).
-- `new PdfDocument(Stream)` and `new PdfMerger(Stream)` read the stream to its end during construction; the stream can be closed immediately afterwards.
+- `new PdfDocument(Stream)` and `new PdfMerger(Stream)` read the stream to its end during construction, copying a `MemoryStream`'s bytes as well; the stream can be closed, reset or reused immediately afterwards. The `byte[]` constructors still use the array in place: do not modify it while the document is open.
 - Saving to a stream writes after the PDF has been serialized in memory. An exception thrown by the destination stream (for example `IOException`) now reaches the caller unchanged.
 - A document owns the forms returned by `GetForm()` and the page objects removed from its pages; disposing the document disposes them.
 - `PdfImageObject.GetBitmap()` and `GetRenderedBitmap()` return managed BGRA pixels (`RawBitmap?`) instead of a native bitmap handle. `GetRenderedBitmap` takes a `PdfPage` instead of a page handle. `PdfImageObject.SetBitmap` and `SetImage`, which took native handles, are `internal`; add images with `PdfPage.AddImage`.
