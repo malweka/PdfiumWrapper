@@ -160,7 +160,7 @@ public class PdfDocumentTests : IDisposable
     }
 
     [Fact]
-    public void Constructor_WithExposableMemoryStream_ShouldReuseBackingBuffer()
+    public void Constructor_WithExposableMemoryStream_ShouldCopyBackingBuffer()
     {
         // Arrange
         var bytes = File.ReadAllBytes(ContractPdfPath);
@@ -173,10 +173,89 @@ public class PdfDocumentTests : IDisposable
         // Act
         using var doc = new PdfDocument(stream);
 
-        // Assert
-        Assert.Same(segment.Array, GetDocumentBytes(doc));
+        // Assert: PDFium reads from the document's own copy, never from the caller's buffer
+        Assert.NotSame(segment.Array, GetDocumentBytes(doc));
         Assert.True(GetDocumentBytesHandle(doc).IsAllocated);
+        Assert.Equal(stream.Length, stream.Position);
     }
+
+    [Fact]
+    public void Constructor_WithMemoryStream_ShouldNotDependOnTheStreamAfterwards()
+    {
+        // Arrange: the baseline is rendered from a document loaded by path
+        const string sourcePath = "Docs/doc-3-pages-with-comments.pdf";
+        var baseline = RenderEveryPage(sourcePath);
+        var bytes = File.ReadAllBytes(sourcePath);
+
+        using var stream = new MemoryStream();
+        stream.Write(bytes, 0, bytes.Length);
+        stream.Position = 0;
+        Assert.True(stream.TryGetBuffer(out var segment));
+
+        using var doc = new PdfDocument(stream);
+
+        // Act: reuse the stream the way a pooled stream is reused for the next request, after
+        // wiping the buffer the document was loaded from
+        Array.Clear(segment.Array!);
+        stream.SetLength(0);
+        stream.Write(File.ReadAllBytes(ContractPdfPath));
+        stream.Position = 0;
+
+        // Assert: every page still loads and renders exactly as the original
+        Assert.Equal(baseline.Length, doc.PageCount);
+        for (int i = 0; i < baseline.Length; i++)
+        {
+            using var page = doc.GetPage(i);
+            Assert.Equal(baseline[i], RenderForComparison(page));
+        }
+    }
+
+    [Fact]
+    public void Constructor_WithMemoryStreamAtOffset_ShouldReadFromTheCurrentPosition()
+    {
+        // Arrange: junk before the PDF, which the constructor must skip
+        var bytes = File.ReadAllBytes(ContractPdfPath);
+        using var stream = new MemoryStream();
+        stream.Write(new byte[] { 1, 2, 3, 4, 5, 6, 7 });
+        stream.Write(bytes, 0, bytes.Length);
+        stream.Position = 7;
+
+        // Act
+        using var doc = new PdfDocument(stream);
+        using var expected = new PdfDocument(ContractPdfPath);
+
+        // Assert
+        Assert.Equal(expected.PageCount, doc.PageCount);
+        Assert.Equal(stream.Length, stream.Position);
+    }
+
+    [Fact]
+    public void Constructor_WithEmptyStream_ShouldThrowInvalidOperationException()
+    {
+        // Arrange
+        using var stream = new MemoryStream();
+
+        // Act & Assert: the empty buffer goes to PDFium, which rejects it; nothing breaks on release
+        Assert.Throws<InvalidOperationException>(() => new PdfDocument(stream));
+        Assert.Throws<InvalidOperationException>(() => new PdfMerger(stream));
+    }
+
+    /// <summary>One small render per page, for comparing two loads of the same PDF byte for byte.</summary>
+    internal static byte[][] RenderEveryPage(string path)
+    {
+        using var doc = new PdfDocument(path);
+        var renders = new byte[doc.PageCount][];
+        for (int i = 0; i < renders.Length; i++)
+        {
+            using var page = doc.GetPage(i);
+            renders[i] = RenderForComparison(page);
+        }
+
+        return renders;
+    }
+
+    internal static byte[] RenderForComparison(PdfPage page)
+        => page.RenderToBytes((int)Math.Ceiling(page.Width / 2), (int)Math.Ceiling(page.Height / 2));
     
     [Fact]
     public void Constructor_WithInvalidByteArray_ShouldThrowException()

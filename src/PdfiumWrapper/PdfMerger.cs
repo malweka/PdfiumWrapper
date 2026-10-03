@@ -30,7 +30,9 @@ public class PdfMerger : IDisposable
     }
 
     /// <summary>
-    /// Start with an existing PDF document from bytes
+    /// Start with an existing PDF document from bytes. The array is used in place, without a copy:
+    /// it is pinned and PDFium reads from it for as long as the merger is open, so it must not be
+    /// modified until the merger is disposed. Pass a copy if the array may be reused.
     /// </summary>
     public PdfMerger(byte[] data, string? password = null)
     {
@@ -40,9 +42,10 @@ public class PdfMerger : IDisposable
     /// <summary>
     /// Start with an existing PDF document from stream.
     /// The stream is read from its current position to its end before any native work starts,
-    /// so the merger is independent of the stream afterwards. Inputs larger than the spool
-    /// threshold (64 MB by default) are copied to a temporary file that is deleted when the
-    /// merger is disposed.
+    /// into a buffer the merger owns, so the merger is independent of the stream afterwards. This
+    /// holds for a <see cref="MemoryStream"/> too: its buffer may be reset, overwritten or reused as
+    /// soon as the constructor returns. Inputs larger than the spool threshold (64 MB by default)
+    /// are copied to a temporary file that is deleted when the merger is disposed.
     /// </summary>
     public PdfMerger(Stream pdfStream, string? password = null)
     {

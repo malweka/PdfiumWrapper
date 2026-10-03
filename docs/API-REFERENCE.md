@@ -93,6 +93,8 @@ byte[] pdfBytes = File.ReadAllBytes("sample.pdf");
 using var document = new PdfDocument(pdfBytes);
 ```
 
+The array is used in place, without a copy: it is pinned, and PDFium reads pages from it for as long as the document is open. Do not modify, reuse or return the array to a pool until the document is disposed; pass a copy (or use the `Stream` constructor) if you need the array back sooner.
+
 **Parameters:**
 - `data` — PDF file contents as byte array
 - `password` — Optional password for encrypted PDFs
@@ -106,10 +108,9 @@ using var stream = File.OpenRead("sample.pdf");
 using var document = new PdfDocument(stream);
 ```
 
-The stream is read from its current position to its end during construction, before any native work starts, and is left positioned at its end. The document does not use the stream afterwards, so it can be closed immediately.
+The stream is read from its current position to its end during construction, before any native work starts, and is left positioned at its end. The document does not use the stream afterwards, so it can be closed, reset or reused immediately.
 
-- A `MemoryStream` with an exposable buffer is used in place, without a copy.
-- Other inputs of up to 64 MB are held in memory.
+- Inputs of up to 64 MB are copied into a buffer the document owns (rented from `ArrayPool<byte>.Shared` when the stream is seekable, and returned after the document is closed). This includes a `MemoryStream`: its own buffer is never used in place, so overwriting it after construction cannot change the document.
 - Larger inputs are copied to a temporary file that is deleted when the document is disposed.
 
 The threshold can be changed with `AppContext.SetData("PdfiumWrapper.SpoolThreshold", bytes)` (a `long`) before loading.
@@ -955,13 +956,13 @@ using var merger = new PdfMerger("existing.pdf");
 
 #### PdfMerger(byte[] data, string password = null)
 
-Starts with an existing PDF from byte array.
+Starts with an existing PDF from byte array. As with [`PdfDocument(byte[])`](#pdfdocumentbyte-data-string-password--null), the array is used in place and must not be modified until the merger is disposed.
 
 #### PdfMerger(Stream pdfStream, string password = null)
 
 Starts with an existing PDF from stream.
 
-The stream is read from its current position to its end during construction and is left positioned at its end, with the same in-memory and temporary-file rules as [`PdfDocument(Stream)`](#pdfdocumentstream-pdfstream-string-password--null). The merger does not use the stream afterwards, so it can be closed immediately. (Before 2.0 a seekable stream had to stay open for the lifetime of the merger.)
+The stream is read from its current position to its end during construction and is left positioned at its end, with the same copy and temporary-file rules as [`PdfDocument(Stream)`](#pdfdocumentstream-pdfstream-string-password--null). The merger does not use the stream afterwards, so it can be closed, reset or reused immediately. (Before 2.0 a seekable stream had to stay open for the lifetime of the merger.)
 
 Each constructor builds the merger on a private `PdfDocument` loaded through the matching `PdfDocument` constructor, so loading, error messages, saving and disposal behave exactly as they do for `PdfDocument`. A merger dropped without `Dispose()` is released by that document's finalizer.
 

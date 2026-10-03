@@ -305,7 +305,7 @@ public class PdfMergerTests : IDisposable
     }
 
     [Fact]
-    public void Constructor_WithExposableMemoryStream_ShouldReuseBackingBuffer()
+    public void Constructor_WithExposableMemoryStream_ShouldCopyBackingBuffer()
     {
         // Arrange
         var bytes = (byte[])Doc1PageBytes.Clone();
@@ -318,9 +318,41 @@ public class PdfMergerTests : IDisposable
         // Act
         using var merger = new PdfMerger(stream);
 
-        // Assert
-        Assert.Same(segment.Array, GetDocumentBytes(merger));
+        // Assert: PDFium reads from the merger's own copy, never from the caller's buffer
+        Assert.NotSame(segment.Array, GetDocumentBytes(merger));
         Assert.True(GetDocumentBytesHandle(merger).IsAllocated);
+    }
+
+    [Fact]
+    public void Constructor_WithMemoryStream_ShouldNotDependOnTheStreamAfterwards()
+    {
+        // Arrange: the baseline is rendered from a document loaded by path
+        const string sourcePath = "Docs/doc-3-pages-with-comments.pdf";
+        var baseline = PdfDocumentTests.RenderEveryPage(sourcePath);
+
+        using var stream = new MemoryStream();
+        stream.Write(Doc3PagesBytes, 0, Doc3PagesBytes.Length);
+        stream.Position = 0;
+        Assert.True(stream.TryGetBuffer(out var segment));
+
+        using var merger = new PdfMerger(stream);
+
+        // Act: reuse the stream the way a pooled stream is reused for the next request, after
+        // wiping the buffer the merger was loaded from
+        Array.Clear(segment.Array!);
+        stream.SetLength(0);
+        stream.Write(Doc1PageBytes, 0, Doc1PageBytes.Length);
+        stream.Position = 0;
+
+        // Assert: the merger still holds every original page, and they render exactly as before
+        Assert.Equal(baseline.Length, merger.PageCount);
+        using var saved = new PdfDocument(merger.ToBytes());
+        Assert.Equal(baseline.Length, saved.PageCount);
+        for (int i = 0; i < baseline.Length; i++)
+        {
+            using var page = saved.GetPage(i);
+            Assert.Equal(baseline[i], PdfDocumentTests.RenderForComparison(page));
+        }
     }
 
     [Fact]
