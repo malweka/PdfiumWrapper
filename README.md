@@ -26,6 +26,14 @@ A modern, high-level .NET 8 wrapper for PDFium that makes PDF manipulation easy 
 dotnet add package PdfiumWrapper
 ```
 
+For high volumes, the optional worker pool runs conversions in parallel worker processes with crash isolation and dynamic sizing:
+
+```bash
+dotnet add package PdfiumWrapper.Processing
+```
+
+See [High-Throughput Processing](docs/HIGH-THROUGHPUT-PROCESSING.md#worker-pool).
+
 ## Requirements
 
 - .NET 8.0 or later

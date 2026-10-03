@@ -101,7 +101,22 @@ jobs:
             /p:FileVersion=${{ needs.guard.outputs.version }} \
             /p:AssemblyVersion=${{ needs.guard.outputs.version }}
 
-      - name: Push all packages to NuGet (main + runtimes + symbols)
+      - name: Build and pack PdfiumWrapper.Processing (+ symbols)
+        run: |
+          dotnet build src/PdfiumWrapper.Processing/PdfiumWrapper.Processing.csproj \
+            --configuration Release \
+            /p:Version=${{ needs.guard.outputs.version }} \
+            /p:FileVersion=${{ needs.guard.outputs.version }} \
+            /p:AssemblyVersion=${{ needs.guard.outputs.version }}
+          dotnet pack src/PdfiumWrapper.Processing/PdfiumWrapper.Processing.csproj \
+            --configuration Release \
+            --no-build \
+            --output ./artifacts \
+            /p:Version=${{ needs.guard.outputs.version }} \
+            /p:FileVersion=${{ needs.guard.outputs.version }} \
+            /p:AssemblyVersion=${{ needs.guard.outputs.version }}
+
+      - name: Push all packages to NuGet (main + processing + runtimes + symbols)
         run: |
           dotnet nuget push "artifacts/*.nupkg" \
             --api-key ${{ secrets.NUGET_API_KEY }} \

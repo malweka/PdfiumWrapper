@@ -8,6 +8,10 @@ using PdfiumWrapper.Tests.Host;
 
 var mainStart = Stopwatch.GetTimestamp();
 
+// Started by a PdfProcessingPool as a worker (WorkerPath points here): run the worker loop and exit.
+if (PdfiumWrapper.Processing.PdfWorkerHost.TryRun(WorkerFaults.FromEnvironment()))
+    return Environment.ExitCode;
+
 if (args.Length == 0)
 {
     Console.Error.WriteLine("usage: PdfiumWrapper.Tests.Host <scenario> [key=value ...]");

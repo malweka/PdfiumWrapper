@@ -162,6 +162,32 @@ internal static class AsposeEngine
     public static string Version() => typeof(Aspose.Pdf.Document).Assembly.GetName().Version?.ToString() ?? "unknown";
 }
 
+/// <summary>Working set of this process's live child processes (the pool's workers).</summary>
+internal static class ChildProcesses
+{
+    public static long LiveWorkingSetBytes()
+    {
+        long total = 0;
+        int self = Environment.ProcessId;
+        foreach (var process in Process.GetProcessesByName(Path.GetFileNameWithoutExtension(Environment.ProcessPath ?? "")))
+        {
+            using (process)
+            {
+                try
+                {
+                    if (process.Id != self)
+                        total += process.WorkingSet64;
+                }
+                catch (Exception)
+                {
+                }
+            }
+        }
+
+        return total;
+    }
+}
+
 /// <summary>
 /// Where this project writes results. Figures for other engines are for local reading only, so
 /// they go under the repository's git-ignored <c>ai/tmp</c> folder, never next to PdfiumWrapper's

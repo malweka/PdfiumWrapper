@@ -16,6 +16,10 @@ using PdfiumWrapper.Benchmarks.Comparison;
 // GHOSTSCRIPT_EXE    path to gswin64c / gs, when it is not on PATH
 // ASPOSE_PDF_LICENSE path to an Aspose.PDF license file (kept outside this repository)
 
+// A PdfProcessingPool (--engine pool) re-launches this executable as its workers.
+if (PdfiumWrapper.Processing.PdfWorkerHost.TryRun())
+    return Environment.ExitCode;
+
 var engines = new List<string> { Engine.Pdfium };
 Console.WriteLine("PdfiumWrapper: " + typeof(PdfiumWrapper.PdfDocument).Assembly.GetName().Version);
 

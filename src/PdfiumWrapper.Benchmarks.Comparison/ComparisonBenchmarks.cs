@@ -10,6 +10,7 @@ internal static class Engine
     public const string Pdfium = "PdfiumWrapper";
     public const string Ghostscript = "Ghostscript";
     public const string Aspose = "Aspose";
+    public const string Pool = "PdfiumWrapper.Processing";
 }
 
 public sealed class CorpusDocument

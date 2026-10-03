@@ -2,6 +2,18 @@
 
 ## Current focus
 
+Follow-up verification of the local, uncommitted PR #18 fixes is complete (2026-10-03). GitHub and local HEAD remain `7080c0377551a0f4f572f3ba8ba1a259c2099ba8`; the fixes are in the working tree. All 273 Windows tests pass, including the six added regression tests, and the comparison project builds. Two findings remain: Critical deletion of pre-existing image output by cleanup for a job that wrote nothing (`PdfProcessingPool.cs:568`), and Moderate retention of every completed batch continuation despite the new admission bound (`PdfProcessingPool.Operations.cs:184`). Verdict remains request changes. No implementation edits were made during this verification.
+
+PR #18 architecture review is complete at head `7080c0377551a0f4f572f3ba8ba1a259c2099ba8` (merge base `5930c8606bac014c81ee0b6f8b7da4bc4bd12d3f`). Verdict: request changes for five reproduced findings: batch output-name collisions, unbounded batch submissions/spooling, cancellation while waiting for admission throwing instead of returning a status, incomplete output cleanup after failure, and cancellation during worker startup leaking a child and returning a pool. No implementation fixes were requested or made.
+
+Release 2 (worker pool) is implemented and measured on branch `feature/worker-pool` (from `main` after PRs 16 and 17): `src/PdfiumWrapper.Processing` (`PdfProcessingPool`, `PdfWorkerHost`, protocol, sizing, `JobsPerWorker`), 29 tests in `src/PdfiumWrapper.Tests/Processing/`, `PdfiumWrapper.Tests.Host` as the test worker with fault injection, `--engine pool` in the comparison project's throughput runner, documentation, and the Phase 7 numbers in `benchmark.md`. 267 tests pass on win-x64 and linux-x64.
+
+Phase 7 result: a warm pool of 8 does 10.07 requests/s against 10.86 for 8 independent processes (within the 10% acceptance); cold start to 8 in 4.5 s. The first version, one job per worker, was 16% behind; `JobsPerWorker = 2` (a worker encodes one document while PDFium renders another) recovered it.
+
+Open after Release 2: the 10,000-job qualification and 30-minute soak (Phase 6, not in PR CI), a self-contained-publish hosting run, macOS, isolating the coordinator's own CPU (the harness measured 0.12 cores including its own submitters and sampler), a `pool` mode in the burst runner, and the second-wave operations (merge, forms, bookmarks, attachments).
+
+### Earlier focus (2026-10-02, before the pool)
+
 Release 2 of `ai/plans/plan-pdfium-concurrency.md` (the worker pool, package `PdfiumWrapper.Processing`) was approved by the owner on 2026-10-02 and the plan was revised: section 4.9 holds the API, hosting model, sizing policy and protocol; Phases 5 to 7 are the build order, tests and acceptance. Implementation has not started. Also on the working tree, uncommitted, on branch `feature/tiff-gray-render`: gray TIFF rendering, the comparison harness, and documentation notes.
 
 ### Earlier focus
@@ -12,7 +24,48 @@ Release 1 of `ai/plans/plan-pdfium-concurrency.md` is implemented on `feature/pd
 
 ## Completed
 
-### Latest task: version comparison and engine comparison (2026-10-02, after the merge)
+### Latest task: verify the PR #18 review fixes (2026-10-03)
+
+- Read the updated repository rules, README, state, concurrency plan and ai-pr-review skill; reviewed the local follow-up changes in the coordinator, operations, worker, pending-job model, fault hooks and regression tests against `7080c03`. Unrelated documentation edits were excluded. Confirmed via GitHub that PR #18 still points to `7080c03`; its green CI applies to the original commit, not the uncommitted fixes.
+- Independently ran `dotnet test src/PdfiumWrapper.Tests/PdfiumWrapper.Tests.csproj --no-restore --verbosity quiet`: 273 passed, 0 failed, Windows (2 m 24 s). Existing test dependency vulnerability warnings remain. The comparison project builds with 0 warnings/errors.
+- The original collision, unbounded spooling, admission cancellation, managed/crashed output cleanup and cancelled-start reproductions are covered by the six added regression tests, which pass. The new semaphore bounds active/spooled/unread batch work, and cancelled creation kills the child and propagates cancellation.
+- Isolated xUnit cases outside the repository confirmed a cleanup regression: a pre-cancelled byte-input PNG job returns Cancelled with Attempts=0 but deletes an existing `page_001.png`; a job failing to open a missing input also deletes that file. `Finish` calls `RemovePartialOutput` on every non-success, and its `PagesDone + 1` loop guesses ownership even when no file was written.
+- A separate reflection-backed xUnit case confirmed that after reading 50 batch results with a bound of 3, `pending` still retained 53 completed continuation tasks. Active work is bounded, but task history grows with the total batch size. Recommend a bounded set of outstanding tasks or fixed producer/consumer tasks rather than retaining all completions.
+- An additional early-disposal probe observed a batch submitter remaining pending after both iterator and pool disposal. It was not reported as a separate finding without stronger lifecycle/retention evidence; no implementation fix was attempted.
+- Verdict: request changes for the output-deletion regression and incomplete task-memory bound. No Linux/macOS run, self-contained publish, qualification burst, soak or benchmark rerun was performed. Updated only this required state file; preserved all implementation and documentation changes.
+
+### Latest task: fix the five findings of the PR 18 review (2026-10-02)
+
+All five reproduced by reading the code and fixed on `feature/worker-pool`, with a test each (35 pool tests, 273 in all, pass on win-x64; linux-x64 not rerun):
+
+- Batch output names collided (`report`, `report`, `report-2` gave two paths): `OutputsFor` now reserves every name handed out.
+- Batches started every job at once and spooled every input: `Batch` bounds documents in any stage to `QueueCapacity + MaxWorkers x JobsPerWorker`, released as the caller reads results.
+- Cancellation while waiting for a queue slot threw: `SubmitAsync` and the spool in `RunAsync` return a `Cancelled` result through `Finish`, so counters and events agree.
+- Failed image jobs left pages and a `.tmp`: the worker removes written pages on any exception; the coordinator tracks `Progress` frames and removes a dead worker's pages and temp files (`RemovePartialOutput`) before a retry and on the final failure. `Worker` acts on the process exit only after its stdout is drained.
+- Cancelling `CreateAsync` leaked the child: `Worker.StartAsync` kills it on any cancellation and rethrows the caller's; `StartWorkerAsync` swallows only the shutdown token; `DisposeAsync` waits for starts in progress.
+- Test hooks: `BeforeHello`, `AfterPage`; faults `slow-start:<ms>` (writes its pid to `PDFIUMWRAPPER_TEST_PIDFILE`) and `crash-after-page-N:<match>`.
+
+Second review pass (2026-10-03), two findings, both fixed (36 pool tests, 274 in all, pass on win-x64):
+
+- The batch kept every job's continuation in a list until the whole batch finished. Outstanding jobs are now counted; the last to finish completes the results channel.
+- `RemovePartialOutput` ran for every unsuccessful job and deleted `page_001` even when the job never ran (pre-cancelled, missing input). Image jobs now stage all pages as `<final>.<jobId>.tmp`, report `CommittingPages` in a `Progress` frame, then move them into place; the coordinator cleans up only after a crash or kill, and only the job's own `.tmp` files plus the final names it had claimed once committing. `PendingJob.CommittingPages`, `ProgressPayload.CommittingPages`. Test `CleanupNeverTouchesOutputTheJobDidNotWrite`.
+
+Not committed. Linux run, qualification burst and soak still open.
+
+### Earlier task: review PR #18 (2026-10-02)
+
+- Applied the global `ai-pr-review` skill; read AGENTS.md, README.md, the state records and the concurrency plan (Release 2 section 4.9 and Phases 5 to 8). GitHub PR #18 and local HEAD both resolve to `7080c0377551a0f4f572f3ba8ba1a259c2099ba8`; merge base is `5930c8606bac014c81ee0b6f8b7da4bc4bd12d3f`. Reviewed only that 33-file diff and relevant core callers; excluded existing local documentation/state edits.
+- Independently ran `dotnet test src/PdfiumWrapper.Tests/PdfiumWrapper.Tests.csproj --no-restore`: 267 passed, 0 failed (Windows, 2 m 5 s). Existing Magick.NET vulnerability and compiler/analyzer warnings remain outside this PR's scope. Built the opt-in comparison project with `--no-restore`: success, 0 warnings/errors. Exact-head GitHub CI reports success for Linux tests and four platform core build/package jobs.
+- Ran five isolated xUnit reproductions from a temporary project outside the repository against the reviewed assemblies. All five confirmed defects: three successful TIFF jobs named `report.pdf`, `report.pdf`, `report-2.pdf` produced two distinct output paths; a blocked worker with QueueCapacity=2 retained over 90 batch-spooled inputs (94 submitted / 93 reported queued at the sample); cancelling a capacity-waiting submission threw OperationCanceledException; failure to rename page 2 left page 1 and a `.tmp` file; cancellation while awaiting a worker Hello returned a pool and left its child alive after DisposeAsync. The deliberately orphaned proof child was killed by the test.
+- Verdict: request changes (one Critical output-loss finding, four Moderate correctness/architecture findings). No code fixes, fetches, pushes, merges, PR comments, or implementation-plan changes were made. Only this required state record was edited in the repository.
+- Verification limits: no independent Linux/macOS runtime run, self-contained publish, 10,000-job qualification, 30-minute soak, or benchmark rerun. The PR explicitly records the latter qualification/hosting gaps as deferred.
+
+### Latest task: document the in-process and pool paths side by side (2026-10-02)
+
+- Added "Two Paths: In-Process or Worker Pool" to `docs/HIGH-THROUGHPUT-PROCESSING.md`, after Core Principles and in the table of contents: the two packages and their dependency direction (the pool is optional; the core never starts a process), the same folder-to-PNG job written both ways, a feature table (rendering, crash isolation, memory, errors, operations, deployment), when to use which, and a call-mapping table for moving between them.
+- Documentation only. No code or tests changed; figures are the ones already recorded in the file and `benchmark.md`.
+
+### Earlier task: version comparison and engine comparison (2026-10-02, after the merge)
 
 - Pull request 15 was merged into `main` (merge commit `df0ef31`). The feature branch still exists.
 - `benchmark.db` now holds two runs from this machine: `pre-gate-1.0.0` (the `bench-baseline-pre-gate` tag) and `gated-2.0.0` (merged code). Conversion is within about 3% of 1.0.0; merge is up to 5.6% slower on the larger documents. `benchmark.db` is modified and not committed.
@@ -177,9 +230,17 @@ Key measurements (one machine: i7-13700F, 24 logical processors, win-x64):
 
 ## In progress
 
+- Follow-up review is finished. The two remaining findings await implementation by the owner; no code corrections were requested in this verification turn.
+
+- PR #18 review finished; implementation corrections have not been requested. Older status notes below are historical.
+
 - Nothing active. Verification is complete; the stride overflow edge case awaits correction. The four original review reproductions are resolved.
 
 ## Next recommended step
+
+- Correct artifact ownership in `RemovePartialOutput` (`PdfProcessingPool.cs:568`) so undispatched/rejected jobs cannot delete existing files, and remove completed task history from `Batch` (`PdfProcessingPool.Operations.cs:184`). Add preservation and task-retention regressions, rerun tests, then commit/push the fixes and verify CI for that exact commit. Earlier recommendations below are historical.
+
+- Address the five PR #18 findings at `PdfProcessingPool.Operations.cs:152/181`, `PdfProcessingPool.cs:141`, `PdfWorkerHost.cs:249`, and `Worker.cs:74` / `PdfProcessingPool.cs:574`; add regression coverage for each, then rerun the suite and request a follow-up review. Prior recommendations below are retained as history.
 
 0. Commit the current working tree on `feature/tiff-gray-render` (gray TIFF rendering, test, docs, `benchmark.db`, `.gitignore`, the comparison harness without results, the plan revision), open a PR, merge. Then start Release 2 on a new branch from `main`, Phase 5 in its listed order.
 
@@ -191,6 +252,10 @@ Earlier list (items 1 and 2 still apply; item 3 is done):
 3. Decide whether to commit `src/PdfiumWrapper.Benchmarks.Comparison` (code only, no results), the `.gitignore` entries and the updated `benchmark.db`. 2.0.0 is merged but not released: the release workflow takes its version from a `release/<version>` branch.
 
 ## Blockers or open questions
+
+- The local PR #18 fixes still have one Critical output-loss regression and one Moderate batch-memory issue. GitHub CI has not evaluated these uncommitted changes. The review itself is complete.
+
+- PR #18 should not merge until the reproduced output-loss, batch-admission, cleanup, and cancellation defects are corrected. The review itself has no remaining blocker.
 
 - Original four PR #15 findings are resolved at `f3b15a1`; a new large-weight stride-search overflow remains (`BurstRunner.cs:406`). No implementation fixes were requested during verification.
 - The Release 2 decision is open for the reason above. The measurements say a burst of thousands of documents in a short window is beyond one process on the test hardware (usable rate about 1.3 docs/sec per process on the mixed corpus), so some multi-process arrangement is needed; which one is the owner's call.
@@ -218,6 +283,12 @@ Earlier notes:Earlier notes:
 
 ## Recently changed files
 
+- Follow-up verification (2026-10-03): `ai/current-state.md` only. All pre-existing code and documentation edits were preserved. Temporary xUnit probes are under `%TEMP%/PdfiumPr18Followup_f8bfa9bdd893413980dd7dcdc936ed1f/`.
+
+- PR #18 review (2026-10-02): `ai/current-state.md` only. Preserved the pre-existing local change to `docs/HIGH-THROUGHPUT-PROCESSING.md` and earlier state notes. Temporary reproduction tests were outside the repository.
+
+- Review-fix session (2026-10-02): `src/PdfiumWrapper.Processing/PdfProcessingPool.cs`, `PdfProcessingPool.Operations.cs`, `PdfWorkerHost.cs`, `Worker.cs`, `PendingJob.cs`; `src/PdfiumWrapper.Tests.Host/WorkerFaults.cs`; `src/PdfiumWrapper.Tests/Processing/PdfProcessingPoolTests.cs`; `AGENTS.md`, `ai/plans/plan-pdfium-concurrency.md`, `ai/current-state.md`.
+- Documentation session (2026-10-02): `docs/HIGH-THROUGHPUT-PROCESSING.md` (new section), `ai/current-state.md`.
 - Current verification session: `ai/current-state.md` only. Other working-tree edits were preserved.
 - Global skill installation session: `C:/Users/hamsm/.codex/skills/ai-pr-review/SKILL.md` (outside the repository), `ai/current-state.md`.
 - Current review session: `ai/current-state.md` only.
