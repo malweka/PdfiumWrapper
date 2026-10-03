@@ -2,7 +2,15 @@
 
 ## Current focus
 
-PR #21 (`feature/audit-low-fixes`): both Moderate review findings are fixed in `df2a304` and pushed (2026-10-03). `NativeText.ReadUtf16` drops only the final terminator (embedded U+0000 kept, which also fixes metadata values with an embedded NUL); `PdfPage` keys tracked wrappers by native handle (traversal of 10,000 objects 3.5 ms, 20,000 6.9 ms). 356/356 tests pass on win-x64. Awaiting CI and merge.
+Fix for the disposed-wrapper leak found by the PR #21 review (2026-10-03), branch `fix/remove-disposed-page-object` from `main` at `60f46eb`. `PdfPage.RemoveObject` passed a disposed wrapper's pointer to PDFium, took the object off the page and handed it to a wrapper whose `Dispose` does nothing, so the object was never destroyed (`LiveHandleCount` stayed 1 after the document was disposed) and a second live wrapper stayed registered for an object nobody owned. `RemoveObject` now throws `ObjectDisposedException` for a disposed wrapper and returns false unless the wrapper is the one the page tracks for that object. Regression tests in `PdfPageEditingTests`.
+
+### Earlier focus (2026-10-03, PR #21 merged)
+
+PR #21 is merged into `main` (merge commit `60f46eb`, 2026-10-03): audit findings AUD-018 to AUD-024 and the new package icon. All audit findings (AUD-001 to AUD-024) are now fixed on `main`. Open: run the full suite once on macOS; the disposed-wrapper handle leak is fixed on `fix/remove-disposed-page-object`.
+
+### Earlier focus (2026-10-03, PR #21 follow-up review)
+
+PR #21 follow-up review is complete (2026-10-03) at `aa7d162263dcb9e1481e475bffc08d9b04527ca1`, merge base `e9c11ac43d801e9fa99508e93d4602000aa86f0e`. Both Moderate findings are resolved by `df2a304`: page labels preserve embedded U+0000 and wrapper lookup is keyed by native handle. Verdict: no blocking findings in the follow-up changes. Independently verified 356/356 Windows tests and both original review probes; exact-commit Linux CI reports 356/356 tests, and all four platform build/package jobs pass. No implementation changes or GitHub comments were made.
 
 ### Earlier focus (2026-10-03, PR #21 review)
 
@@ -39,6 +47,15 @@ Follow-up verification of PR #15 commit `f3b15a1130567dc00f604c61b5aab9bc98a9e24
 Release 1 of `ai/plans/plan-pdfium-concurrency.md` is implemented on `feature/pdfium-concurrency-plan` (version 2.0.0); Release 2 remains deferred pending the owner's capacity/deployment inputs. The global `ai-pr-review` skill is installed and available.
 
 ## Completed
+
+### Latest task: verify PR #21 fixes (2026-10-03)
+
+- Reviewed only `c25ce1a..aa7d162`, including `NativeText.cs`, `PdfPage.cs`, the new regression tests, and directly relevant page-object removal/disposal callers. Rechecked repository rules and the concurrency-plan gate/lifetime contracts. Local and GitHub heads match; the working tree was clean before verification.
+- `NativeText.ReadUtf16` removes only the final terminator; the independent valid-PDF `ABC\0DEF` page-label reproduction now passes. The added tests cover the helper and actual PDF labels.
+- The dictionary uses native handles for lookup, checks wrapper identity before removal, and retains the tracked values for invalidation during page disposal. Existing and extended tests cover identity, removal, rewrapping and disposal.
+- Reran the original scaling probe: 10,000 objects 1.61 ms and 20,000 3.15 ms (previously 144 ms and 584 ms), confirming linear scaling. Both selected external review probes pass; the known pre-existing disposed-wrapper probe remains excluded from this PR review.
+- Independently ran `dotnet test src/PdfiumWrapper.Tests/PdfiumWrapper.Tests.csproj --no-restore`: 356 passed, 0 failed/skipped, win-x64 (3 m 24 s). CI run `37159292919` matches `aa7d162`; its Linux log confirms 356 passed, and all four platform build/package jobs succeed. No independent macOS runtime run was performed.
+- Verdict: no blocking findings in the follow-up changes. Updated only this required state record; no implementation edits, PR comments, pushes or merge actions.
 
 ### Latest task: PR #21 architecture review (2026-10-03)
 
@@ -298,7 +315,7 @@ Key measurements (one machine: i7-13700F, 24 logical processors, win-x64):
 
 ## In progress
 
-- PR #21: review findings fixed and pushed; waiting for CI and merge. The review's excluded "disposed-wrapper handle leak" (predates the PR) is not investigated yet; details are in the review probes under `%TEMP%/PdfiumPr21Review_aecfe6ef3ef9413fab2f8d530734f04c/`.
+- No active PR #21 review work remains: both findings are verified fixed and CI is green. The excluded pre-existing disposed-wrapper leak has not been investigated further; the original probes remain under `%TEMP%/PdfiumPr21Review_aecfe6ef3ef9413fab2f8d530734f04c/`.
 
 Historical:
 
@@ -312,7 +329,7 @@ Historical:
 
 ## Next recommended step
 
-- Fix `NativeText.ReadUtf16` (`src/PdfiumWrapper/NativeText.cs:36`) to preserve embedded NULs in page labels, replace the linear tracked-wrapper search in `PdfPage.GetObject` (`src/PdfiumWrapper/PdfPage.cs:460`) with a handle-keyed lookup, add the regression coverage, rerun the suite and lookup-scaling probe, then request a follow-up review of PR #21.
+- Owner can merge PR #21: the two review findings are verified fixed and exact-commit CI is green. Run the suite on macOS for independent runtime qualification.
 
 Historical:
 
@@ -333,7 +350,7 @@ Earlier list (items 1 and 2 still apply; item 3 is done):
 
 ## Blockers or open questions
 
-- PR #21 has two Moderate review findings (page-label truncation and quadratic object lookup); verdict is request changes. The review itself is complete.
+- PR #21 follow-up: both Moderate findings are resolved; no remaining review blocker in the fixes. Independent macOS runtime qualification remains outside this verification.
 
 - `PdfMetadata` is now read-only (its setters could never work). If writing metadata matters, it needs a PDF object writer outside PDFium.
 - Worker stderr is no longer reported as `WorkerStopped` events; consumers must use `PdfPoolEventKind.WorkerMessage`.
@@ -371,6 +388,8 @@ Earlier notes:Earlier notes:
 - Shell commands required escalation because the Windows sandbox shell failed with `windows sandbox: spawn setup refresh`.
 
 ## Recently changed files
+
+- PR #21 follow-up verification (2026-10-03): `ai/current-state.md` only; existing external review probes rerun against the updated assembly.
 
 - PR #21 review (2026-10-03): `ai/current-state.md` only. Implementation files were not changed; review probes and package artifacts are under `%TEMP%`.
 
