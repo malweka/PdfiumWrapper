@@ -420,6 +420,97 @@ public class PdfProcessingPoolTests : IDisposable
         Assert.Equal(new[] { 1, 1, 3, 3 }, results.Select(r => r.Value!.PageCount).OrderBy(p => p));
     }
 
+    /// <summary>
+    /// Names are reserved as the file system resolves them, not as written: on Windows "a", "a " and
+    /// "a." are one directory, and "..." would be the root's parent. Every document gets its own
+    /// directory directly under the root.
+    /// </summary>
+    [Fact]
+    public void BatchOutputPaths_AreDistinct_AndDirectlyUnderTheRoot()
+    {
+        string root = Path.Combine(_output, "root");
+        string[] names = { "a.pdf", "a .pdf", "a..pdf", "A.pdf", "...pdf", "..pdf", ".pdf", "", "a-2.pdf", "dir/b.pdf", "b.pdf", "x:y.pdf", "café.pdf", "café.pdf" };
+        var outputs = PdfProcessingPool.OutputsFor(root, names.Select(n => PdfInput.FromBytes(Array.Empty<byte>(), n)).ToArray());
+
+        Assert.Equal(names.Length, outputs.Distinct(StringComparer.OrdinalIgnoreCase).Count());
+        Assert.All(outputs, o =>
+        {
+            Assert.Equal(Path.GetFullPath(root), Path.GetDirectoryName(o));
+            Assert.Equal(o, Path.GetFullPath(o!));                       // nothing left for the file system to normalize
+            Assert.True(Path.GetFileName(o)!.IndexOfAny(Path.GetInvalidFileNameChars()) < 0, o);
+        });
+        Assert.Equal(Path.Combine(Path.GetFullPath(root), "a"), outputs[0]);
+        Assert.Equal(Path.Combine(Path.GetFullPath(root), "document"), outputs[1]);   // "a " ends in a space
+        Assert.Equal(Path.Combine(Path.GetFullPath(root), "A-2"), outputs[3]);        // "a" is taken, whatever the case
+    }
+
+    /// <summary>The same names through a real batch: each document's pages in its own directory, nothing outside the root.</summary>
+    [Fact]
+    public async Task Batch_NamesThatResolveAlike_NeverShareADirectory()
+    {
+        await using var pool = await CreateAsync(o => { o.MinWorkers = 2; o.MaxWorkers = 2; });
+        byte[] one = File.ReadAllBytes(PoolFixture.Input("doc-1-page.pdf"));
+        byte[] three = File.ReadAllBytes(PoolFixture.Input("doc-3-pages-with-comments.pdf"));
+        byte[] ten = File.ReadAllBytes(PoolFixture.Input("contract.pdf"));
+        var inputs = new[]
+        {
+            PdfInput.FromBytes(one, "a.pdf"),
+            PdfInput.FromBytes(three, "a .pdf"),
+            PdfInput.FromBytes(ten, "a..pdf"),
+            PdfInput.FromBytes(three, "...pdf"),
+            PdfInput.FromBytes(one, "A.pdf"),
+        };
+        string parent = Path.Combine(_output, "resolve");
+        string root = Path.Combine(parent, "out");
+
+        var results = new List<PdfJobResult<ImageFiles>>();
+        await foreach (var r in pool.ConvertToPngAsync(inputs, root, dpi: 20).WithCancellation(new CancellationTokenSource(PoolFixture.TestTimeout).Token))
+            results.Add(r);
+
+        Assert.Equal(5, results.Count);
+        Assert.All(results, r => Assert.True(r.IsSuccess, r.Error));
+        var directories = results.Select(r => Path.GetDirectoryName(r.Value!.Files[0])!).ToArray();
+        Assert.Equal(5, directories.Distinct(StringComparer.OrdinalIgnoreCase).Count());
+        foreach (var r in results)
+        {
+            string directory = Path.GetDirectoryName(r.Value!.Files[0])!;
+            Assert.Equal(root, Path.GetDirectoryName(directory));
+            Assert.Equal(r.Value.PageCount, Directory.GetFiles(directory, "*.png").Length);   // only this document's pages
+        }
+
+        Assert.Equal(new[] { 1, 1, 3, 3, 10 }, results.Select(r => r.Value!.PageCount).OrderBy(p => p));
+        Assert.Equal(new[] { "out" }, Directory.GetFileSystemEntries(parent).Select(p => Path.GetFileName(p)));
+    }
+
+    /// <summary>
+    /// Leaving a batch early cancels what it had submitted and stops submitting: no job keeps a
+    /// worker busy or writes output after the caller has gone.
+    /// </summary>
+    [Fact]
+    public async Task Batch_LeftEarly_CancelsItsJobs_AndSubmitsNoMore()
+    {
+        await using var pool = await CreateAsync(o => { o.MinWorkers = 1; o.MaxWorkers = 1; o.QueueCapacity = 4; });
+        var inputs = Enumerable.Repeat(PdfInput.FromFile(PoolFixture.Input("doc-1-page.pdf")), 200).ToArray();
+        string root = Path.Combine(_output, "early");
+
+        await foreach (var r in pool.ConvertToPngAsync(inputs, root, dpi: 20).WithCancellation(new CancellationTokenSource(PoolFixture.TestTimeout).Token))
+        {
+            Assert.True(r.IsSuccess, r.Error);
+            break;
+        }
+
+        await WaitUntilAsync(() => pool.QueuedJobs == 0 && pool.RunningJobs == 0, TimeSpan.FromSeconds(30));
+        var settled = pool.Statistics;
+        Assert.True(settled.JobsSubmitted <= 10, $"{settled.JobsSubmitted} jobs submitted with a bound of 5");
+        Assert.True(settled.JobsCancelled >= 1, "nothing was cancelled");
+        Assert.Equal(settled.JobsSubmitted, settled.JobsSucceeded + settled.JobsCancelled);
+
+        int directories = Directory.GetDirectories(root).Length;
+        await Task.Delay(1000);
+        Assert.Equal(settled.JobsSubmitted, pool.Statistics.JobsSubmitted);
+        Assert.Equal(directories, Directory.GetDirectories(root).Length);
+    }
+
     /// <summary>An image job that fails part-way leaves nothing: no pages already written, no temp file.</summary>
     [Fact]
     public async Task FailedImageJob_LeavesNoPartialOutput()

@@ -23,7 +23,18 @@ internal sealed class PendingJob
     public CancellationToken CallerToken { get; }
     public long SubmittedAt { get; }
     public long DispatchedAt { get; set; }
+    /// <summary>Attempts charged to this job; see <see cref="FreeRetries"/>.</summary>
     public int Attempts { get; set; }
+    /// <summary>
+    /// Attempts that ended through no identified fault of this job (its worker was killed for
+    /// another job, or crashed with several jobs on it) and were not charged. Capped at MaxAttempts.
+    /// </summary>
+    public int FreeRetries { get; set; }
+    /// <summary>
+    /// Set when the job was on a worker that crashed with several jobs on it: it runs alone on a
+    /// worker from then on, so a crash on its next attempt is its own.
+    /// </summary>
+    public bool RunAlone { get; set; }
     public Worker? Worker { get; set; }
     public CancellationTokenSource? AttemptTimeout { get; set; }
     /// <summary>Pages the worker reported staged for the current attempt (image jobs).</summary>

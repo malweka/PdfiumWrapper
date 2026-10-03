@@ -5,7 +5,12 @@ public enum PdfJobStatus
 {
     /// <summary>The job completed; <see cref="PdfJobResult{T}.Value"/> is set.</summary>
     Succeeded,
-    /// <summary>The document or the request was rejected (bad file, wrong password, missing output path). Not retried.</summary>
+    /// <summary>
+    /// The document or the request was rejected (bad file, wrong password, missing output path). Not
+    /// retried. Also reported when no worker could be started (see
+    /// <see cref="PdfPoolOptions.MaxConsecutiveStartFailures"/>) or the pool's dispatcher stopped on an
+    /// unexpected error; the error says which.
+    /// </summary>
     Failed,
     /// <summary>An attempt exceeded <see cref="PdfPoolOptions.JobTimeout"/>; the worker was killed. Reported after the last attempt.</summary>
     TimedOut,
@@ -27,7 +32,10 @@ public sealed record PdfJobTimings(TimeSpan Queued, TimeSpan Processing, TimeSpa
 /// <param name="Status">Final status.</param>
 /// <param name="Value">The operation's value when <paramref name="Status"/> is <see cref="PdfJobStatus.Succeeded"/>.</param>
 /// <param name="Error">The worker's exception type and message, or the pool's reason, when not succeeded.</param>
-/// <param name="Attempts">Attempts made, 1 unless a worker crashed or timed out.</param>
+/// <param name="Attempts">
+/// Attempts charged to the job: 1 unless its own worker crashed or it timed out, 0 if it never reached
+/// a worker. A run ended only by a neighbour on the same worker is not counted (see <see cref="PdfPoolOptions.MaxAttempts"/>).
+/// </param>
 /// <param name="WorkerPid">Process id of the worker that produced the result, or 0.</param>
 /// <param name="Timings">Queue and processing times.</param>
 public sealed record PdfJobResult<T>(

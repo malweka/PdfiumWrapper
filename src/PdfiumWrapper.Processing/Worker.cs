@@ -48,6 +48,21 @@ internal sealed class Worker : IAsyncDisposable
     /// <summary>Set once the pool has decided this worker goes away; no new jobs are dispatched to it.</summary>
     public bool Retiring { get; set; }
 
+    /// <summary>Set while a job that must run alone holds this worker; no other job is dispatched to it. Guarded by the pool's worker lock.</summary>
+    public bool Exclusive;
+
+    /// <summary>Retired for memory: shut down once its last job has finished. Guarded by the pool's worker lock.</summary>
+    public bool StopWhenDrained;
+
+    /// <summary>Set once the pool has decided to kill this worker. Guarded by the pool's worker lock.</summary>
+    public bool Killing;
+
+    /// <summary>
+    /// The job whose timeout or cancellation made the pool kill this worker, or 0. The other jobs
+    /// on it were bystanders. Guarded by the pool's worker lock.
+    /// </summary>
+    public long KilledFor;
+
     public static async Task<Worker> StartAsync(PdfPoolOptions options, Action<Worker, Frame> onFrame,
         Action<Worker, string> onStderr, Action<Worker> onExit, CancellationToken ct)
     {
@@ -63,36 +78,36 @@ internal sealed class Worker : IAsyncDisposable
         }
 
         var worker = new Worker(process, onFrame, onStderr, onExit) { Pid = process.Id, Slots = options.JobsPerWorker };
-        worker.Begin();
-
-        using var startTimeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
-        startTimeout.CancelAfter(options.WorkerStartTimeout);
+        bool ready = false;
         try
         {
-            worker.Hello = await worker._hello.Task.WaitAsync(startTimeout.Token).ConfigureAwait(false);
-        }
-        catch (OperationCanceledException)
-        {
-            // Whoever cancelled, the child must not outlive this call: nothing else references it.
-            await worker.KillAsync().ConfigureAwait(false);
-            if (ct.IsCancellationRequested)
-                throw;
-            throw new PdfPoolException($"Worker {worker.Pid} did not report ready within {options.WorkerStartTimeout}. " +
-                                       "If the worker is this executable, Main must call PdfWorkerHost.TryRun() first.");
-        }
-        catch (PdfPoolException)
-        {
-            await worker.KillAsync().ConfigureAwait(false);
-            throw;
-        }
+            worker.Begin();
 
-        if (worker.Hello.ProtocolVersion != Frame.ProtocolVersion)
-        {
-            await worker.KillAsync().ConfigureAwait(false);
-            throw new PdfPoolException($"Worker {worker.Pid} speaks protocol {worker.Hello.ProtocolVersion}; this pool speaks {Frame.ProtocolVersion}.");
-        }
+            using var startTimeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            startTimeout.CancelAfter(options.WorkerStartTimeout);
+            try
+            {
+                worker.Hello = await worker._hello.Task.WaitAsync(startTimeout.Token).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+            {
+                throw new PdfPoolException($"Worker {worker.Pid} did not report ready within {options.WorkerStartTimeout}. " +
+                                           "If the worker is this executable, Main must call PdfWorkerHost.TryRun() first.");
+            }
 
-        return worker;
+            if (worker.Hello.ProtocolVersion != Frame.ProtocolVersion)
+                throw new PdfPoolException($"Worker {worker.Pid} speaks protocol {worker.Hello.ProtocolVersion}; this pool speaks {Frame.ProtocolVersion}.");
+
+            ready = true;
+            return worker;
+        }
+        finally
+        {
+            // Whatever ended the start (cancelled, timed out, failed, or threw anywhere above), the
+            // child must not outlive this call: nothing else references it.
+            if (!ready)
+                await worker.KillAsync().ConfigureAwait(false);
+        }
     }
 
     private void Begin()

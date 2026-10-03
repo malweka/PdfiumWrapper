@@ -637,7 +637,7 @@ What it gives you over the patterns above:
 
 - **Parallel rendering.** Each worker is a separate process with its own PDFium, so workers render at the same time. The pool reaches the throughput of the replica table above from inside one application.
 - **Dynamic size.** Workers are added when every worker is busy and jobs are waiting (after `ScaleUpAfter`, 500 ms) and removed when idle (after `IdleTimeout`, 60 s), between `MinWorkers` and `MaxWorkers`. A burst scales up within seconds; quiet periods cost only `MinWorkers` of memory.
-- **Crash isolation.** A native abort on a damaged PDF kills one worker, which is replaced; the job is reported as `WorkerCrashed` (after a retry) and every other job proceeds. In-process, that abort would take the service down.
+- **Crash isolation.** A native abort on a damaged PDF kills one worker, which is replaced; the job is reported as `WorkerCrashed` (after a retry) and every other job proceeds. A job that shared the worker runs again without using one of its attempts. In-process, that abort would take the service down.
 - **Backpressure, timeouts, retries, cancellation**, and a typed API: `GetPageCountAsync`, `ConvertToPngAsync`, `ConvertToJpegAsync`, `ConvertToTiffAsync`, `ExtractTextAsync`, single or batch. See the [API reference](API-REFERENCE.md#pdfprocessingpool-pdfiumwrapperprocessing).
 
 What it costs: about 120 to 140 MB per worker on the mix above, and a few hundred milliseconds of process start when the pool grows.

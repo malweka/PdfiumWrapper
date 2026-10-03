@@ -8,8 +8,12 @@ namespace PdfiumWrapper.Tests.Host;
 /// <c>WorkerPath</c>) and the tests pass a fault through the worker environment:
 /// <c>PDFIUMWRAPPER_TEST_FAULT=crash|hang|garbage:&lt;substring of the input path&gt;</c>.
 /// A job whose input path contains the substring triggers the fault once per process.
-/// <c>crash-after-page-N:&lt;substring&gt;</c> crashes once page N of an image job is in place.
-/// <c>slow-start:&lt;milliseconds&gt;</c> delays the worker's ready report.
+/// <c>crash-after-page-N:&lt;substring&gt;</c> crashes once page N of an image job is in place;
+/// <c>hang-after-page-N:&lt;substring&gt;</c> hangs that job (not the worker's loop) there;
+/// <c>sleep-after-page-MS:&lt;substring&gt;</c> sleeps MS milliseconds after every page of such jobs.
+/// <c>slow-start:&lt;milliseconds&gt;</c> delays the worker's ready report;
+/// <c>fail-start-if-exists:&lt;path&gt;</c> makes the worker exit before reporting ready while that file exists.
+/// Several faults combine with <c>;</c>.
 /// </summary>
 internal static class WorkerFaults
 {
@@ -22,6 +26,23 @@ internal static class WorkerFaults
         if (string.IsNullOrEmpty(spec))
             return null;
 
+        WorkerHooks? combined = null;
+        foreach (var one in spec.Split(';', StringSplitOptions.RemoveEmptyEntries))
+        {
+            var hooks = FromSpec(one);
+            combined = combined == null ? hooks : new WorkerHooks
+            {
+                BeforeHello = combined.BeforeHello + hooks.BeforeHello,
+                BeforeJob = combined.BeforeJob + hooks.BeforeJob,
+                AfterPage = combined.AfterPage + hooks.AfterPage,
+            };
+        }
+
+        return combined;
+    }
+
+    private static WorkerHooks FromSpec(string spec)
+    {
         int colon = spec.IndexOf(':');
         string fault = colon < 0 ? spec : spec[..colon];
         string match = colon < 0 ? "" : spec[(colon + 1)..];
@@ -42,6 +63,19 @@ internal static class WorkerFaults
             };
         }
 
+        if (fault == "fail-start-if-exists")
+        {
+            // A worker that cannot start, switched on by the test after the pool exists.
+            return new WorkerHooks
+            {
+                BeforeHello = () =>
+                {
+                    if (File.Exists(match))
+                        Environment.Exit(4);
+                },
+            };
+        }
+
         if (fault.StartsWith("crash-after-page-", StringComparison.Ordinal))
         {
             int page = int.Parse(fault["crash-after-page-".Length..]);
@@ -51,6 +85,35 @@ internal static class WorkerFaults
                 {
                     if (done == page && job.Input.Contains(match, StringComparison.OrdinalIgnoreCase))
                         Environment.FailFast("test fault: crash after page " + page);
+                },
+            };
+        }
+
+        if (fault.StartsWith("hang-after-page-", StringComparison.Ordinal))
+        {
+            // Hangs the job on its own thread: the worker's loop keeps taking other jobs, and the
+            // job ignores cancellation, like a page that never finishes rendering.
+            int page = int.Parse(fault["hang-after-page-".Length..]);
+            return new WorkerHooks
+            {
+                AfterPage = (job, done) =>
+                {
+                    if (done == page && job.Input.Contains(match, StringComparison.OrdinalIgnoreCase))
+                        Thread.Sleep(Timeout.Infinite);
+                },
+            };
+        }
+
+        if (fault.StartsWith("sleep-after-page-", StringComparison.Ordinal))
+        {
+            // A slow job that still finishes: every page of it takes at least this long.
+            int milliseconds = int.Parse(fault["sleep-after-page-".Length..]);
+            return new WorkerHooks
+            {
+                AfterPage = (job, _) =>
+                {
+                    if (job.Input.Contains(match, StringComparison.OrdinalIgnoreCase))
+                        Thread.Sleep(milliseconds);
                 },
             };
         }

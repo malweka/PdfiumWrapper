@@ -24,7 +24,28 @@ internal static class PoolFixture
         return options;
     }
 
+    /// <summary>
+    /// One worker with two slots, the default <see cref="PdfPoolOptions.JobsPerWorker"/>: every two
+    /// jobs in flight share a process, for tests of what one job's fault does to its neighbour.
+    /// </summary>
+    public static PdfPoolOptions SharedWorkerOptions(Action<PdfPoolOptions>? configure = null)
+        => Options(o =>
+        {
+            o.MinWorkers = 1;
+            o.MaxWorkers = 1;
+            o.JobsPerWorker = 2;
+            configure?.Invoke(o);
+        });
+
     public static string Input(string fileName) => HostRunner.Input(fileName);
+
+    /// <summary>A copy of a test document whose path contains <paramref name="name"/>, for faults that match on the input path.</summary>
+    public static string CopyAs(string fileName, string directory, string name)
+    {
+        string path = Path.Combine(directory, name + ".pdf");
+        File.Copy(Input(fileName), path);
+        return path;
+    }
 
     public static string TempDirectory()
     {
