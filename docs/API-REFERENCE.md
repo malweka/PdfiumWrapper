@@ -1552,7 +1552,7 @@ Validated when the pool is created (`ArgumentOutOfRangeException`, or `PdfPoolEx
 | Property | Default | Description |
 |----------|---------|-------------|
 | `MinWorkers` | 1 | Workers kept alive and warm. Started when the pool is created |
-| `MaxWorkers` | `DefaultMaxWorkers` (half the logical processors, at least 1) | Upper bound. A worker is one core, so beyond the fast cores extra workers add memory and little throughput |
+| `MaxWorkers` | `DefaultMaxWorkers` (half the logical processors, at least 1) | Upper bound on worker processes, including a worker retired for memory that is still finishing its jobs (its replacement starts when it exits). A worker is one core, so beyond the fast cores extra workers add memory and little throughput |
 | `JobsPerWorker` | 2 | Jobs a worker runs at once. PDFium serializes rendering inside a process, so a second job lets one document encode and write while the other renders. More mostly adds memory (one rendered page per job in flight) |
 | `ScaleUpAfter` | 500 ms | A worker is added when every slot of every worker has been busy and jobs have been waiting for this long. A burst reaches `MaxWorkers` in seconds; a single stray job never starts a process |
 | `IdleTimeout` | 60 s | A worker idle for this long is stopped, down to `MinWorkers` |

@@ -45,6 +45,8 @@ public sealed partial class PdfProcessingPool : IAsyncDisposable
     private bool _headWaitsForEmptyWorker;
     // Set when the dispatcher has stopped on an unexpected error: every job from then on is Failed with it.
     private string? _fault;
+    // FailAll's kill-clean-fail sequence for the jobs that were in flight; awaited by DisposeAsync.
+    private Task _failing = Task.CompletedTask;
     private bool _disposed;
 
     /// <summary>Creates the pool and starts <see cref="PdfPoolOptions.MinWorkers"/> workers, waiting until they are ready.</summary>
@@ -265,12 +267,15 @@ public sealed partial class PdfProcessingPool : IAsyncDisposable
                 {
                     await running.SendAsync(Frame.ForCancel(job.Id), CancellationToken.None).ConfigureAwait(false);
                     await Task.Delay(CancelGrace).ConfigureAwait(false);
-                    if (!job.Completion.Task.IsCompleted)
+                    // Taken out of flight first, so the worker's exit does not run it again. Its result
+                    // is given only once the worker is dead and its staged pages are gone: a caller
+                    // never holds a Cancelled result while a worker can still write its output.
+                    if (TryEndAttempt(job, running))
                     {
-                        Finish(job, PdfJobStatus.Cancelled, "cancelled; the worker did not stop in time and was replaced", new ResultPayload { JobId = job.Id, Status = ResultStatus.Cancelled });
                         // The other jobs on this worker are bystanders: they run again without using an attempt.
                         await KillWorkerAsync(running, PdfPoolEventKind.WorkerStopped, "killed after cancel grace", job.Id).ConfigureAwait(false);
                         RemovePartialOutput(job);
+                        Finish(job, PdfJobStatus.Cancelled, "cancelled; the worker did not stop in time and was replaced", new ResultPayload { JobId = job.Id, Status = ResultStatus.Cancelled });
                     }
                 }
                 catch (Exception)
@@ -400,20 +405,38 @@ public sealed partial class PdfProcessingPool : IAsyncDisposable
             Finish(waiting, PdfJobStatus.Failed, reason, new ResultPayload { JobId = waiting.Id, Status = ResultStatus.Failed, Error = reason });
         }
 
-        var inFlight = _inFlight.Values.ToArray();
-        foreach (var job in inFlight)
-            Finish(job, PdfJobStatus.Failed, reason, new ResultPayload { JobId = job.Id, Status = ResultStatus.Failed, Error = reason });
-
+        // Jobs in flight are taken out of every ordinary completion path (result, timeout, worker
+        // exit) and failed only once their workers are dead and what they staged is removed, so no
+        // caller holds a Failed result while a worker can still write its output. DisposeAsync waits
+        // for this.
+        var inFlight = new List<PendingJob>();
         Worker[] workers;
         lock (_workersLock)
-            workers = _workers.ToArray();
-
-        _ = Task.Run(async () =>
         {
-            await Task.WhenAll(workers.Select(w => KillWorkerAsync(w, PdfPoolEventKind.WorkerStopped, "the dispatcher stopped"))).ConfigureAwait(false);
-            foreach (var job in inFlight)
-                RemovePartialOutput(job);
-        });
+            foreach (var job in _inFlight.Values.ToArray())
+            {
+                if (_inFlight.TryRemove(KeyValuePair.Create(job.Id, job)))
+                    inFlight.Add(job);
+            }
+
+            workers = _workers.ToArray();
+        }
+
+        Volatile.Write(ref _failing, Task.Run(async () =>
+        {
+            try
+            {
+                await Task.WhenAll(workers.Select(w => KillWorkerAsync(w, PdfPoolEventKind.WorkerStopped, "the dispatcher stopped"))).ConfigureAwait(false);
+            }
+            finally
+            {
+                foreach (var job in inFlight)
+                {
+                    RemovePartialOutput(job);
+                    Finish(job, PdfJobStatus.Failed, reason, new ResultPayload { JobId = job.Id, Status = ResultStatus.Failed, Error = reason });
+                }
+            }
+        }));
     }
 
     /// <summary>Waits until a retry or a queued job is available. Returns false when both queues are closed.</summary>
@@ -991,7 +1014,14 @@ public sealed partial class PdfProcessingPool : IAsyncDisposable
 
         int missing;
         lock (_workersLock)
-            missing = _options.MinWorkers - (_workers.Count(w => !w.Retiring) + _startingWorkers);
+        {
+            // MinWorkers counts workers that take jobs; MaxWorkers counts processes, including
+            // retirees still finishing their jobs. A replacement waits for a retiree to go if
+            // starting it now would exceed MaxWorkers; the retiree's exit calls this again.
+            int processes = _workers.Count + _startingWorkers;
+            missing = Math.Min(_options.MinWorkers - (_workers.Count(w => !w.Retiring) + _startingWorkers),
+                _options.MaxWorkers - processes);
+        }
 
         for (int i = 0; i < missing; i++)
             _ = StartWorkerAsync(PdfPoolEventKind.WorkerStarting, "replacing a lost worker").ContinueWith(_ => { }, TaskContinuationOptions.OnlyOnFaulted);
@@ -1024,6 +1054,8 @@ public sealed partial class PdfProcessingPool : IAsyncDisposable
         lock (_workersLock)
         {
             int alive = _workers.Count(w => !w.Retiring) + _startingWorkers;
+            // Retirees still draining are processes too: MaxWorkers bounds those, not only workers taking jobs.
+            int processes = _workers.Count + _startingWorkers;
             int freeSlots = _workers.Where(w => !w.Retiring && !w.Exclusive).Sum(w => w.Slots - w.InUse);
             // A job that must run alone needs an empty worker, not a free slot: while it waits at the
             // head with every worker partly busy, nothing is dispatched, so the pool is as stuck as
@@ -1036,7 +1068,7 @@ public sealed partial class PdfProcessingPool : IAsyncDisposable
             {
                 if (_allBusySince == 0)
                     _allBusySince = now;
-                if (alive < _options.MaxWorkers && Stopwatch.GetElapsedTime(_allBusySince, now) >= _options.ScaleUpAfter)
+                if (processes < _options.MaxWorkers && Stopwatch.GetElapsedTime(_allBusySince, now) >= _options.ScaleUpAfter)
                 {
                     startOne = true;
                     _allBusySince = 0;
@@ -1105,6 +1137,7 @@ public sealed partial class PdfProcessingPool : IAsyncDisposable
 
         await Task.WhenAny(_dispatcher, Task.Delay(1000)).ConfigureAwait(false);
         await Task.WhenAny(_sizer, Task.Delay(1000)).ConfigureAwait(false);
+        await Volatile.Read(ref _failing).ConfigureAwait(false);
 
         // Workers still starting are cancelled by the shutdown token and killed by Worker.StartAsync;
         // wait for that so no child outlives the pool and no start touches a disposed token source.

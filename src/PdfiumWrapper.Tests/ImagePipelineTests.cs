@@ -480,7 +480,31 @@ public class ImagePipelineTests : IDisposable
     }
 
     /// <summary>One 200 x 200 page whose /Thumb is an unfiltered image of the given colour space.</summary>
-    private static byte[] BuildPdfWithThumbnail(string colorSpace, int width, int height, byte[] samples)
+    [Fact]
+    public void HasEmbeddedThumbnail_MeasuresTheStoredStream()
+    {
+        // A 64 MiB thumbnail stored as a few dozen KB of Flate data. The presence check holds the
+        // process-wide gate, so it measures the stored stream instead of inflating it. The cost
+        // difference (about 45 ms per check when inflated) is not asserted here; the results are.
+        byte[] compressed;
+        using (var buffer = new MemoryStream())
+        {
+            using (var zlib = new System.IO.Compression.ZLibStream(buffer, System.IO.Compression.CompressionLevel.SmallestSize, leaveOpen: true))
+                zlib.Write(new byte[64 * 1024 * 1024]);
+            compressed = buffer.ToArray();
+        }
+
+        using var doc = new PdfDocument(BuildPdfWithThumbnail("/DeviceGray", 8192, 8192, compressed, " /Filter /FlateDecode"));
+        using var page = doc.GetPage(0);
+        Assert.True(page.HasEmbeddedThumbnail);
+
+        // A filter PDFium cannot run is still a thumbnail that is present
+        using var undecodable = new PdfDocument(BuildPdfWithThumbnail("/DeviceGray", 3, 2, [1, 2, 3, 4, 5, 6], " /Filter /NoSuchDecode"));
+        using var undecodablePage = undecodable.GetPage(0);
+        Assert.True(undecodablePage.HasEmbeddedThumbnail);
+    }
+
+    private static byte[] BuildPdfWithThumbnail(string colorSpace, int width, int height, byte[] samples, string filter = "")
     {
         var output = new MemoryStream();
         var offsets = new List<long>();
@@ -505,7 +529,7 @@ public class ImagePipelineTests : IDisposable
         Object("<< /Type /Pages /MediaBox [0 0 200 200] /Count 1 /Kids [3 0 R] >>");
         Object("<< /Type /Page /Parent 2 0 R /Contents 4 0 R /Thumb 5 0 R >>");
         Object("<< /Length 0 >>", Array.Empty<byte>());
-        Object($"<< /Width {width} /Height {height} /BitsPerComponent 8 /ColorSpace {colorSpace} /Length {samples.Length} >>", samples);
+        Object($"<< /Width {width} /Height {height} /BitsPerComponent 8 /ColorSpace {colorSpace}{filter} /Length {samples.Length} >>", samples);
 
         long xref = output.Position;
         Write($"xref\n0 {offsets.Count + 1}\n0000000000 65535 f \n");

@@ -213,8 +213,9 @@ public class PdfPage : IDisposable
     /// Whether the page has an embedded thumbnail (a <c>/Thumb</c> image with data).
     /// </summary>
     /// <remarks>
-    /// This only measures the thumbnail's stream; it does not decode the image. A thumbnail that
-    /// is present but damaged reports true here while <see cref="GetEmbeddedThumbnail"/> returns null.
+    /// This only measures the thumbnail's stream as stored; it neither decompresses nor decodes it,
+    /// so a crafted thumbnail cannot make the check expensive. A thumbnail that is present but
+    /// damaged reports true here while <see cref="GetEmbeddedThumbnail"/> returns null.
     /// </remarks>
     public bool HasEmbeddedThumbnail
     {
@@ -223,7 +224,7 @@ public class PdfPage : IDisposable
             using var _ = PdfiumRuntime.Enter();
             ThrowIfDisposed();
 
-            return PDFium.FPDFPage_GetDecodedThumbnailData(_page, IntPtr.Zero, default).Value != 0;
+            return PDFium.FPDFPage_GetRawThumbnailData(_page, IntPtr.Zero, default).Value != 0;
         }
     }
 

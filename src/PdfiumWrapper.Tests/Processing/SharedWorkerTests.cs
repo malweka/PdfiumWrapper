@@ -251,6 +251,100 @@ public class SharedWorkerTests : IDisposable
         Assert.NotEqual(quick.WorkerPid, next.WorkerPid);
     }
 
+    /// <summary>
+    /// MaxWorkers bounds processes, and a worker retired for memory is one until it has drained:
+    /// jobs that arrive meanwhile wait for it to go instead of starting a second process.
+    /// </summary>
+    [Fact]
+    public async Task MemoryRetirement_NeverExceedsMaxWorkers()
+    {
+        string neighbourInput = PoolFixture.CopyAs("contract.pdf", _output, "held-neighbour");
+        string neighbourDirectory = Path.Combine(_output, "neighbour");
+
+        await using var pool = await CreateAsync(o =>
+        {
+            o.MaxAttempts = 1;
+            o.MaxWorkerMemoryBytes = 1;    // every worker is over the limit after its first job
+            o.WorkerEnvironment["PDFIUMWRAPPER_TEST_FAULT"] = "pause-while-marked:held-neighbour";
+        });
+
+        Hold(neighbourInput);
+        try
+        {
+            var neighbour = pool.ConvertToPngAsync(neighbourInput, neighbourDirectory, dpi: 20);
+            await WaitForStagedPageAsync(neighbourDirectory);
+            var quick = await pool.GetPageCountAsync(PoolFixture.Input("doc-1-page.pdf")).WaitAsync(PoolFixture.TestTimeout);
+            Assert.Equal(1, quick.Value);
+            await WaitUntilAsync(() => Events(PdfPoolEventKind.WorkerRetiredForMemory).Length > 0, TimeSpan.FromSeconds(10));
+
+            // Work arrives while the retiree drains; give the sizer many times ScaleUpAfter to (wrongly) add a process
+            var more = Enumerable.Range(0, 3).Select(_ => pool.GetPageCountAsync(PoolFixture.Input("doc-1-page.pdf"))).ToArray();
+            int most = 0;
+            var watch = Stopwatch.StartNew();
+            while (watch.Elapsed < TimeSpan.FromSeconds(2))
+            {
+                most = Math.Max(most, pool.Workers);
+                await Task.Delay(20);
+            }
+
+            Release(neighbourInput);
+            var neighbourResult = await neighbour.WaitAsync(PoolFixture.TestTimeout);
+            var results = await Task.WhenAll(more).WaitAsync(PoolFixture.TestTimeout);
+
+            Assert.Equal(1, most);
+            Assert.True(neighbourResult.IsSuccess, $"{neighbourResult.Status}: {neighbourResult.Error}");
+            Assert.All(results, r => Assert.Equal(1, r.Value));
+            Assert.All(results, r => Assert.NotEqual(quick.WorkerPid, r.WorkerPid));   // served by the replacement
+            Assert.Empty(Events(PdfPoolEventKind.ScaledUp));
+        }
+        finally
+        {
+            Release(neighbourInput);
+        }
+    }
+
+    /// <summary>
+    /// When the dispatcher dies, a job running on a worker is failed only after that worker is dead
+    /// and what the job staged is gone: the caller never holds Failed while its output can still change.
+    /// </summary>
+    [Fact]
+    public async Task DispatcherFailure_FailsARunningJobOnlyAfterItsWorkerAndOutputAreGone()
+    {
+        string heldInput = PoolFixture.CopyAs("contract.pdf", _output, "held-job");
+        string heldDirectory = Path.Combine(_output, "held");
+
+        await using var pool = await CreateAsync(o =>
+        {
+            o.WorkerEnvironment["PDFIUMWRAPPER_TEST_FAULT"] = "pause-while-marked:held-job";
+        });
+
+        Hold(heldInput);
+        try
+        {
+            var held = pool.ConvertToPngAsync(heldInput, heldDirectory, dpi: 20);
+            await WaitForStagedPageAsync(heldDirectory);
+            int pid = Events(PdfPoolEventKind.JobDispatched).Single().WorkerPid;
+
+            // The next dispatch, onto the same worker's second slot, kills the dispatcher.
+            pool.DispatchHookForTests = _ => throw new InvalidOperationException("injected dispatcher failure");
+            var trigger = pool.GetPageCountAsync(PoolFixture.Input("doc-1-page.pdf"));
+            var result = await held.WaitAsync(PoolFixture.TestTimeout);
+
+            // Checked as soon as the result is in, before anything else can catch up
+            bool stillRunning = IsRunning(pid);
+            string[] left = Directory.Exists(heldDirectory) ? Directory.GetFiles(heldDirectory) : [];
+            Assert.Equal(PdfJobStatus.Failed, result.Status);
+            Assert.Contains("injected dispatcher failure", result.Error);
+            Assert.False(stillRunning, "the worker was still running when the job was reported failed");
+            Assert.Empty(left);
+            Assert.Equal(PdfJobStatus.Failed, (await trigger.WaitAsync(PoolFixture.TestTimeout)).Status);
+        }
+        finally
+        {
+            Release(heldInput);
+        }
+    }
+
     /// <summary>Holds jobs on this input after each page (fault <c>pause-while-marked</c>) until <see cref="Release"/>.</summary>
     private static void Hold(string input) => File.WriteAllText(input + ".pause", "");
 
