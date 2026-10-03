@@ -166,6 +166,7 @@ See [Best Practices](docs/BEST-PRACTICES.md) and [High-Throughput Processing](do
 - A document owns the forms returned by `GetForm()` and the page objects removed from its pages; disposing the document disposes them.
 - `PdfImageObject.GetBitmap()` and `GetRenderedBitmap()` return managed BGRA pixels (`RawBitmap?`) instead of a native bitmap handle. `GetRenderedBitmap` takes a `PdfPage` instead of a page handle. `PdfImageObject.SetBitmap` and `SetImage`, which took native handles, are `internal`; add images with `PdfPage.AddImage`.
 - `StreamImageBytesAsync` and `StreamJpegBytesAsync` return without waiting for the native gate; an empty document is reported when enumeration starts rather than by the call.
+- TIFF output (`SaveAsTiff`, `SaveAsTiffAsync`) renders pages in 8-bit gray instead of 32-bit color. It is faster and uses a quarter of the memory per page. Text is anti-aliased slightly differently at that depth, so TIFF files are not pixel-identical to those from 1.x: on text pages roughly 1-2% of pixels differ, at glyph edges.
 
 ## License
 

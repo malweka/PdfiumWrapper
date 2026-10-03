@@ -971,6 +971,59 @@ public class PdfDocumentTests : IDisposable
         Assert.True(fileInfo.Length > 0);
     }
 
+    /// <summary>
+    /// TIFF pages are rendered into an 8-bit gray bitmap. The decoded TIFF must show the same
+    /// page as the 32-bit render: same size, and the same amount of ink within a small tolerance
+    /// (the two depths anti-alias glyph edges differently).
+    /// </summary>
+    [Theory]
+    [InlineData(TiffColorMode.Bilevel)]
+    [InlineData(TiffColorMode.Grayscale)]
+    public void SaveAsTiff_Content_ShouldMatchTheBgraRender(TiffColorMode colorMode)
+    {
+        // Arrange
+        const int dpi = 100;
+        using var doc = new PdfDocument(ContractPdfPath);
+        var reference = doc.RenderPages(dpi);
+        var outputPath = Path.Combine(CreateTempDirectory(), "content.tiff");
+
+        // Act
+        doc.SaveAsTiff(outputPath, dpi, colorMode);
+
+        // Assert
+        using var pages = new ImageMagick.MagickImageCollection(outputPath);
+        Assert.Equal(doc.PageCount, pages.Count);
+
+        for (int i = 0; i < pages.Count; i++)
+        {
+            var expected = reference[i];
+            Assert.Equal((uint)expected.Width, pages[i].Width);
+            Assert.Equal((uint)expected.Height, pages[i].Height);
+
+            // Dark pixels in the 32-bit render (BT.601 luminance below mid-gray).
+            long expectedDark = 0;
+            for (int y = 0; y < expected.Height; y++)
+            {
+                int row = y * expected.Stride;
+                for (int x = 0; x < expected.Width; x++)
+                {
+                    int p = row + x * 4;
+                    int luminance = (expected.Pixels[p + 2] * 299 + expected.Pixels[p + 1] * 587 + expected.Pixels[p] * 114) / 1000;
+                    if (luminance < 128) expectedDark++;
+                }
+            }
+
+            using var pixels = pages[i].GetPixels();
+            byte[] gray = pixels.ToByteArray(0, 0, pages[i].Width, pages[i].Height, "R")!;
+            long actualDark = gray.LongCount(v => v < 128);
+
+            Assert.True(expectedDark > 0, $"page {i} of the reference render is blank");
+            double ratio = (double)actualDark / expectedDark;
+            Assert.True(ratio is > 0.80 and < 1.25,
+                $"page {i}: {actualDark} dark pixels in the TIFF against {expectedDark} in the BGRA render (ratio {ratio:F2})");
+        }
+    }
+
     [Fact]
     public void SaveAsTiff_Grayscale_ShouldCreateValidFile()
     {

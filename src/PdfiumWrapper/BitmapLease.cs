@@ -15,14 +15,18 @@ internal sealed class BitmapLease : IDisposable, IAsyncDisposable
     public int Height { get; }
     public int Stride { get; }
 
+    /// <summary>True for an 8-bit gray bitmap (one byte per pixel); false for 32-bit BGRA.</summary>
+    public bool IsGray { get; }
+
     /// <summary>Takes ownership of <paramref name="handle"/>. The gate must be held.</summary>
-    internal BitmapLease(IntPtr handle, IntPtr buffer, int width, int height, int stride)
+    internal BitmapLease(IntPtr handle, IntPtr buffer, int width, int height, int stride, bool isGray = false)
     {
         Handle = handle;
         Buffer = buffer;
         Width = width;
         Height = height;
         Stride = stride;
+        IsGray = isGray;
         PdfiumRuntime.HandleOpened();
     }
 

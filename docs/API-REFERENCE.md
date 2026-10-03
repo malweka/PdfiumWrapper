@@ -308,6 +308,8 @@ await foreach (var bytes in document.StreamImageBytesAsync(ImageFormat.Jpeg, 85,
 
 Saves all pages as a single multi-page TIFF file using a direct PDFium-to-libtiff pipeline.
 
+Pages are rendered in 8-bit gray, since the output is bilevel or grayscale either way. **Changed in 2.0:** 1.x rendered 32-bit color and converted it. PDFium smooths text slightly differently at the two depths, so the files are not pixel-identical to 1.x output (roughly 1-2% of pixels on a text page, at glyph edges).
+
 ```csharp
 // Bilevel (1-bit CCITT G4) — ideal for scanned documents
 document.SaveAsTiff("output.tiff", dpi: 200);
