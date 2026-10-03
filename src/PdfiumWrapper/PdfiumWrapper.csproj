@@ -82,18 +82,26 @@
 		<None Include="../../icon.png" Pack="true" PackagePath="\" />
 	</ItemGroup>
 
-	<!-- Generate runtime.json mapping each RID to its PdfiumWrapper.runtime.<rid>
-	     package at the current version, and pack it at the package root. NuGet uses
-	     this to pull ONLY the consumer's-platform native package at restore time. -->
-	<Target Name="GenerateRuntimeJson" BeforeTargets="GenerateNuspec;_GetPackageFiles;Build">
-		<PropertyGroup>
-			<_RuntimeJson>{ &quot;runtimes&quot;: { &quot;win-x64&quot;: { &quot;PdfiumWrapper&quot;: { &quot;PdfiumWrapper.runtime.win-x64&quot;: &quot;$(Version)&quot; } }, &quot;linux-x64&quot;: { &quot;PdfiumWrapper&quot;: { &quot;PdfiumWrapper.runtime.linux-x64&quot;: &quot;$(Version)&quot; } }, &quot;osx-x64&quot;: { &quot;PdfiumWrapper&quot;: { &quot;PdfiumWrapper.runtime.osx-x64&quot;: &quot;$(Version)&quot; } }, &quot;osx-arm64&quot;: { &quot;PdfiumWrapper&quot;: { &quot;PdfiumWrapper.runtime.osx-arm64&quot;: &quot;$(Version)&quot; } } } }</_RuntimeJson>
-		</PropertyGroup>
-		<WriteLinesToFile File="$(IntermediateOutputPath)runtime.json" Lines="$(_RuntimeJson)" Overwrite="true" />
-	</Target>
-	<ItemGroup>
-		<None Include="$(IntermediateOutputPath)runtime.json" Pack="true" PackagePath="\" Visible="false" />
+	<!--
+		Native binaries ship in the four PdfiumWrapper.runtime.<rid> packages, which this package
+		depends on at exactly its own version. Each puts its files under runtimes/<rid>/native, so a
+		portable build (no RuntimeIdentifier) gets every platform and the host picks the right one,
+		and a RID-specific publish copies only its own. A runtime.json mapping was used before, but
+		NuGet applies it only to RID-specific restores, so portable apps got no natives at all.
+
+		The runtime packages exist only once the release workflow has packed them, so the references
+		apply only when PackRuntimeDependencies=true (restored from that workflow's artifacts). Any
+		other pack of this project produces a package without natives, for inspection only.
+	-->
+	<ItemGroup Condition="'$(PackRuntimeDependencies)' == 'true'">
+		<PackageReference Include="PdfiumWrapper.runtime.win-x64" Version="[$(Version)]" />
+		<PackageReference Include="PdfiumWrapper.runtime.linux-x64" Version="[$(Version)]" />
+		<PackageReference Include="PdfiumWrapper.runtime.osx-x64" Version="[$(Version)]" />
+		<PackageReference Include="PdfiumWrapper.runtime.osx-arm64" Version="[$(Version)]" />
 	</ItemGroup>
+	<Target Name="WarnPackWithoutNatives" BeforeTargets="GenerateNuspec" Condition="'$(PackRuntimeDependencies)' != 'true'">
+		<Warning Text="Packing PdfiumWrapper without its native runtime packages (PackRuntimeDependencies is not true): this package cannot run. Only the release workflow produces a usable package." />
+	</Target>
 
 	<!-- Native libs copied to output for local dev/test only (Pack=false; the
 	     PdfiumWrapper.runtime.<rid> packages carry the natives in the published package). -->
