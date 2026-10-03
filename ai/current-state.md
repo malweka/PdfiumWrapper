@@ -2,6 +2,14 @@
 
 ## Current focus
 
+PR #21 (`feature/audit-low-fixes`): both Moderate review findings are fixed in `df2a304` and pushed (2026-10-03). `NativeText.ReadUtf16` drops only the final terminator (embedded U+0000 kept, which also fixes metadata values with an embedded NUL); `PdfPage` keys tracked wrappers by native handle (traversal of 10,000 objects 3.5 ms, 20,000 6.9 ms). 356/356 tests pass on win-x64. Awaiting CI and merge.
+
+### Earlier focus (2026-10-03, PR #21 review)
+
+PR #21 architecture review is complete (2026-10-03), using the `ai-pr-review` skill. Reviewed `feature/audit-low-fixes` at `c25ce1acb218cd61076e13c3f91b35456e13bea7`, merge base `e9c11ac43d801e9fa99508e93d4602000aa86f0e`. Verdict: request changes for two Moderate findings: the shared UTF-16 reader now truncates page labels at an embedded NUL, and `PdfPage.GetObject` searches all tracked wrappers per lookup, making page-object traversal quadratic. No implementation fixes or GitHub comments were made.
+
+### Earlier focus (2026-10-03, audit low fixes)
+
 Low findings of the technical audit (`ai/tmp/technical-audit-2026-10-03.md`, AUD-018 to AUD-024) and the new logo (2026-10-03), branch `feature/audit-low-fixes` from `main` at `e9c11ac` (after PRs 19 and 20, which fixed AUD-001 to AUD-017). Committed locally, not pushed; no PR yet. 354 tests pass on win-x64; not run on Linux or macOS.
 
 ### Earlier focus (2026-10-03, .NET 10 upgrade, merged as PR 19)
@@ -32,7 +40,17 @@ Release 1 of `ai/plans/plan-pdfium-concurrency.md` is implemented on `feature/pd
 
 ## Completed
 
-### Latest task: audit low findings and package icon (2026-10-03, `feature/audit-low-fixes`)
+### Latest task: PR #21 architecture review (2026-10-03)
+
+- Read the PR body/diff, `AGENTS.md`, `README.md`, current-state record, technical audit AUD-018 to AUD-024, and the relevant concurrency-plan contracts. Inspected native imports against local 8076 headers, changed wrapper ownership/cancellation paths, worker lifecycle/text-result cleanup, public-boundary tests, documentation and package configuration.
+- Independently ran `dotnet test src/PdfiumWrapper.Tests/PdfiumWrapper.Tests.csproj --no-restore`: 354/354 tests pass on win-x64. GitHub reports the Linux build/test job and all four platform build/package jobs successful.
+- Packed Processing and win-x64 runtime packages into the temporary review directory. Confirmed the Processing dependency is exactly `[2.0.0]` and both packages contain their declared `icon.png`.
+- Reproduced a page-label regression with a valid UTF-16 prefix `ABC\0DEF`: PDFium returns the whole value, but `NativeText.ReadUtf16` returns `ABC` (`NativeText.cs:36`). The previous `GetPageLabel` used the returned length minus its final terminator. Fix: remove only the trailing terminator, preserving embedded NULs; add a page-label regression.
+- Measured quadratic wrapper lookup (`PdfPage.cs:460`): traversing 10,000 tracked rectangle objects took 144 ms, and 20,000 took 584 ms; direct indexed native access took 0.58 ms and 1.22 ms respectively. Fix: index tracked wrappers by native handle while retaining disposal/removal ownership behavior, and remeasure traversal scaling.
+- A disposed-wrapper handle leak and metadata NUL truncation were reproduced but excluded because their root behavior predates this PR. A scratch-project restore initially failed on sandbox NuGet TLS; restoring from the existing package cache succeeded. Scratch xUnit tests and packed artifacts are outside the repository at `%TEMP%/PdfiumPr21Review_aecfe6ef3ef9413fab2f8d530734f04c/`.
+- Local review probes ran on Windows only; macOS runtime behavior was not independently verified. Only this required state file was edited in the repository.
+
+### Earlier task: audit low findings and package icon (2026-10-03, `feature/audit-low-fixes`)
 
 - Icon: `logos/PdfiumWrapperLogo.svg` is the source; `icon.png` (256 x 256, transparent) is rendered from it with Edge headless, because Inkscape drops `feDropShadow`. The core and Processing packages already pointed at `icon.png`; the per-RID runtime packages now carry it too.
 - AUD-018: every import checked against the chromium/8076 headers and the shipped `pdfium.dll` exports (scratch script, not committed). `unsigned long` is `CULong`, `size_t` `nuint`, byte-string keys UTF-8, wrong return types fixed. `FPDF_SetMetaText` is not exported by PDFium, so every `PdfMetadata` setter threw `EntryPointNotFoundException`: the setters and `SetMetadataString`/`Set*DateTime`/`SetAllMetadata`/`ClearAllMetadata` are removed (metadata is read-only). `FPDFPage_InsertObject` frees the object on failure; `PdfPage.InsertObject` handles it.
@@ -280,7 +298,7 @@ Key measurements (one machine: i7-13700F, 24 logical processors, win-x64):
 
 ## In progress
 
-- Nothing active on `feature/audit-low-fixes`; it is ready to push and open as a PR.
+- PR #21: review findings fixed and pushed; waiting for CI and merge. The review's excluded "disposed-wrapper handle leak" (predates the PR) is not investigated yet; details are in the review probes under `%TEMP%/PdfiumPr21Review_aecfe6ef3ef9413fab2f8d530734f04c/`.
 
 Historical:
 
@@ -294,7 +312,7 @@ Historical:
 
 ## Next recommended step
 
-- Push `feature/audit-low-fixes`, open the PR, and confirm CI on linux-x64 (the new tests have only run on win-x64). Run the suite once on macOS: `NativeBoundaryTests.EveryImport_IsExportedByItsNativeLibrary` checks the dylib exports there too.
+- Fix `NativeText.ReadUtf16` (`src/PdfiumWrapper/NativeText.cs:36`) to preserve embedded NULs in page labels, replace the linear tracked-wrapper search in `PdfPage.GetObject` (`src/PdfiumWrapper/PdfPage.cs:460`) with a handle-keyed lookup, add the regression coverage, rerun the suite and lookup-scaling probe, then request a follow-up review of PR #21.
 
 Historical:
 
@@ -314,6 +332,8 @@ Earlier list (items 1 and 2 still apply; item 3 is done):
 3. Decide whether to commit `src/PdfiumWrapper.Benchmarks.Comparison` (code only, no results), the `.gitignore` entries and the updated `benchmark.db`. 2.0.0 is merged but not released: the release workflow takes its version from a `release/<version>` branch.
 
 ## Blockers or open questions
+
+- PR #21 has two Moderate review findings (page-label truncation and quadratic object lookup); verdict is request changes. The review itself is complete.
 
 - `PdfMetadata` is now read-only (its setters could never work). If writing metadata matters, it needs a PDF object writer outside PDFium.
 - Worker stderr is no longer reported as `WorkerStopped` events; consumers must use `PdfPoolEventKind.WorkerMessage`.
@@ -351,6 +371,8 @@ Earlier notes:Earlier notes:
 - Shell commands required escalation because the Windows sandbox shell failed with `windows sandbox: spawn setup refresh`.
 
 ## Recently changed files
+
+- PR #21 review (2026-10-03): `ai/current-state.md` only. Implementation files were not changed; review probes and package artifacts are under `%TEMP%`.
 
 - Audit low fixes (2026-10-03): `icon.png`, `logos/PdfiumWrapperLogo.svg`, `src/PdfiumWrapper.runtime/PdfiumWrapper.runtime.csproj`; `src/PdfiumWrapper/`: new `NativeText.cs`, `PdfiumException.cs`; `PDFium*.cs`, `LibTiff.cs`, `LibTurboJpeg.cs`, `JpegDecoder.cs`, `PdfDocument.cs`, `PdfPage.cs`, `PdfPageObject.cs`, `PdfFormObject.cs`, `PdfTextObject.cs`, `PdfImageObject.cs`, `PdfPathObject.cs`, `PdfMetadata.cs`, `PdfBookmarks.cs`, `PdfAttachments.cs`, `PdfForm.cs`, `PdfMerger.cs`, `PdfHelpers.cs`, `PixelConverter.cs`, `PooledFileWriter.cs`; `src/PdfiumWrapper.Processing/` (AUD-024: `PdfProcessingPool*.cs`, `PdfWorkerHost.cs`, `Worker.cs`, new `WorkerJobObject.cs`, `PdfJobResult.cs`, csproj); `src/PdfiumWrapper.Tests.Host/WorkerFaults.cs`; `src/PdfiumWrapper.Tests/`: new `NativeBoundaryTests.cs`, `Processing/PoolHygieneTests.cs`, `Docs/encrypted.pdf`; updated load-failure assertions in five test files; `README.md`, `AGENTS.md`, `docs/API-REFERENCE.md`, `docs/BEST-PRACTICES.md`, `docs/EXAMPLES.md`, `docs/HIGH-THROUGHPUT-PROCESSING.md`, `ai/current-state.md`.
 
