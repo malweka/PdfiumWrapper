@@ -292,6 +292,261 @@ public class PdfProcessingPoolTests : IDisposable
         Assert.True(Stopwatch.GetElapsedTime(submitStarted) > TimeSpan.FromMilliseconds(400));
     }
 
+    /// <summary>A submission cancelled while it waits for a queue slot is a Cancelled result, like any other cancellation.</summary>
+    [Fact]
+    public async Task CancelWhileWaitingForAQueueSlot_ReportsCancelled_NotAnException()
+    {
+        string hanging = Path.Combine(_output, "hang-admission.pdf");
+        File.Copy(PoolFixture.Input("doc-1-page.pdf"), hanging);
+        string input = PoolFixture.Input("doc-1-page.pdf");
+
+        await using var pool = await CreateAsync(o =>
+        {
+            o.MinWorkers = 1;
+            o.MaxWorkers = 1;
+            o.QueueCapacity = 1;
+            o.MaxAttempts = 1;
+            o.JobTimeout = TimeSpan.FromSeconds(10);
+            o.WorkerEnvironment["PDFIUMWRAPPER_TEST_FAULT"] = "hang:hang-admission";
+        });
+
+        var blocker = pool.GetPageCountAsync(hanging);
+        await WaitUntilAsync(() => pool.BusyWorkers == 1, TimeSpan.FromSeconds(30));
+        var queued = pool.GetPageCountAsync(input);
+        await WaitUntilAsync(() => pool.QueuedJobs == 1, TimeSpan.FromSeconds(5));
+
+        using var waiting = new CancellationTokenSource();
+        var waitingForSlot = pool.GetPageCountAsync(PdfInput.FromBytes(File.ReadAllBytes(input), "waiting.pdf"), waiting.Token);
+        await WaitUntilAsync(() => Events(PdfPoolEventKind.QueueFull).Length > 0, TimeSpan.FromSeconds(5));
+        Assert.False(waitingForSlot.IsCompleted);
+        waiting.Cancel();
+
+        var cancelled = await waitingForSlot.WaitAsync(PoolFixture.TestTimeout);
+        Assert.Equal(PdfJobStatus.Cancelled, cancelled.Status);
+        Assert.Equal("waiting.pdf", cancelled.Input);
+        Assert.Equal(0, cancelled.Attempts);
+
+        // Cancelled before the input was even spooled: the same status.
+        var neverStarted = await pool.GetPageCountAsync(PdfInput.FromBytes(File.ReadAllBytes(input), "never.pdf"), new CancellationToken(canceled: true));
+        Assert.Equal(PdfJobStatus.Cancelled, neverStarted.Status);
+        Assert.Equal(2, pool.Statistics.JobsCancelled);
+        Assert.NotEmpty(Events(PdfPoolEventKind.JobCancelled));
+
+        var rest = await Task.WhenAll(blocker, queued).WaitAsync(PoolFixture.TestTimeout);
+        Assert.Equal(PdfJobStatus.TimedOut, rest[0].Status);
+        Assert.Equal(1, rest[1].Value);
+    }
+
+    /// <summary>A batch never has more documents spooled, queued or running than the pool can hold, however large it is.</summary>
+    [Fact]
+    public async Task Batch_BoundsDocumentsInFlight_ToTheQueueAndTheSlots()
+    {
+        string hanging = Path.Combine(_output, "hang-batch.pdf");
+        File.Copy(PoolFixture.Input("doc-1-page.pdf"), hanging);
+        byte[] bytes = File.ReadAllBytes(PoolFixture.Input("doc-1-page.pdf"));
+        string spool = Path.Combine(_output, "spool");
+        Directory.CreateDirectory(spool);
+
+        await using var pool = await CreateAsync(o =>
+        {
+            o.MinWorkers = 1;
+            o.MaxWorkers = 1;
+            o.QueueCapacity = 2;
+            o.MaxAttempts = 1;
+            o.JobTimeout = TimeSpan.FromSeconds(8);
+            o.TempDirectory = spool;
+            o.WorkerEnvironment["PDFIUMWRAPPER_TEST_FAULT"] = "hang:hang-batch";
+        });
+
+        var blocker = pool.GetPageCountAsync(hanging);
+        await WaitUntilAsync(() => pool.BusyWorkers == 1, TimeSpan.FromSeconds(30));
+
+        var inputs = Enumerable.Range(0, 40).Select(i => PdfInput.FromBytes(bytes, $"doc-{i}.pdf")).ToArray();
+        int maxSpooled = 0, maxQueued = 0;
+        var results = new List<PdfJobResult<int>>();
+        var batch = Task.Run(async () =>
+        {
+            await foreach (var r in pool.GetPageCountAsync(inputs).WithCancellation(new CancellationTokenSource(PoolFixture.TestTimeout).Token))
+                results.Add(r);
+        });
+
+        // While the only worker hangs: QueueCapacity queued plus one waiting for a slot (QueuedJobs counts
+        // both), and no other input materialized.
+        for (int i = 0; i < 20; i++)
+        {
+            maxSpooled = Math.Max(maxSpooled, Directory.GetFiles(spool, "*.pdf", SearchOption.AllDirectories).Length);
+            maxQueued = Math.Max(maxQueued, pool.QueuedJobs);
+            await Task.Delay(100);
+        }
+
+        Assert.True(maxSpooled <= 3, $"{maxSpooled} inputs spooled with a bound of 3");
+        Assert.True(maxQueued <= 3, $"{maxQueued} jobs queued or waiting with a capacity of 2");
+
+        await batch.WaitAsync(PoolFixture.TestTimeout);
+        Assert.Equal(PdfJobStatus.TimedOut, (await blocker).Status);
+        Assert.Equal(40, results.Count);
+        Assert.All(results, r => Assert.Equal(1, r.Value));
+        Assert.Empty(Directory.GetFiles(spool, "*.pdf", SearchOption.AllDirectories));
+    }
+
+    /// <summary>Generated output names are reserved against the originals: "report", "report", "report-2" get three paths.</summary>
+    [Fact]
+    public async Task Batch_OutputNames_NeverCollide()
+    {
+        await using var pool = await CreateAsync();
+        byte[] one = File.ReadAllBytes(PoolFixture.Input("doc-1-page.pdf"));
+        byte[] three = File.ReadAllBytes(PoolFixture.Input("doc-3-pages-with-comments.pdf"));
+        var inputs = new[]
+        {
+            PdfInput.FromBytes(one, "report.pdf"),
+            PdfInput.FromBytes(three, "report.pdf"),
+            PdfInput.FromBytes(one, "report-2.pdf"),
+            PdfInput.FromBytes(three, "REPORT.pdf"),
+        };
+
+        var results = new List<PdfJobResult<TiffFile>>();
+        await foreach (var r in pool.ConvertToTiffAsync(inputs, Path.Combine(_output, "names"), dpi: 30).WithCancellation(new CancellationTokenSource(PoolFixture.TestTimeout).Token))
+            results.Add(r);
+
+        Assert.Equal(4, results.Count);
+        Assert.All(results, r => Assert.True(r.IsSuccess, r.Error));
+        var paths = results.Select(r => r.Value!.Path).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+        Assert.Equal(4, paths.Length);
+        Assert.Equal(4, Directory.GetFiles(Path.Combine(_output, "names"), "*.tiff").Length);
+
+        // Each file still has the size its own job wrote, so no job wrote over another's output.
+        foreach (var r in results)
+            Assert.Equal(r.Value!.Bytes, new FileInfo(r.Value.Path).Length);
+        Assert.Equal(new[] { 1, 1, 3, 3 }, results.Select(r => r.Value!.PageCount).OrderBy(p => p));
+    }
+
+    /// <summary>An image job that fails part-way leaves nothing: no pages already written, no temp file.</summary>
+    [Fact]
+    public async Task FailedImageJob_LeavesNoPartialOutput()
+    {
+        await using var pool = await CreateAsync();
+        string directory = Path.Combine(_output, "partial");
+        Directory.CreateDirectory(Path.Combine(directory, "page_002.png"));   // the second page cannot be moved into place
+
+        var result = await pool.ConvertToPngAsync(PoolFixture.Input("doc-3-pages-with-comments.pdf"), directory, dpi: 30).WaitAsync(PoolFixture.TestTimeout);
+
+        Assert.Equal(PdfJobStatus.Failed, result.Status);
+        Assert.False(File.Exists(Path.Combine(directory, "page_001.png")), "the first page was left behind");
+        Assert.Empty(Directory.GetFiles(directory, "*.tmp"));
+        Assert.Empty(Directory.GetFiles(directory, "*.png"));
+    }
+
+    /// <summary>A worker that dies mid-job cannot clean up; the coordinator removes the pages it reported.</summary>
+    [Fact]
+    public async Task WorkerCrashMidJob_LeavesNoPartialOutput()
+    {
+        string crashing = Path.Combine(_output, "crash-mid.pdf");
+        File.Copy(PoolFixture.Input("contract.pdf"), crashing);
+
+        await using var pool = await CreateAsync(o =>
+        {
+            o.MaxAttempts = 1;
+            o.WorkerEnvironment["PDFIUMWRAPPER_TEST_FAULT"] = "crash-after-page-4:crash-mid";
+        });
+
+        string directory = Path.Combine(_output, "crash-mid");
+        var result = await pool.ConvertToPngAsync(crashing, directory, dpi: 30).WaitAsync(PoolFixture.TestTimeout);
+
+        Assert.Equal(PdfJobStatus.WorkerCrashed, result.Status);
+        Assert.Empty(Directory.GetFiles(directory, "*.png"));
+        Assert.Empty(Directory.GetFiles(directory, "*.tmp"));
+
+        // A retry starts clean too: the second attempt succeeds with exactly the document's pages.
+        await using var retrying = await CreateAsync(o =>
+        {
+            o.MaxAttempts = 2;
+            o.WorkerEnvironment["PDFIUMWRAPPER_TEST_FAULT"] = "crash-after-page-4:crash-mid";
+        });
+        string again = Path.Combine(_output, "crash-mid-retry");
+        string survives = Path.Combine(_output, "survives.pdf");
+        File.Copy(PoolFixture.Input("contract.pdf"), survives);
+        var crashed = await retrying.ConvertToPngAsync(crashing, again, dpi: 30).WaitAsync(PoolFixture.TestTimeout);
+        Assert.Equal(PdfJobStatus.WorkerCrashed, crashed.Status);  // the fault fires in every fresh worker
+        Assert.Equal(2, crashed.Attempts);
+        Assert.Empty(Directory.GetFiles(again, "*.png"));
+        var ok = await retrying.ConvertToPngAsync(survives, Path.Combine(_output, "survives"), dpi: 30).WaitAsync(PoolFixture.TestTimeout);
+        Assert.True(ok.IsSuccess, ok.Error);
+        Assert.Equal(10, ok.Value!.Files.Count);
+    }
+
+    /// <summary>
+    /// Output that was in the directory before a job is never the job's to delete: a job cancelled
+    /// before submission, one whose input is missing, one whose worker was killed before it wrote
+    /// anything, and one that failed part-way all leave the existing file byte for byte.
+    /// </summary>
+    [Fact]
+    public async Task CleanupNeverTouchesOutputTheJobDidNotWrite()
+    {
+        string hanging = Path.Combine(_output, "hang-seeded.pdf");
+        File.Copy(PoolFixture.Input("doc-1-page.pdf"), hanging);
+        string directory = Path.Combine(_output, "seeded");
+        Directory.CreateDirectory(directory);
+        byte[] seed = { 0x53, 0x45, 0x45, 0x44 };
+        string existing = Path.Combine(directory, "page_001.png");
+        File.WriteAllBytes(existing, seed);
+        File.WriteAllBytes(Path.Combine(directory, "page_002.png"), seed);
+
+        await using var pool = await CreateAsync(o =>
+        {
+            o.MaxAttempts = 1;
+            o.JobTimeout = TimeSpan.FromSeconds(3);
+            o.WorkerEnvironment["PDFIUMWRAPPER_TEST_FAULT"] = "hang:hang-seeded";
+        });
+        byte[] bytes = File.ReadAllBytes(PoolFixture.Input("doc-1-page.pdf"));
+
+        var beforeSubmission = await pool.ConvertToPngAsync(PdfInput.FromBytes(bytes, "early.pdf"), directory, dpi: 30, ct: new CancellationToken(canceled: true));
+        Assert.Equal(PdfJobStatus.Cancelled, beforeSubmission.Status);
+        Assert.Equal(seed, File.ReadAllBytes(existing));
+
+        var missingInput = await pool.ConvertToPngAsync(Path.Combine(_output, "missing.pdf"), directory, dpi: 30).WaitAsync(PoolFixture.TestTimeout);
+        Assert.Equal(PdfJobStatus.Failed, missingInput.Status);
+        Assert.Equal(seed, File.ReadAllBytes(existing));
+
+        var killedBeforeWriting = await pool.ConvertToPngAsync(hanging, directory, dpi: 30).WaitAsync(PoolFixture.TestTimeout);
+        Assert.Equal(PdfJobStatus.TimedOut, killedBeforeWriting.Status);
+        Assert.Equal(seed, File.ReadAllBytes(existing));
+
+        // A job that fails while moving its pages into place owns those names by then: it takes the
+        // pages it moved with it (the seed under page_001 was overwritten first, as a success would
+        // have done) and leaves no staged file.
+        Directory.CreateDirectory(Path.Combine(directory, "page_003.png"));   // the third page cannot be moved into place
+        var failedPartWay = await pool.ConvertToPngAsync(PoolFixture.Input("doc-3-pages-with-comments.pdf"), directory, dpi: 30).WaitAsync(PoolFixture.TestTimeout);
+        Assert.Equal(PdfJobStatus.Failed, failedPartWay.Status);
+        Assert.Empty(Directory.GetFiles(directory, "*.tmp"));
+        Assert.Empty(Directory.GetFiles(directory, "*.png"));
+
+        // And a successful job replaces them, as it should.
+        var ok = await pool.ConvertToPngAsync(PoolFixture.Input("doc-1-page.pdf"), Path.Combine(_output, "seeded-ok"), dpi: 30).WaitAsync(PoolFixture.TestTimeout);
+        Assert.True(ok.IsSuccess, ok.Error);
+    }
+
+    /// <summary>Cancelling CreateAsync while a worker starts fails the creation and kills the child.</summary>
+    [Fact]
+    public async Task CancelledStart_FailsCreateAsync_AndKillsTheChild()
+    {
+        string pidFile = Path.Combine(_output, "worker.pid");
+        var options = PoolFixture.Options(o =>
+        {
+            o.WorkerEnvironment["PDFIUMWRAPPER_TEST_FAULT"] = "slow-start:20000";
+            o.WorkerEnvironment["PDFIUMWRAPPER_TEST_PIDFILE"] = pidFile;
+        });
+
+        using var cts = new CancellationTokenSource();
+        var creating = PdfProcessingPool.CreateAsync(options, cts.Token);
+        await WaitUntilAsync(() => File.Exists(pidFile) && File.ReadAllText(pidFile).Trim().Length > 0, TimeSpan.FromSeconds(30));
+        int pid = int.Parse(File.ReadAllText(pidFile).Trim());
+        Assert.True(IsRunning(pid));
+
+        cts.Cancel();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => creating.WaitAsync(TimeSpan.FromSeconds(30)));
+        await WaitUntilAsync(() => !IsRunning(pid), TimeSpan.FromSeconds(15));
+    }
+
     [Fact]
     public async Task InvalidWorkerPath_IsReportedByTheConstructor()
     {

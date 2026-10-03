@@ -71,9 +71,12 @@ internal sealed class Worker : IAsyncDisposable
         {
             worker.Hello = await worker._hello.Task.WaitAsync(startTimeout.Token).ConfigureAwait(false);
         }
-        catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+        catch (OperationCanceledException)
         {
+            // Whoever cancelled, the child must not outlive this call: nothing else references it.
             await worker.KillAsync().ConfigureAwait(false);
+            if (ct.IsCancellationRequested)
+                throw;
             throw new PdfPoolException($"Worker {worker.Pid} did not report ready within {options.WorkerStartTimeout}. " +
                                        "If the worker is this executable, Main must call PdfWorkerHost.TryRun() first.");
         }
@@ -95,7 +98,14 @@ internal sealed class Worker : IAsyncDisposable
     private void Begin()
     {
         _process.EnableRaisingEvents = true;
-        _process.Exited += (_, _) => SignalExit();
+        _process.Exited += async (_, _) =>
+        {
+            // Frames the worker wrote before it died (progress, even a result) are still in the pipe;
+            // let the read loop drain them before the exit is acted on, so the pool sees them first.
+            if (_readLoop is { } readLoop)
+                await Task.WhenAny(readLoop, Task.Delay(1000)).ConfigureAwait(false);
+            SignalExit();
+        };
         _readLoop = Task.Run(ReadLoopAsync);
         _ = Task.Run(DrainStderrAsync);
     }

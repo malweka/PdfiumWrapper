@@ -5,6 +5,7 @@ This guide covers efficient patterns for processing large volumes of PDF documen
 ## Table of Contents
 
 - [Core Principles](#core-principles)
+- [Two Paths: In-Process or Worker Pool](#two-paths-in-process-or-worker-pool)
 - [Converting Pages to Images (TIFF, PNG, JPEG)](#converting-pages-to-images)
 - [Extracting Text from PDFs](#extracting-text-from-pdfs)
 - [Merging PDF Documents](#merging-pdf-documents)
@@ -57,6 +58,143 @@ foreach (var filePath in pdfFiles)
     // Process...
 }
 ```
+
+---
+
+## Two Paths: In-Process or Worker Pool
+
+PdfiumWrapper ships as two packages:
+
+| Package | What it is | Processes it starts |
+|---|---|---|
+| `PdfiumWrapper` | The core library: `PdfDocument`, `PdfPage`, `PdfMerger`, image and text output. Everything runs inside your process. | None |
+| `PdfiumWrapper.Processing` | Optional. `PdfProcessingPool` runs the same operations in worker processes it starts and manages. Depends on the core package. | Workers, between `MinWorkers` and `MaxWorkers` |
+
+The pool is not required. The core package never launches a process, and an application that only references it needs no `Main` changes and no worker configuration. Add the pool only when the reasons below apply.
+
+### The same job both ways
+
+Convert every PDF in a folder to PNG at 150 DPI and report each document's page count.
+
+**In-process (core package only):**
+
+```csharp
+using PdfiumWrapper;
+
+public static async Task RunAsync(string inputDirectory, string outputRoot)
+{
+    var files = Directory.EnumerateFiles(inputDirectory, "*.pdf");
+
+    // Bounded callers: rendering takes turns at the gate, encoding and writes overlap
+    await Parallel.ForEachAsync(files, new ParallelOptions { MaxDegreeOfParallelism = 4 }, async (file, ct) =>
+    {
+        try
+        {
+            using var doc = new PdfDocument(file);
+            var outputDirectory = Path.Combine(outputRoot, Path.GetFileNameWithoutExtension(file));
+            Directory.CreateDirectory(outputDirectory);
+
+            int page = 0;
+            await foreach (var png in doc.StreamImageBytesAsync(ImageFormat.Png, 100, 150))
+                await File.WriteAllBytesAsync(Path.Combine(outputDirectory, $"page_{++page:D3}.png"), png, ct);
+
+            Console.WriteLine($"{file}: {doc.PageCount} pages");
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"{file}: failed: {ex.Message}");
+        }
+    });
+}
+```
+
+**Worker pool (`PdfiumWrapper.Processing`):**
+
+```csharp
+using PdfiumWrapper.Processing;
+
+public static async Task<int> Main(string[] args)
+{
+    if (PdfWorkerHost.TryRun())        // required: a copy of this executable started as a worker runs here
+        return 0;
+
+    await using var pool = await PdfProcessingPool.CreateAsync();   // defaults: 1 warm worker, up to cores / 2
+
+    var files = Directory.EnumerateFiles(args[0], "*.pdf").Select(f => PdfInput.FromFile(f));
+
+    // Results arrive as they complete; submission waits when QueueCapacity jobs are queued
+    await foreach (var r in pool.ConvertToPngAsync(files, args[1], dpi: 150))
+    {
+        if (r.IsSuccess)
+            Console.WriteLine($"{r.Input}: {r.Value.PageCount} pages");
+        else
+            Console.WriteLine($"{r.Input}: {r.Status}: {r.Error}");   // Failed, TimedOut or WorkerCrashed; never an exception
+    }
+
+    return 0;
+}
+```
+
+Both write `page_001.png`, `page_002.png`, ... into one directory per document. The pool adds one line to `Main`, and it reports failures as a status on the result instead of throwing.
+
+For a single document the difference is smaller still:
+
+```csharp
+// In-process
+using var doc = new PdfDocument("invoice.pdf");
+doc.SaveAsPngs("out/invoice", "page", dpi: 150);
+string[] text = doc.ProcessAllPages(page => page.ExtractText());
+
+// Pool
+var png  = await pool.ConvertToPngAsync("invoice.pdf", "out/invoice", dpi: 150);
+var text = await pool.ExtractTextAsync("invoice.pdf");
+```
+
+### What each path gives you
+
+| | In-process | Worker pool |
+|---|---|---|
+| Rendering | One page at a time per process (the native gate). Extra callers overlap encoding and output only: about 1.25x over sequential on the mixed corpus. | One page at a time per worker, workers in parallel. 8 workers reached 4.5x one process on the 1,000-request PNG run (10.07 against 2.21 requests/s). |
+| A damaged PDF that aborts PDFium | Takes the process down. | Takes one worker down. It is replaced, the job is retried once and then reported as `WorkerCrashed`; every other job proceeds. |
+| Memory | One process: about 120 to 140 MB plus one rendered page per caller in flight. | The same per worker, so 8 workers is about 1 GB. Idle workers above `MinWorkers` are stopped after `IdleTimeout` (60 s). |
+| First request | Pays native initialization once, a few milliseconds. | `MinWorkers` are started and warmed when the pool is created. A scale-up costs a few hundred milliseconds of process start. |
+| Errors | Exceptions. | A `PdfJobStatus` on every result (`Succeeded`, `Failed`, `TimedOut`, `Cancelled`, `WorkerCrashed`), with attempts, worker id and timings. |
+| Timeouts, retries, backpressure | Yours to write (see the patterns below). | `JobTimeout`, `MaxAttempts`, `QueueCapacity`. |
+| Operations | The whole API: render, images, text, merge, forms, metadata, bookmarks, attachments, page editing. | Page count, PNG, JPEG, TIFF, text. Merge and forms are planned. |
+| Inputs | Path, bytes, stream. | Path, bytes, stream. Bytes and streams are spooled to a temp file for the worker. |
+| Deployment | One package. | Two packages and the `TryRun` line in `Main`, or `WorkerPath` for a dedicated worker executable. Nothing extra to publish per platform. |
+
+### When to use which
+
+Use the **in-process API** when:
+
+- The volume is small: a CLI over a few files, a report generator, a service with low or steady load. One process handles 1.3 to 1.6 documents per second on the mixed corpus, which is thousands of documents an hour.
+- You need an operation the pool does not offer yet: merge, forms, metadata, page editing.
+- You already run several replicas of your service behind a queue. Replicas give the same parallel rendering as the pool, and you have the orchestration already.
+- The work is almost entirely native (text extraction, merging). In-process callers gain nothing from each other there, and the pool only helps if the burst is beyond one process.
+
+Use the **worker pool** when:
+
+- A burst must finish in a window that one process cannot meet. Apply the sizing rule in [Measured Capacity and Sizing](#measured-capacity-and-sizing): if `N / T` exceeds the usable rate of one process, you need several processes, and the pool is the way to have them inside one deployable.
+- Your service must stay one deployable, or you would rather not write the bounded loop, the timeouts and the retry logic yourself.
+- You process untrusted or damaged PDFs and a native abort must not take the service down.
+
+In both cases the rule is the same: measure one process on your documents and hardware first. The pool costs memory per worker and a process start per scale-up, and buys nothing if one process already meets the required rate.
+
+### Moving between them
+
+The two paths expose the same operations, so changing your mind later is a mechanical edit:
+
+| In-process | Pool |
+|---|---|
+| `doc.PageCount` | `pool.GetPageCountAsync(input)` |
+| `doc.SaveAsPngs(dir, prefix, dpi)` | `pool.ConvertToPngAsync(input, dir, dpi, prefix)` |
+| `doc.SaveAsJpegs(dir, prefix, quality, dpi)` | `pool.ConvertToJpegAsync(input, dir, quality, dpi, prefix)` |
+| `doc.SaveAsTiff(path, dpi, colorMode, threshold)` | `pool.ConvertToTiffAsync(input, path, dpi, colorMode, threshold)` |
+| `doc.ProcessAllPages(p => p.ExtractText())` | `pool.ExtractTextAsync(input)` |
+| `try { ... } catch` | `if (result.IsSuccess) ... else result.Status, result.Error` |
+
+Each pool method also takes an `IEnumerable<PdfInput>` and returns results in completion order.
 
 ---
 

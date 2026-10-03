@@ -61,6 +61,7 @@ public static class PdfWorkerHost
         try
         {
             Warm();
+            hooks?.BeforeHello?.Invoke();
 
             await FrameStream.WriteAsync(output, Frame.ForHello(new HelloPayload
             {
@@ -156,7 +157,7 @@ public static class PdfWorkerHost
                     ResultPayload result;
                     try
                     {
-                        result = Execute(job, jobCancel.Token, output, writeLock);
+                        result = Execute(job, jobCancel.Token, output, writeLock, hooks);
                     }
                     catch (OperationCanceledException)
                     {
@@ -207,7 +208,7 @@ public static class PdfWorkerHost
         _ = page.RenderToBytes(50, 50);
     }
 
-    private static ResultPayload Execute(JobPayload job, CancellationToken ct, Stream output, SemaphoreSlim writeLock)
+    private static ResultPayload Execute(JobPayload job, CancellationToken ct, Stream output, SemaphoreSlim writeLock, WorkerHooks? hooks)
     {
         long start = Stopwatch.GetTimestamp();
         int thread = Environment.CurrentManagedThreadId;
@@ -230,27 +231,45 @@ public static class PdfWorkerHost
                 string prefix = job.FileNamePrefix ?? "page";
                 string extension = job.Kind == JobKind.ConvertToPng ? "png" : "jpg";
                 var format = job.Kind == JobKind.ConvertToPng ? ImageFormat.Png : ImageFormat.Jpeg;
+                var staged = new List<(string Temp, string Final)>(result.PageCount);
                 var files = new List<string>(result.PageCount);
                 long bytes = 0;
-                int pageNumber = 0;
 
-                // Written to a temp name and renamed, so a cancelled or crashed job leaves no half-written page.
-                foreach (var image in doc.StreamImageBytes(format, job.Quality, job.DpiWidth, job.DpiHeight))
+                // Every page is first written under a name that carries this job's id, and only once
+                // all of them are staged are they moved to their final names. So whatever ends the job
+                // early (cancel, a page that will not render, a write that fails, the process dying)
+                // leaves either nothing or files that are unmistakably this job's. All or nothing, and
+                // nothing that was in the directory before is touched unless the job reached the end.
+                try
                 {
-                    if (ct.IsCancellationRequested)
+                    foreach (var image in doc.StreamImageBytes(format, job.Quality, job.DpiWidth, job.DpiHeight))
                     {
-                        foreach (var written in files) TryDelete(written);
                         ct.ThrowIfCancellationRequested();
+
+                        string path = Path.Combine(directory, $"{prefix}_{staged.Count + 1:D3}.{extension}");
+                        string temp = path + $".{job.Id}.tmp";
+                        File.WriteAllBytes(temp, image);
+                        staged.Add((temp, path));
+                        bytes += image.Length;
+                        SendProgress(output, writeLock, job.Id, staged.Count);
+                        hooks?.AfterPage?.Invoke(job, staged.Count);
                     }
 
-                    pageNumber++;
-                    string path = Path.Combine(directory, $"{prefix}_{pageNumber:D3}.{extension}");
-                    string temp = path + $".{job.Id}.tmp";
-                    File.WriteAllBytes(temp, image);
-                    File.Move(temp, path, overwrite: true);
-                    files.Add(path);
-                    bytes += image.Length;
-                    SendProgress(output, writeLock, job.Id, pageNumber);
+                    ct.ThrowIfCancellationRequested();
+                    SendProgress(output, writeLock, job.Id, staged.Count, committingPages: staged.Count);
+                    foreach (var (temp, path) in staged)
+                    {
+                        File.Move(temp, path, overwrite: true);
+                        files.Add(path);
+                    }
+                }
+                catch
+                {
+                    foreach (var (temp, _) in staged)
+                        TryDelete(temp);
+                    foreach (var moved in files)
+                        TryDelete(moved);
+                    throw;
                 }
 
                 result.Files = files.ToArray();
@@ -330,11 +349,11 @@ public static class PdfWorkerHost
         }
     }
 
-    private static void SendProgress(Stream output, SemaphoreSlim writeLock, long jobId, int pagesDone)
+    private static void SendProgress(Stream output, SemaphoreSlim writeLock, long jobId, int pagesDone, int committingPages = 0)
     {
         try
         {
-            FrameStream.WriteAsync(output, Frame.ForProgress(jobId, pagesDone), writeLock, CancellationToken.None).GetAwaiter().GetResult();
+            FrameStream.WriteAsync(output, Frame.ForProgress(jobId, pagesDone, committingPages), writeLock, CancellationToken.None).GetAwaiter().GetResult();
         }
         catch (IOException)
         {
@@ -357,6 +376,12 @@ public static class PdfWorkerHost
 /// <summary>Test hooks for fault injection; not part of the public API.</summary>
 internal sealed class WorkerHooks
 {
+    /// <summary>Called once the worker is warm, just before it reports ready.</summary>
+    public Action? BeforeHello { get; set; }
+
     /// <summary>Called before each job runs, with the job about to run.</summary>
     public Action<JobPayload>? BeforeJob { get; set; }
+
+    /// <summary>Called after each page of an image job is in place, with the job and the page number written.</summary>
+    public Action<JobPayload, int>? AfterPage { get; set; }
 }

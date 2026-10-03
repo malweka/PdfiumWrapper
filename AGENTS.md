@@ -217,9 +217,13 @@ Rules for pool code:
 - A job failure never fails the pool: crash, hang, malformed frame and memory limit all end with the worker replaced and the job given a status (`WorkerCrashed`, `TimedOut`, `Failed`) and retried up to `MaxAttempts`.
 - The dispatcher takes a job out of its queue only once a worker has a free slot, so `QueueCapacity` is exact. Retries go through their own unbounded channel, ahead of new jobs.
 - A worker runs `JobsPerWorker` jobs at once (default 2) so encoding overlaps rendering inside the worker, as it does for concurrent callers in one process. Slots are tracked per worker (`Worker.Slots`, `InUse`, `Active`); the sizer counts free slots, not idle workers.
-- Output files are written as `<name>.<jobId>.tmp` and renamed on success.
+- Output files are written as `<name>.<jobId>.tmp` and renamed on success (image jobs: all pages staged first, then all renamed).
 - Sizing decisions happen on one 250 ms timer; every decision raises an event. Workers are replaced, never recycled on a schedule.
-- Fault injection for tests lives in `PdfiumWrapper.Tests.Host/WorkerFaults.cs` (`PDFIUMWRAPPER_TEST_FAULT=crash|hang|garbage:<input substring>`), passed through `PdfPoolOptions.WorkerEnvironment`.
+- Image jobs stage every page as `<final>.<jobId>.tmp` and move them to their final names only once all are staged, after a `Progress` frame with `CommittingPages` set. A job that does not succeed leaves no output and never deletes a file it did not write: the worker removes its staged and moved files on a managed failure or an observed cancel; the coordinator (`RemovePartialOutput`) runs only for an attempt whose worker crashed or was killed, and removes that job's `.tmp` files plus, if the worker had reported committing, the final names it had claimed. Jobs that never reached a worker remove nothing.
+- A batch (`IEnumerable<PdfInput>`) bounds documents in any stage, spooled through unread, to `QueueCapacity + MaxWorkers x JobsPerWorker`, and keeps no per-job task: outstanding jobs are counted. Batch output names are reserved against originals and generated names alike.
+- Cancellation is always a status, never an exception: before spooling, while spooling, while waiting for a queue slot, while queued, or in flight.
+- A worker whose start is cancelled or times out is killed inside `Worker.StartAsync`; the caller's cancellation propagates out of `CreateAsync`. A worker's exit is acted on only after its stdout is drained.
+- Fault injection for tests lives in `PdfiumWrapper.Tests.Host/WorkerFaults.cs` (`PDFIUMWRAPPER_TEST_FAULT=crash|hang|garbage:<input substring>`, `crash-after-page-N:<input substring>`, `slow-start:<ms>` with `PDFIUMWRAPPER_TEST_PIDFILE`), passed through `PdfPoolOptions.WorkerEnvironment`.
 
 ## Key APIs
 
@@ -298,6 +302,6 @@ The `.csproj` auto-detects the platform RID and includes native binaries with `E
 - Update relevant documentation when adding or changing public API
 - Follow existing patterns for disposal, error handling, and P/Invoke signatures
 - Follow the gate rules under "Thread Safety and the Native Gate" for every member that touches PDFium
-- Run the test suite after changes: all 267+ tests should pass (win-x64 and linux-x64)
+- Run the test suite after changes: all 274+ tests should pass (win-x64 and linux-x64)
 - Coordinate system: PDF uses bottom-left origin (see `docs/PDF-EDITING.md`)
 - Standard page sizes in points: US Letter = 612x792, A4 = 595x842

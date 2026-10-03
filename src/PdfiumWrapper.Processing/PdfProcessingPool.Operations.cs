@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Runtime.CompilerServices;
 using System.Text.Json;
 using System.Threading.Channels;
@@ -140,21 +141,17 @@ public sealed partial class PdfProcessingPool
             return outputs;
 
         string root = RequireOutput(outputRoot);
-        var seen = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        // Every name handed out, original or generated, so "report", "report" and "report-2" get three paths.
+        var used = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         for (int i = 0; i < inputs.Count; i++)
         {
-            string name = Path.GetFileNameWithoutExtension(inputs[i].Name);
-            if (name.Length == 0)
-                name = "document";
-            if (seen.TryGetValue(name, out int count))
-            {
-                seen[name] = count + 1;
-                name = $"{name}-{count + 1}";
-            }
-            else
-            {
-                seen[name] = 1;
-            }
+            string stem = Path.GetFileNameWithoutExtension(inputs[i].Name);
+            if (stem.Length == 0)
+                stem = "document";
+
+            string name = stem;
+            for (int suffix = 2; !used.Add(name); suffix++)
+                name = $"{stem}-{suffix}";
 
             outputs[i] = Path.Combine(root, name);
         }
@@ -169,31 +166,53 @@ public sealed partial class PdfProcessingPool
         var list = inputs as IReadOnlyList<PdfInput> ?? inputs.ToList();
         var outputs = OutputsFor(outputRoot, list);
 
-        var results = Channel.CreateUnbounded<PdfJobResult<T>>();
+        // Documents in any stage (spooled, waiting for admission, queued, running, or finished but not
+        // yet read by the caller) are bounded, so a batch of a million inputs holds a million nothing:
+        // no task, spool file or result per input beyond what the pool can have in flight.
+        int bound = _options.QueueCapacity + _options.MaxWorkers * _options.JobsPerWorker;
+        var inFlight = new SemaphoreSlim(bound, bound);
+        var results = Channel.CreateUnbounded<PdfJobResult<T>>(new UnboundedChannelOptions { SingleReader = true });
+        // Outstanding jobs are counted, not collected: a finished job leaves nothing behind, so memory
+        // follows the bound above and not the size of the batch. The submitter holds one count of its
+        // own until it has submitted everything; the last to finish completes the results.
+        int outstanding = 1;
+        void OneDone()
+        {
+            if (Interlocked.Decrement(ref outstanding) == 0)
+                results.Writer.TryComplete();
+        }
+
         var submitter = Task.Run(async () =>
         {
-            var pending = new List<Task>();
             try
             {
                 for (int i = 0; i < list.Count; i++)
                 {
-                    // Submission applies backpressure (QueueCapacity); the result is forwarded when it lands.
-                    var task = run(list[i], outputs[i], ct);
-                    pending.Add(task.ContinueWith(t => results.Writer.TryWrite(t.Result), TaskContinuationOptions.OnlyOnRanToCompletion));
-                    await Task.Yield();
+                    await inFlight.WaitAsync(ct).ConfigureAwait(false);
+                    Interlocked.Increment(ref outstanding);
+                    _ = run(list[i], outputs[i], ct).ContinueWith(t =>
+                    {
+                        if (t.IsCompletedSuccessfully)
+                            results.Writer.TryWrite(t.Result);
+                        else
+                            results.Writer.TryComplete(t.Exception?.GetBaseException() ?? new OperationCanceledException(ct));
+                        OneDone();
+                    }, CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
                 }
 
-                await Task.WhenAll(pending).ConfigureAwait(false);
-                results.Writer.TryComplete();
+                OneDone();
             }
             catch (Exception ex)
             {
                 results.Writer.TryComplete(ex);
             }
-        }, ct);
+        }, CancellationToken.None);
 
         await foreach (var result in results.Reader.ReadAllAsync(ct).ConfigureAwait(false))
+        {
+            inFlight.Release();
             yield return result;
+        }
 
         await submitter.ConfigureAwait(false);
     }
@@ -215,12 +234,20 @@ public sealed partial class PdfProcessingPool
         {
             // Workers read files, so bytes and streams are written to a temp file owned by this job.
             spooled = Path.Combine(_tempDirectory, $"{Guid.NewGuid():N}.pdf");
-            if (input.Bytes != null)
-                await File.WriteAllBytesAsync(spooled, input.Bytes, ct).ConfigureAwait(false);
-            else
+            try
             {
-                await using var file = new FileStream(spooled, FileMode.CreateNew, FileAccess.Write, FileShare.None, 1 << 16, useAsync: true);
-                await input.Stream!.CopyToAsync(file, ct).ConfigureAwait(false);
+                if (input.Bytes != null)
+                    await File.WriteAllBytesAsync(spooled, input.Bytes, ct).ConfigureAwait(false);
+                else
+                {
+                    await using var file = new FileStream(spooled, FileMode.CreateNew, FileAccess.Write, FileShare.None, 1 << 16, useAsync: true);
+                    await input.Stream!.CopyToAsync(file, ct).ConfigureAwait(false);
+                }
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                // Cancellation is a status, never an exception, wherever it lands.
+                return CancelledBeforeSubmission<T>(payload, input.Name, spooled, ct, "cancelled while the input was being spooled");
             }
 
             payload.Input = spooled;
@@ -228,6 +255,15 @@ public sealed partial class PdfProcessingPool
 
         payload.Password = input.Password;
         return await SubmitAsync(payload, input.Name, spooled, project, ct).ConfigureAwait(false);
+    }
+
+    private PdfJobResult<T> CancelledBeforeSubmission<T>(JobPayload payload, string displayInput, string? spooled, CancellationToken ct, string reason)
+    {
+        payload.Id = Interlocked.Increment(ref _nextJobId);
+        var job = new PendingJob(payload, displayInput, spooled, ct);
+        _counters.Increment(ref _counters.Submitted);
+        Finish(job, PdfJobStatus.Cancelled, reason, new ResultPayload { JobId = job.Id, Status = ResultStatus.Cancelled });
+        return new PdfJobResult<T>(displayInput, PdfJobStatus.Cancelled, default, reason, 0, 0, job.Timings(Stopwatch.GetTimestamp()));
     }
 
     private static ImageFiles ToImageFiles(ResultPayload r) => new(r.PageCount, r.Files ?? Array.Empty<string>(), r.OutputBytes);

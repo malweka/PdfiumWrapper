@@ -26,6 +26,10 @@ internal sealed class PendingJob
     public int Attempts { get; set; }
     public Worker? Worker { get; set; }
     public CancellationTokenSource? AttemptTimeout { get; set; }
+    /// <summary>Pages the worker reported staged for the current attempt (image jobs).</summary>
+    public int PagesDone { get; set; }
+    /// <summary>Non-zero once the worker reported it was moving that many staged pages to their final names.</summary>
+    public int CommittingPages { get; set; }
     public int Retired;
 
     public TaskCompletionSource<ResultPayload> Completion { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);

@@ -51,7 +51,8 @@ internal sealed class Frame
 
     public static Frame ForHello(HelloPayload hello) => new() { Kind = FrameKind.Hello, Hello = hello };
     public static Frame ForJob(JobPayload job) => new() { Kind = FrameKind.Job, Job = job };
-    public static Frame ForProgress(long jobId, int pagesDone) => new() { Kind = FrameKind.Progress, Progress = new ProgressPayload { JobId = jobId, PagesDone = pagesDone } };
+    public static Frame ForProgress(long jobId, int pagesDone, int committingPages = 0)
+        => new() { Kind = FrameKind.Progress, Progress = new ProgressPayload { JobId = jobId, PagesDone = pagesDone, CommittingPages = committingPages } };
     public static Frame ForCancel(long jobId) => new() { Kind = FrameKind.Cancel, CancelJobId = jobId };
     public static Frame ForResult(ResultPayload result) => new() { Kind = FrameKind.Result, Result = result };
     public static Frame ForShutdown() => new() { Kind = FrameKind.Shutdown };
@@ -87,7 +88,13 @@ internal sealed class JobPayload
 internal sealed class ProgressPayload
 {
     public long JobId { get; set; }
+    /// <summary>Pages rendered and staged as the job's own temp files so far.</summary>
     public int PagesDone { get; set; }
+    /// <summary>
+    /// Non-zero once every page is staged and the worker starts moving them to their final names:
+    /// from here the job owns those names, and a worker that dies leaves them to the coordinator.
+    /// </summary>
+    public int CommittingPages { get; set; }
 }
 
 internal sealed class ResultPayload

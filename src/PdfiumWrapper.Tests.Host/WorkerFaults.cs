@@ -8,10 +8,13 @@ namespace PdfiumWrapper.Tests.Host;
 /// <c>WorkerPath</c>) and the tests pass a fault through the worker environment:
 /// <c>PDFIUMWRAPPER_TEST_FAULT=crash|hang|garbage:&lt;substring of the input path&gt;</c>.
 /// A job whose input path contains the substring triggers the fault once per process.
+/// <c>crash-after-page-N:&lt;substring&gt;</c> crashes once page N of an image job is in place.
+/// <c>slow-start:&lt;milliseconds&gt;</c> delays the worker's ready report.
 /// </summary>
 internal static class WorkerFaults
 {
     public const string EnvironmentVariable = "PDFIUMWRAPPER_TEST_FAULT";
+    public const string PidFileVariable = "PDFIUMWRAPPER_TEST_PIDFILE";
 
     public static WorkerHooks? FromEnvironment()
     {
@@ -23,6 +26,34 @@ internal static class WorkerFaults
         string fault = colon < 0 ? spec : spec[..colon];
         string match = colon < 0 ? "" : spec[(colon + 1)..];
         bool fired = false;
+
+        if (fault == "slow-start")
+        {
+            // The test learns this process's id from the file named by PDFIUMWRAPPER_TEST_PIDFILE,
+            // so it can check the pool killed a worker it gave up on.
+            return new WorkerHooks
+            {
+                BeforeHello = () =>
+                {
+                    if (Environment.GetEnvironmentVariable(PidFileVariable) is { Length: > 0 } pidFile)
+                        File.AppendAllText(pidFile, Environment.ProcessId + Environment.NewLine);
+                    Thread.Sleep(int.Parse(match));
+                },
+            };
+        }
+
+        if (fault.StartsWith("crash-after-page-", StringComparison.Ordinal))
+        {
+            int page = int.Parse(fault["crash-after-page-".Length..]);
+            return new WorkerHooks
+            {
+                AfterPage = (job, done) =>
+                {
+                    if (done == page && job.Input.Contains(match, StringComparison.OrdinalIgnoreCase))
+                        Environment.FailFast("test fault: crash after page " + page);
+                },
+            };
+        }
 
         return new WorkerHooks
         {

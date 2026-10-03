@@ -141,6 +141,13 @@ public sealed partial class PdfProcessingPool : IAsyncDisposable
                 await _queue.Writer.WriteAsync(job, ct).ConfigureAwait(false);
             }
         }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            // Cancelled while waiting for a queue slot: the same Cancelled result as a job cancelled
+            // later, never an exception.
+            Interlocked.Decrement(ref _queuedCount);
+            Finish(job, PdfJobStatus.Cancelled, "cancelled while waiting for a queue slot", new ResultPayload { JobId = job.Id, Status = ResultStatus.Cancelled });
+        }
         catch (Exception ex)
         {
             Interlocked.Decrement(ref _queuedCount);
@@ -193,6 +200,7 @@ public sealed partial class PdfProcessingPool : IAsyncDisposable
                     {
                         Finish(job, PdfJobStatus.Cancelled, "cancelled; the worker did not stop in time and was replaced", new ResultPayload { JobId = job.Id, Status = ResultStatus.Cancelled });
                         await RetireWorkerAsync(worker, PdfPoolEventKind.WorkerStopped, "killed after cancel grace").ConfigureAwait(false);
+                        RemovePartialOutput(job);
                     }
                 }
                 catch (Exception)
@@ -322,6 +330,8 @@ public sealed partial class PdfProcessingPool : IAsyncDisposable
 
         job.Attempts++;
         job.Worker = worker;
+        job.PagesDone = 0;
+        job.CommittingPages = 0;
         job.DispatchedAt = Stopwatch.GetTimestamp();
         worker.Active[job.Id] = job;
         _inFlight[job.Id] = job;
@@ -354,7 +364,15 @@ public sealed partial class PdfProcessingPool : IAsyncDisposable
             case FrameKind.Result when frame.Result != null:
                 OnResult(worker, frame.Result);
                 break;
-            case FrameKind.Progress:
+            case FrameKind.Progress when frame.Progress != null:
+                // What the worker has staged, and whether it has started moving pages into place: what
+                // the coordinator may remove if the worker dies.
+                if (_inFlight.TryGetValue(frame.Progress.JobId, out var inProgress) && inProgress.Worker == worker)
+                {
+                    inProgress.PagesDone = frame.Progress.PagesDone;
+                    if (frame.Progress.CommittingPages > 0)
+                        inProgress.CommittingPages = frame.Progress.CommittingPages;
+                }
                 break;
             default:
                 Raise(PdfPoolEventKind.WorkerCrashed, worker.Pid, 0, $"unexpected {frame.Kind} frame");
@@ -473,6 +491,7 @@ public sealed partial class PdfProcessingPool : IAsyncDisposable
     {
         job.FinalWorkerPid = workerPid;
         job.Worker = null;
+        RemovePartialOutput(job); // the worker is gone (crashed, or killed on timeout) and could not clean up itself
         if (job.Attempts < _options.MaxAttempts && !_shutdown.IsCancellationRequested && !job.CallerToken.IsCancellationRequested)
         {
             _counters.Increment(ref _counters.Retried);
@@ -529,6 +548,59 @@ public sealed partial class PdfProcessingPool : IAsyncDisposable
         }
     }
 
+    /// <summary>
+    /// Removes what an attempt whose worker was killed or crashed left behind. Called only for such
+    /// attempts: a worker that fails or is cancelled in a managed way cleans up itself, and a job that
+    /// never reached a worker has nothing to remove. Only files the attempt owns are touched: its
+    /// staged pages (named with the job id) and, if it had begun moving them into place, the final
+    /// names it had claimed. Files that were in the directory before are never deleted.
+    /// </summary>
+    private static void RemovePartialOutput(PendingJob job)
+    {
+        var payload = job.Payload;
+        if (payload.Output == null || job.DispatchedAt == 0)
+            return;
+
+        try
+        {
+            switch (payload.Kind)
+            {
+                case JobKind.ConvertToPng:
+                case JobKind.ConvertToJpeg:
+                {
+                    if (!Directory.Exists(payload.Output))
+                        return;
+                    string prefix = payload.FileNamePrefix ?? "page";
+                    string extension = payload.Kind == JobKind.ConvertToPng ? "png" : "jpg";
+                    foreach (var temp in Directory.GetFiles(payload.Output, $"{prefix}_*.{extension}.{job.Id}.tmp"))
+                        TryDelete(temp);
+                    for (int page = 1; page <= job.CommittingPages; page++)
+                        TryDelete(Path.Combine(payload.Output, $"{prefix}_{page:D3}.{extension}"));
+                    break;
+                }
+
+                case JobKind.ConvertToTiff:
+                    TryDelete(payload.Output + $".{job.Id}.tmp");
+                    break;
+            }
+        }
+        catch (Exception)
+        {
+            // Best effort: a directory that vanished or is unreadable is not the job's problem any more.
+        }
+
+        static void TryDelete(string path)
+        {
+            try
+            {
+                File.Delete(path);
+            }
+            catch (Exception)
+            {
+            }
+        }
+    }
+
 
     // ---- Workers and sizing ----
 
@@ -571,8 +643,9 @@ public sealed partial class PdfProcessingPool : IAsyncDisposable
             Raise(PdfPoolEventKind.WorkerReady, worker.Pid, 0, $"ready in {Stopwatch.GetElapsedTime(worker.IdleSince).TotalMilliseconds:F0} ms");
             _workerAvailable.Release();
         }
-        catch (OperationCanceledException)
+        catch (OperationCanceledException) when (_shutdown.IsCancellationRequested && !ct.IsCancellationRequested)
         {
+            // The pool is going away; Worker.StartAsync has already killed the child.
         }
         catch (PdfPoolException ex)
         {
@@ -722,6 +795,12 @@ public sealed partial class PdfProcessingPool : IAsyncDisposable
         await Task.WhenAny(_dispatcher, Task.Delay(1000)).ConfigureAwait(false);
         await Task.WhenAny(_sizer, Task.Delay(1000)).ConfigureAwait(false);
 
+        // Workers still starting are cancelled by the shutdown token and killed by Worker.StartAsync;
+        // wait for that so no child outlives the pool and no start touches a disposed token source.
+        long waitStart = Stopwatch.GetTimestamp();
+        while (Volatile.Read(ref _startingWorkers) > 0 && Stopwatch.GetElapsedTime(waitStart) < _options.WorkerStartTimeout + TimeSpan.FromSeconds(10))
+            await Task.Delay(20).ConfigureAwait(false);
+
         // Drain whatever is still queued.
         while (_queue.Reader.TryRead(out var queued))
             Finish(queued, PdfJobStatus.Cancelled, "the pool was disposed", new ResultPayload { JobId = queued.Id, Status = ResultStatus.Cancelled });
@@ -732,7 +811,8 @@ public sealed partial class PdfProcessingPool : IAsyncDisposable
         var pending = _inFlight.Values.Select(j => j.Completion.Task).ToArray();
         if (pending.Length > 0)
             await Task.WhenAny(Task.WhenAll(pending), Task.Delay(_options.JobTimeout)).ConfigureAwait(false);
-        foreach (var job in _inFlight.Values.ToArray())
+        var abandoned = _inFlight.Values.ToArray();
+        foreach (var job in abandoned)
             Finish(job, PdfJobStatus.Cancelled, "the pool was disposed", new ResultPayload { JobId = job.Id, Status = ResultStatus.Cancelled });
 
         // Taken out of the table here, so their exit handlers see nothing left to do.
@@ -747,6 +827,10 @@ public sealed partial class PdfProcessingPool : IAsyncDisposable
 
         await Task.WhenAll(workers.Select(w => w.StopAsync(StopGrace))).ConfigureAwait(false);
         await Task.WhenAll(workers.Select(w => w.DisposeAsync().AsTask())).ConfigureAwait(false);
+
+        // Their workers are gone now, so what those jobs had staged can be removed.
+        foreach (var job in abandoned)
+            RemovePartialOutput(job);
 
         try
         {
