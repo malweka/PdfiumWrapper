@@ -347,9 +347,10 @@ public class PdfiumConcurrencyTests
 
             for (int round = 0; round < 25; round++)
             {
-                Assert.Throws<InvalidOperationException>(() => new PdfDocument("no-such-file.pdf"));
-                Assert.Throws<InvalidOperationException>(() => new PdfDocument(garbage));
-                Assert.Throws<InvalidOperationException>(() => new PdfMerger(garbage));
+                // The error code is read in the failing load's gated scope, so concurrent loads cannot swap it.
+                Assert.Equal(PdfiumErrorCode.File, Assert.Throws<PdfiumException>(() => new PdfDocument("no-such-file.pdf")).ErrorCode);
+                Assert.Equal(PdfiumErrorCode.Format, Assert.Throws<PdfiumException>(() => new PdfDocument(garbage)).ErrorCode);
+                Assert.Equal(PdfiumErrorCode.Format, Assert.Throws<PdfiumException>(() => new PdfMerger(garbage)).ErrorCode);
 
                 var disposed = new PdfDocument(good);
                 disposed.Dispose();

@@ -66,41 +66,29 @@ public class PdfAttachments
 
         var attachment = new PdfAttachment();
 
-        // Get name
-        ulong nameLength = PDFium.FPDFAttachment_GetName(attachmentHandle, IntPtr.Zero, 0);
-        if (nameLength > 0)
-        {
-            var nameBuffer = Marshal.AllocHGlobal((int)nameLength);
-            try
-            {
-                PDFium.FPDFAttachment_GetName(attachmentHandle, nameBuffer, nameLength);
-                attachment.Name = Marshal.PtrToStringUni(nameBuffer) ?? string.Empty;
-            }
-            finally
-            {
-                Marshal.FreeHGlobal(nameBuffer);
-            }
-        }
+        var name = NativeText.ReadUtf16(attachmentHandle, static (handle, buffer, length) => PDFium.FPDFAttachment_GetName(handle, buffer, length));
+        if (name != null)
+            attachment.Name = name;
 
         // Get file size
-        PDFium.FPDFAttachment_GetFile(attachmentHandle, IntPtr.Zero, 0, out ulong fileSize);
+        PDFium.FPDFAttachment_GetFile(attachmentHandle, IntPtr.Zero, default, out CULong fileLength);
+        ulong fileSize = fileLength.Value;
         attachment.Size = (long)fileSize;
 
-        // Get file data
+        // The size comes from the document, so check it before it becomes an array length.
+        if (fileSize > (ulong)Array.MaxLength)
+            throw new InvalidDataException($"Attachment {index} reports {fileSize} bytes, more than an array can hold.");
+
         if (fileSize > 0)
         {
-            var dataBuffer = Marshal.AllocHGlobal((int)fileSize);
-            try
+            var data = new byte[fileSize];
+            unsafe
             {
-                if (PDFium.FPDFAttachment_GetFile(attachmentHandle, dataBuffer, fileSize, out _))
+                fixed (byte* dataPtr = data)
                 {
-                    attachment.Data = new byte[fileSize];
-                    Marshal.Copy(dataBuffer, attachment.Data, 0, (int)fileSize);
+                    if (PDFium.FPDFAttachment_GetFile(attachmentHandle, (IntPtr)dataPtr, fileLength, out _))
+                        attachment.Data = data;
                 }
-            }
-            finally
-            {
-                Marshal.FreeHGlobal(dataBuffer);
             }
         }
 

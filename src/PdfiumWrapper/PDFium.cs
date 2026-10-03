@@ -23,7 +23,7 @@ public static partial class PDFium
     internal static partial void FPDF_DestroyLibrary();
 
     [LibraryImport(LibraryName)]
-    internal static partial void FPDF_SetSandBoxPolicy(uint policy, int enable);
+    internal static partial void FPDF_SetSandBoxPolicy(CULong policy, int enable);
 
     #endregion
 
@@ -45,13 +45,13 @@ public static partial class PDFium
     internal static partial int FPDF_GetPageCount(IntPtr document);
 
     [LibraryImport(LibraryName)]
-    internal static partial uint FPDF_GetDocPermissions(IntPtr document);
+    internal static partial CULong FPDF_GetDocPermissions(IntPtr document);
 
     [LibraryImport(LibraryName)]
     internal static partial int FPDF_GetSecurityHandlerRevision(IntPtr document);
 
     [StructLayout(LayoutKind.Sequential)]
-    public struct FPDF_FILEACCESS
+    internal struct FPDF_FILEACCESS
     {
         public CULong m_FileLen;
         public IntPtr m_GetBlock;
@@ -82,7 +82,8 @@ public static partial class PDFium
     #region Rendering
 
     [LibraryImport(LibraryName)]
-    internal static partial void FPDF_RenderPage(IntPtr dc, IntPtr page, int start_x, int start_y,
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static partial bool FPDF_RenderPage(IntPtr dc, IntPtr page, int start_x, int start_y,
         int size_x, int size_y, int rotate, int flags);
 
     [LibraryImport(LibraryName)]
@@ -105,8 +106,9 @@ public static partial class PDFium
         IntPtr first_scan, int stride);
 
     [LibraryImport(LibraryName)]
-    internal static partial void FPDFBitmap_FillRect(IntPtr bitmap, int left, int top,
-        int width, int height, uint color);
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static partial bool FPDFBitmap_FillRect(IntPtr bitmap, int left, int top,
+        int width, int height, CULong color);
 
     [LibraryImport(LibraryName)]
     internal static partial IntPtr FPDFBitmap_GetBuffer(IntPtr bitmap);
@@ -150,14 +152,14 @@ public static partial class PDFium
     #region Error Handling
 
     [LibraryImport(LibraryName)]
-    internal static partial uint FPDF_GetLastError();
+    internal static partial CULong FPDF_GetLastError();
 
     #endregion
 
     #region Helper Structures
 
     [StructLayout(LayoutKind.Sequential)]
-    public struct Matrix
+    internal struct Matrix
     {
         public float A;
         public float B;
@@ -168,7 +170,7 @@ public static partial class PDFium
     }
 
     [StructLayout(LayoutKind.Sequential)]
-    public struct RectF
+    internal struct RectF
     {
         public float Left;
         public float Top;

@@ -32,7 +32,7 @@ public class PdfPage : IDisposable
             _page = PDFium.FPDF_LoadPage(owner.Document, pageIndex);
         if (_page == IntPtr.Zero)
         {
-            throw new InvalidOperationException($"Failed to load page {pageIndex}. Error: {PDFium.FPDF_GetLastError()}");
+            throw new InvalidOperationException($"Failed to load page index {pageIndex}.");
         }
 
         PdfiumRuntime.HandleOpened();
@@ -131,7 +131,7 @@ public class PdfPage : IDisposable
         try
         {
             // Fill with white background
-            PDFium.FPDFBitmap_FillRect(bitmap, 0, 0, width, height, 0xFFFFFFFF);
+            PDFium.FPDFBitmap_FillRect(bitmap, 0, 0, width, height, new CULong(0xFFFFFFFF));
 
             using (PdfiumDiagnostics.NativeInterval(NativeOp.Render))
                 PDFium.FPDF_RenderPageBitmap(bitmap, _page, 0, 0, width, height, 0, flags);
@@ -311,9 +311,7 @@ public class PdfPage : IDisposable
             throw;
         }
 
-        // Insert into page
-        PDFium.FPDFPage_InsertObject(_page, textObj.Handle);
-        RegisterAttachedObject(textObj);
+        InsertObject(textObj);
 
         return textObj;
     }
@@ -339,9 +337,7 @@ public class PdfPage : IDisposable
             throw;
         }
 
-        // Insert into page
-        PDFium.FPDFPage_InsertObject(_page, imageObj.Handle);
-        RegisterAttachedObject(imageObj);
+        InsertObject(imageObj);
 
         return imageObj;
     }
@@ -356,9 +352,7 @@ public class PdfPage : IDisposable
 
         var pathObj = PdfPathObject.Create(_owner.Document);
 
-        // Insert into page
-        PDFium.FPDFPage_InsertObject(_page, pathObj.Handle);
-        RegisterAttachedObject(pathObj);
+        InsertObject(pathObj);
 
         return pathObj;
     }
@@ -388,9 +382,7 @@ public class PdfPage : IDisposable
             rectObj.StrokeColor = strokeColor.Value;
         }
 
-        // Insert into page
-        PDFium.FPDFPage_InsertObject(_page, rectObj.Handle);
-        RegisterAttachedObject(rectObj);
+        InsertObject(rectObj);
 
         return rectObj;
     }
@@ -443,9 +435,13 @@ public class PdfPage : IDisposable
     }
 
     /// <summary>
-    /// Get a page object by index
+    /// Get a page object by index, wrapped in the type that matches its kind
+    /// (<see cref="PdfTextObject"/>, <see cref="PdfPathObject"/>, <see cref="PdfImageObject"/>,
+    /// <see cref="PdfShadingObject"/> or <see cref="PdfFormObject"/>). The page owns the object:
+    /// disposing the wrapper does not delete it, and the wrapper is unusable once the page is disposed.
+    /// The same object returns the same wrapper while that wrapper is not disposed.
     /// </summary>
-    public IntPtr GetObject(int index)
+    public PdfPageObject GetObject(int index)
     {
         using var _ = PdfiumRuntime.Enter();
         ThrowIfDisposed();
@@ -453,7 +449,22 @@ public class PdfPage : IDisposable
         if (index < 0 || index >= PDFium.FPDFPage_CountObjects(_page))
             throw new ArgumentOutOfRangeException(nameof(index));
 
-        return PDFium.FPDFPage_GetObject(_page, index);
+        var handle = PDFium.FPDFPage_GetObject(_page, index);
+        if (handle == IntPtr.Zero)
+            throw new InvalidOperationException($"Failed to get object {index} of page index {PageIndex}.");
+
+        // One wrapper per native object: two wrappers would let RemoveObject on one and Dispose
+        // destroy the object under the other.
+        lock (_attachedObjectsLock)
+        {
+            var existing = _attachedObjects?.FirstOrDefault(o => o.Handle == handle);
+            if (existing != null)
+                return existing;
+        }
+
+        var wrapper = PdfPageObject.WrapExisting(handle, _owner.Document);
+        RegisterAttachedObject(wrapper);
+        return wrapper;
     }
 
     #endregion
@@ -465,6 +476,18 @@ public class PdfPage : IDisposable
         {
             _attachedObjects?.Remove(pageObject);
         }
+    }
+
+    private void InsertObject(PdfPageObject pageObject)
+    {
+        // On failure PDFium frees the object, so the wrapper must not destroy it again.
+        if (!PDFium.FPDFPage_InsertObject(_page, pageObject.Handle))
+        {
+            pageObject.InvalidateFreedByPdfium();
+            throw new InvalidOperationException($"Failed to insert the {pageObject.GetType().Name} into page index {PageIndex}.");
+        }
+
+        RegisterAttachedObject(pageObject);
     }
 
     private void RegisterAttachedObject(PdfPageObject pageObject)

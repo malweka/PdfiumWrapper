@@ -34,7 +34,7 @@ public static partial class PDFium
     [LibraryImport(LibraryName)]
     [return: MarshalAs(UnmanagedType.Bool)]
     internal static partial bool FPDF_ImportPagesByIndex(IntPtr dest_doc, IntPtr src_doc,
-        int[] page_indices, ulong length, int index);
+        int[] page_indices, CULong length, int index);
 
     /// <summary>
     /// Copy the viewer preferences from src_doc to dest_doc
@@ -68,7 +68,7 @@ public static partial class PDFium
     /// </summary>
     [LibraryImport(LibraryName, StringMarshalling = StringMarshalling.Utf8)]
     [return: MarshalAs(UnmanagedType.Bool)]
-    internal static partial bool FPDF_SaveAsCopy(IntPtr document, ref FPDF_FILEWRITE fileWrite, uint flags);
+    internal static partial bool FPDF_SaveAsCopy(IntPtr document, ref FPDF_FILEWRITE fileWrite, CULong flags);
 
     /// <summary>
     /// Save the document with specific version
@@ -76,7 +76,7 @@ public static partial class PDFium
     [LibraryImport(LibraryName, StringMarshalling = StringMarshalling.Utf8)]
     [return: MarshalAs(UnmanagedType.Bool)]
     internal static partial bool FPDF_SaveWithVersion(IntPtr document, ref FPDF_FILEWRITE fileWrite,
-        uint flags, int fileVersion);
+        CULong flags, int fileVersion);
 
     #endregion
 
@@ -86,7 +86,7 @@ public static partial class PDFium
     /// Structure for custom file writing
     /// </summary>
     [StructLayout(LayoutKind.Sequential)]
-    public struct FPDF_FILEWRITE
+    internal struct FPDF_FILEWRITE
     {
         /// <summary>
         /// Version number, currently must be 1

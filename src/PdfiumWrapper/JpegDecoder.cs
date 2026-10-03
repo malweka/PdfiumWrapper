@@ -147,4 +147,4 @@ internal sealed class JpegDecoder : IDisposable
 /// <summary>
 /// JPEG image metadata returned by header parsing.
 /// </summary>
-public record JpegInfo(int Width, int Height, LibTurboJpeg.TJSubsampling Subsampling, int Colorspace);
+internal record JpegInfo(int Width, int Height, LibTurboJpeg.TJSubsampling Subsampling, int Colorspace);

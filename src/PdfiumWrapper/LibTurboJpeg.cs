@@ -6,7 +6,7 @@ namespace PdfiumWrapper;
 /// P/Invoke bindings for libjpeg-turbo's TurboJPEG API using modern LibraryImport.
 /// Provides SIMD-accelerated JPEG encoding and decoding of raw pixel buffers.
 /// </summary>
-public static partial class LibTurboJpeg
+internal static partial class LibTurboJpeg
 {
     private const string LibraryName = "turbojpeg";
 

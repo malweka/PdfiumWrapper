@@ -13,22 +13,41 @@ public abstract class PdfPageObject : IDisposable
     private bool _disposed;
     private PdfPage? _ownerPage;
     private PdfDocument? _ownerDocument;
+    private PdfFormObject? _parentForm;
     private IntPtr _handle;
 
-    protected internal IntPtr Handle => _handle;
-    protected internal IntPtr DocumentHandle { get; private set; }
+    internal IntPtr Handle => _handle;
+    internal IntPtr DocumentHandle { get; private set; }
     internal bool IsAttachedToPage { get; set; }
 
     /// <summary>
     /// Wraps a native page object the caller owns (not attached to a page). The native gate must be held.
     /// </summary>
-    protected PdfPageObject(IntPtr handle, IntPtr documentHandle)
+    private protected PdfPageObject(IntPtr handle, IntPtr documentHandle)
     {
         _handle = handle;
         DocumentHandle = documentHandle;
         IsAttachedToPage = false;
         if (handle != IntPtr.Zero)
             PdfiumRuntime.HandleOpened();
+    }
+
+    /// <summary>
+    /// Wraps an existing native object that a page or form object owns, in the wrapper type that
+    /// matches its kind. The caller attaches the result. The native gate must be held.
+    /// </summary>
+    internal static PdfPageObject WrapExisting(IntPtr handle, IntPtr documentHandle)
+    {
+        PdfiumRuntime.AssertHeld();
+        return PDFium.FPDFPageObj_GetType(handle) switch
+        {
+            PDFium.FPDF_PAGEOBJ_TEXT => new PdfTextObject(handle, documentHandle),
+            PDFium.FPDF_PAGEOBJ_PATH => new PdfPathObject(handle, documentHandle),
+            PDFium.FPDF_PAGEOBJ_IMAGE => new PdfImageObject(handle, documentHandle),
+            PDFium.FPDF_PAGEOBJ_SHADING => new PdfShadingObject(handle, documentHandle),
+            PDFium.FPDF_PAGEOBJ_FORM => new PdfFormObject(handle, documentHandle),
+            var type => throw new InvalidOperationException($"PDFium reported an unknown page object type {type}."),
+        };
     }
 
     /// <summary>
@@ -101,13 +120,16 @@ public abstract class PdfPageObject : IDisposable
         return (matrix.A, matrix.B, matrix.C, matrix.D, matrix.E, matrix.F);
     }
 
+    /// <summary>True once this object, or whatever owns its native object, is disposed.</summary>
+    internal bool IsDisposedForChildObjects =>
+        _disposed
+        || _ownerPage?.IsDisposedForChildObjects == true
+        || _ownerDocument?.IsDisposed == true
+        || _parentForm?.IsDisposedForChildObjects == true;
+
     protected void ThrowIfDisposed()
     {
-        if (_disposed)
-            throw new ObjectDisposedException(GetType().Name);
-        if (_ownerPage?.IsDisposedForChildObjects == true)
-            throw new ObjectDisposedException(GetType().Name);
-        if (_ownerDocument?.IsDisposed == true)
+        if (IsDisposedForChildObjects)
             throw new ObjectDisposedException(GetType().Name);
     }
 
@@ -118,6 +140,19 @@ public abstract class PdfPageObject : IDisposable
         _ownerDocument?.UnregisterDetachedObject(this);
         _ownerDocument = null;
         _ownerPage = ownerPage;
+        if (!IsAttachedToPage && _handle != IntPtr.Zero)
+            PdfiumRuntime.HandleClosed();
+        IsAttachedToPage = true;
+    }
+
+    /// <summary>
+    /// The native object belongs to <paramref name="parent"/>'s form XObject and lives as long as
+    /// it does; this wrapper never destroys it. The native gate must be held.
+    /// </summary>
+    internal void AttachToForm(PdfFormObject parent)
+    {
+        PdfiumRuntime.AssertHeld();
+        _parentForm = parent;
         if (!IsAttachedToPage && _handle != IntPtr.Zero)
             PdfiumRuntime.HandleClosed();
         IsAttachedToPage = true;
@@ -142,6 +177,23 @@ public abstract class PdfPageObject : IDisposable
     {
         _ownerPage?.UnregisterAttachedObject(this);
         _ownerPage = null;
+    }
+
+    /// <summary>
+    /// PDFium freed the native object itself (<c>FPDFPage_InsertObject</c> does when it fails),
+    /// so the wrapper must not destroy it again. The native gate must be held.
+    /// </summary>
+    internal void InvalidateFreedByPdfium()
+    {
+        PdfiumRuntime.AssertHeld();
+        ReleasePageTracking();
+        _ownerDocument?.UnregisterDetachedObject(this);
+        _ownerDocument = null;
+        if (!IsAttachedToPage && _handle != IntPtr.Zero)
+            PdfiumRuntime.HandleClosed();
+        _handle = IntPtr.Zero;
+        _disposed = true;
+        GC.SuppressFinalize(this);
     }
 
     /// <summary>The owning page closed and took the native object with it.</summary>

@@ -15,7 +15,7 @@ public class PdfTextObject : PdfPageObject
     /// <summary>
     /// Create a new text object
     /// </summary>
-    public static PdfTextObject Create(IntPtr documentHandle, string fontName = "Helvetica", float fontSize = 12)
+    internal static PdfTextObject Create(IntPtr documentHandle, string fontName = "Helvetica", float fontSize = 12)
     {
         using var _ = PdfiumRuntime.Enter();
 

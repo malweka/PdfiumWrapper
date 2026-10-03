@@ -18,7 +18,7 @@ public static partial class PDFium
     /// <param name="buflen">Length of buffer in bytes</param>
     /// <returns>Number of bytes in the value, including the terminating null character</returns>
     [LibraryImport(LibraryName, StringMarshalling = StringMarshalling.Utf8)]
-    internal static partial ulong FPDF_GetMetaText(IntPtr document, string tag, IntPtr buffer, ulong buflen);
+    internal static partial CULong FPDF_GetMetaText(IntPtr document, string tag, IntPtr buffer, CULong buflen);
 
     #endregion
 
@@ -47,7 +47,7 @@ public static partial class PDFium
     /// <param name="buflen">Length of buffer in bytes</param>
     /// <returns>Number of bytes in the file identifier, or 0 on error</returns>
     [LibraryImport(LibraryName)]
-    internal static partial ulong FPDF_GetFileIdentifier(IntPtr document, int id_type, IntPtr buffer, ulong buflen);
+    internal static partial CULong FPDF_GetFileIdentifier(IntPtr document, int id_type, IntPtr buffer, CULong buflen);
 
     #endregion
 
@@ -62,7 +62,7 @@ public static partial class PDFium
     /// <param name="buflen">Length of buffer in bytes</param>
     /// <returns>Number of bytes in the label, including the terminating null character</returns>
     [LibraryImport(LibraryName)]
-    internal static partial ulong FPDF_GetPageLabel(IntPtr document, int page_index, IntPtr buffer, ulong buflen);
+    internal static partial CULong FPDF_GetPageLabel(IntPtr document, int page_index, IntPtr buffer, CULong buflen);
 
     #endregion
 
@@ -84,7 +84,7 @@ public static partial class PDFium
     /// Get bookmark title
     /// </summary>
     [LibraryImport(LibraryName)]
-    internal static partial ulong FPDFBookmark_GetTitle(IntPtr bookmark, IntPtr buffer, ulong buflen);
+    internal static partial CULong FPDFBookmark_GetTitle(IntPtr bookmark, IntPtr buffer, CULong buflen);
 
     /// <summary>
     /// Get the number of children of a bookmark
@@ -118,7 +118,7 @@ public static partial class PDFium
     /// Get action type
     /// </summary>
     [LibraryImport(LibraryName)]
-    internal static partial ulong FPDFAction_GetType(IntPtr action);
+    internal static partial CULong FPDFAction_GetType(IntPtr action);
 
     /// <summary>
     /// Get destination associated with an action
@@ -130,13 +130,13 @@ public static partial class PDFium
     /// Get file path from a remote goto action
     /// </summary>
     [LibraryImport(LibraryName)]
-    internal static partial ulong FPDFAction_GetFilePath(IntPtr action, IntPtr buffer, ulong buflen);
+    internal static partial CULong FPDFAction_GetFilePath(IntPtr action, IntPtr buffer, CULong buflen);
 
     /// <summary>
     /// Get URI from a URI action
     /// </summary>
     [LibraryImport(LibraryName)]
-    internal static partial ulong FPDFAction_GetURIPath(IntPtr document, IntPtr action, IntPtr buffer, ulong buflen);
+    internal static partial CULong FPDFAction_GetURIPath(IntPtr document, IntPtr action, IntPtr buffer, CULong buflen);
 
     #endregion
 
@@ -146,7 +146,7 @@ public static partial class PDFium
     /// Get page index from a destination
     /// </summary>
     [LibraryImport(LibraryName)]
-    internal static partial ulong FPDFDest_GetDestPageIndex(IntPtr document, IntPtr dest);
+    internal static partial int FPDFDest_GetDestPageIndex(IntPtr document, IntPtr dest);
 
     /// <summary>
     /// Get location coordinates from a destination
@@ -165,20 +165,20 @@ public static partial class PDFium
     /// Get the count of named destinations
     /// </summary>
     [LibraryImport(LibraryName)]
-    internal static partial ulong FPDF_CountNamedDests(IntPtr document);
+    internal static partial CULong FPDF_CountNamedDests(IntPtr document);
 
     /// <summary>
     /// Get a named destination by index
     /// </summary>
     [LibraryImport(LibraryName)]
     internal static partial IntPtr FPDF_GetNamedDestByName(IntPtr document,
-        [MarshalAs(UnmanagedType.LPStr)] string name);
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string name);
 
     /// <summary>
     /// Get a named destination by index
     /// </summary>
     [LibraryImport(LibraryName)]
-    internal static partial IntPtr FPDF_GetNamedDest(IntPtr document, int index, IntPtr buffer, out long buflen);
+    internal static partial IntPtr FPDF_GetNamedDest(IntPtr document, int index, IntPtr buffer, ref CLong buflen);
 
     #endregion
 
@@ -200,7 +200,7 @@ public static partial class PDFium
     /// Get attachment name
     /// </summary>
     [LibraryImport(LibraryName)]
-    internal static partial ulong FPDFAttachment_GetName(IntPtr attachment, IntPtr buffer, ulong buflen);
+    internal static partial CULong FPDFAttachment_GetName(IntPtr attachment, IntPtr buffer, CULong buflen);
 
     /// <summary>
     /// Check if attachment has a key
@@ -208,14 +208,14 @@ public static partial class PDFium
     [LibraryImport(LibraryName)]
     [return: MarshalAs(UnmanagedType.Bool)]
     internal static partial bool FPDFAttachment_HasKey(IntPtr attachment,
-        [MarshalAs(UnmanagedType.LPWStr)] string key);
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string key);
 
     /// <summary>
     /// Get attachment file size
     /// </summary>
     [LibraryImport(LibraryName)]
     [return: MarshalAs(UnmanagedType.Bool)]
-    internal static partial bool FPDFAttachment_GetFile(IntPtr attachment, IntPtr buffer, ulong buflen, out ulong out_buflen);
+    internal static partial bool FPDFAttachment_GetFile(IntPtr attachment, IntPtr buffer, CULong buflen, out CULong out_buflen);
 
     /// <summary>
     /// Add an empty attachment named <paramref name="name"/>; returns IntPtr.Zero if the name is empty or already used
@@ -234,8 +234,8 @@ public static partial class PDFium
     /// Get attachment string value
     /// </summary>
     [LibraryImport(LibraryName)]
-    internal static partial ulong FPDFAttachment_GetStringValue(IntPtr attachment,
-        [MarshalAs(UnmanagedType.LPWStr)] string key, IntPtr buffer, ulong buflen);
+    internal static partial CULong FPDFAttachment_GetStringValue(IntPtr attachment,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string key, IntPtr buffer, CULong buflen);
 
     #endregion
 
@@ -253,11 +253,6 @@ public static partial class PDFium
     [LibraryImport(LibraryName)]
     internal static partial IntPtr FPDFDoc_GetJavaScriptAction(IntPtr document, int index);
 
-    /// <summary>
-    /// Get JavaScript action name
-    /// </summary>
-    [LibraryImport(LibraryName)]
-    internal static partial ulong FPDFDoc_GetJavaScriptActionName(IntPtr document, int index, IntPtr buffer, ulong buflen);
 
     #endregion
 
@@ -311,23 +306,6 @@ public static partial class PDFium
     public const ulong PDFACTION_URI = 3;
     public const ulong PDFACTION_LAUNCH = 4;
     public const ulong PDFACTION_EMBEDDEDGOTO = 5;
-
-    #endregion
-
-    #region Metadata Setting
-
-    /// <summary>
-    /// Set document metadata value by tag
-    /// </summary>
-    /// <param name="document">Document handle</param>
-    /// <param name="tag">Metadata tag (e.g., "Title", "Author", "Subject", "Keywords", "Creator", "Producer", "CreationDate", "ModDate")</param>
-    /// <param name="value">Value to set (UTF-16LE string)</param>
-    /// <returns>True on success, false on failure</returns>
-    [LibraryImport(LibraryName, StringMarshalling = StringMarshalling.Utf8)]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    internal static partial bool FPDF_SetMetaText(IntPtr document, string tag,
-        [MarshalAs(UnmanagedType.LPWStr)] string value);
-
 
     #endregion
 

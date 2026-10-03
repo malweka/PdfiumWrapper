@@ -15,7 +15,7 @@ public class PdfPathObject : PdfPageObject
     /// <summary>
     /// Create a new path object starting at the specified position
     /// </summary>
-    public static PdfPathObject Create(IntPtr documentHandle, float x = 0, float y = 0)
+    internal static PdfPathObject Create(IntPtr documentHandle, float x = 0, float y = 0)
     {
         using var _ = PdfiumRuntime.Enter();
 
@@ -29,7 +29,7 @@ public class PdfPathObject : PdfPageObject
     /// <summary>
     /// Create a new rectangle path object
     /// </summary>
-    public static PdfPathObject CreateRectangle(IntPtr documentHandle, float x, float y, float width, float height)
+    internal static PdfPathObject CreateRectangle(IntPtr documentHandle, float x, float y, float width, float height)
     {
         using var _ = PdfiumRuntime.Enter();
 
