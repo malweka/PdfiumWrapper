@@ -424,6 +424,13 @@ public class PdfDocument : IDisposable
     public void DeletePage(int pageIndex)
     {
         using var _ = PdfiumRuntime.Enter();
+        DeletePageCore(pageIndex);
+    }
+
+    /// <summary>The native gate must be held.</summary>
+    internal void DeletePageCore(int pageIndex)
+    {
+        PdfiumRuntime.AssertHeld();
         ThrowIfDisposed();
 
         int pageCount = PDFium.FPDF_GetPageCount(Document);
@@ -446,7 +453,7 @@ public class PdfDocument : IDisposable
         if (page == null)
             throw new ArgumentNullException(nameof(page));
 
-        DeletePage(page.PageIndex);
+        DeletePageCore(page.PageIndex);
     }
 
     /// <summary>
@@ -1405,9 +1412,34 @@ public class PdfDocument : IDisposable
         }
     }
 
+    /// <summary>
+    /// Saves the PDF document to a new byte array. Serialized into a pooled buffer under the gate,
+    /// copied out after the gate is released. Used by <see cref="PdfMerger.ToBytes"/>.
+    /// </summary>
+    internal byte[] SaveToArray(uint flags)
+    {
+        byte[] buffer;
+        int length;
+        using (PdfiumRuntime.Enter())
+        {
+            ThrowIfDisposed();
+            (buffer, length) = SaveCore(flags);
+        }
+
+        try
+        {
+            return buffer.AsSpan(0, length).ToArray();
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(buffer);
+        }
+    }
+
     /// <summary>Serializes into a pooled buffer the caller must return. The native gate must be held.</summary>
     private (byte[] Buffer, int Length) SaveCore(uint flags)
     {
+        PdfiumRuntime.AssertHeld();
         if (!PooledFileWriter.TrySave(Document, flags, out var buffer, out int length, out uint error))
             throw new InvalidOperationException($"Failed to save PDF document. PDFium error code: {error}");
 

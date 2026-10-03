@@ -1,7 +1,4 @@
-﻿using System.Buffers;
-using System.Runtime.InteropServices;
-
-namespace PdfiumWrapper;
+﻿namespace PdfiumWrapper;
 
 /// <summary>
 /// High-level class for merging and manipulating PDF documents.
@@ -12,26 +9,16 @@ namespace PdfiumWrapper;
 /// </remarks>
 public class PdfMerger : IDisposable
 {
-    private IntPtr _document;
-    private volatile bool _disposed;
-    private byte[]? _documentBytes;
-    private GCHandle _documentBytesHandle;
-    private string? _spoolPath;
+    // The merged document. It owns the native handle, the pinned input buffer or spool file, and
+    // their release on dispose or, if the merger is dropped, through its own finalizer.
+    private readonly PdfDocument _target;
 
     /// <summary>
     /// Create a new empty PDF document for merging
     /// </summary>
     public PdfMerger()
     {
-        using var _ = PdfiumRuntime.Enter();
-
-        _document = PDFium.FPDF_CreateNewDocument();
-        if (_document == IntPtr.Zero)
-        {
-            throw new InvalidOperationException("Failed to create new PDF document");
-        }
-
-        PdfiumRuntime.HandleOpened();
+        _target = new PdfDocument();
     }
 
     /// <summary>
@@ -39,8 +26,7 @@ public class PdfMerger : IDisposable
     /// </summary>
     public PdfMerger(string filePath, string? password = null)
     {
-        using var _ = PdfiumRuntime.Enter();
-        LoadFileDocument(filePath, password);
+        _target = new PdfDocument(filePath, password);
     }
 
     /// <summary>
@@ -48,10 +34,7 @@ public class PdfMerger : IDisposable
     /// </summary>
     public PdfMerger(byte[] data, string? password = null)
     {
-        ArgumentNullException.ThrowIfNull(data);
-
-        using var _ = PdfiumRuntime.Enter();
-        LoadPinnedMemoryDocument(data, 0, data.Length, password);
+        _target = new PdfDocument(data, password);
     }
 
     /// <summary>
@@ -63,30 +46,7 @@ public class PdfMerger : IDisposable
     /// </summary>
     public PdfMerger(Stream pdfStream, string? password = null)
     {
-        ArgumentNullException.ThrowIfNull(pdfStream);
-
-        // User I/O happens here, before the gate: a slow stream must not stall other callers.
-        var spool = SpooledInput.From(pdfStream);
-
-        using var _ = PdfiumRuntime.Enter();
-        if (spool.TempPath != null)
-        {
-            _spoolPath = spool.TempPath;
-            try
-            {
-                LoadFileDocument(spool.TempPath, password);
-            }
-            catch
-            {
-                SpooledInput.TryDelete(_spoolPath);
-                _spoolPath = null;
-                throw;
-            }
-        }
-        else
-        {
-            LoadPinnedMemoryDocument(spool.Buffer!, spool.Offset, spool.Length, password);
-        }
+        _target = new PdfDocument(pdfStream, password);
     }
 
     public int PageCount
@@ -95,61 +55,8 @@ public class PdfMerger : IDisposable
         {
             using var _ = PdfiumRuntime.Enter();
             ThrowIfDisposed();
-            return PDFium.FPDF_GetPageCount(_document);
+            return _target.PageCountCore;
         }
-    }
-
-    private void LoadFileDocument(string filePath, string? password)
-    {
-        PdfiumRuntime.AssertHeld();
-
-        using (PdfiumDiagnostics.NativeInterval(NativeOp.LoadDocument))
-            _document = PDFium.FPDF_LoadDocument(filePath, password);
-
-        // The error is read in the same gated scope as the failing call.
-        if (_document == IntPtr.Zero)
-        {
-            throw new InvalidOperationException($"Failed to load PDF document. Error: {PDFium.FPDF_GetLastError()}");
-        }
-
-        PdfiumRuntime.HandleOpened();
-    }
-
-    private void LoadPinnedMemoryDocument(byte[] data, int offset, int length, string? password)
-    {
-        PdfiumRuntime.AssertHeld();
-
-        _documentBytes = data;
-        _documentBytesHandle = GCHandle.Alloc(data, GCHandleType.Pinned);
-
-        try
-        {
-            var dataPtr = IntPtr.Add(_documentBytesHandle.AddrOfPinnedObject(), offset);
-            using (PdfiumDiagnostics.NativeInterval(NativeOp.LoadDocument))
-                _document = PDFium.FPDF_LoadMemDocument(dataPtr, length, password);
-            if (_document == IntPtr.Zero)
-            {
-                throw new InvalidOperationException(
-                    $"Failed to load PDF document from memory. Error: {PDFium.FPDF_GetLastError()}");
-            }
-
-            PdfiumRuntime.HandleOpened();
-        }
-        catch
-        {
-            ReleasePinnedMemoryDocument();
-            throw;
-        }
-    }
-
-    private void ReleasePinnedMemoryDocument()
-    {
-        if (_documentBytesHandle.IsAllocated)
-        {
-            _documentBytesHandle.Free();
-        }
-
-        _documentBytes = null;
     }
 
     /// <summary>
@@ -202,7 +109,7 @@ public class PdfMerger : IDisposable
         var sourceHandle = GetDocumentHandle(sourceDoc);
         bool success;
         using (PdfiumDiagnostics.NativeInterval(NativeOp.Import))
-            success = PDFium.FPDF_ImportPages(_document, sourceHandle, pageRange, PDFium.FPDF_GetPageCount(_document));
+            success = PDFium.FPDF_ImportPages(_target.Document, sourceHandle, pageRange, _target.PageCountCore);
 
         if (!success)
         {
@@ -241,8 +148,8 @@ public class PdfMerger : IDisposable
         var sourceHandle = GetDocumentHandle(sourceDoc);
         bool success;
         using (PdfiumDiagnostics.NativeInterval(NativeOp.Import))
-            success = PDFium.FPDF_ImportPagesByIndex(_document, sourceHandle,
-                pageIndices, (ulong)pageIndices.Length, PDFium.FPDF_GetPageCount(_document));
+            success = PDFium.FPDF_ImportPagesByIndex(_target.Document, sourceHandle,
+                pageIndices, (ulong)pageIndices.Length, _target.PageCountCore);
 
         if (!success)
         {
@@ -288,13 +195,12 @@ public class PdfMerger : IDisposable
         ThrowIfDisposed();
         if (sourceDoc == null)
             throw new ArgumentNullException(nameof(sourceDoc));
-        if (insertAtIndex < 0 || insertAtIndex > PDFium.FPDF_GetPageCount(_document))
-            throw new ArgumentOutOfRangeException(nameof(insertAtIndex));
+        ThrowIfInvalidInsertIndex(insertAtIndex);
 
         var sourceHandle = GetDocumentHandle(sourceDoc);
         bool success;
         using (PdfiumDiagnostics.NativeInterval(NativeOp.Import))
-            success = PDFium.FPDF_ImportPages(_document, sourceHandle, pageRange, insertAtIndex);
+            success = PDFium.FPDF_ImportPages(_target.Document, sourceHandle, pageRange, insertAtIndex);
 
         if (!success)
         {
@@ -316,13 +222,12 @@ public class PdfMerger : IDisposable
             throw new ArgumentNullException(nameof(sourceDoc));
         if (pageIndices == null)
             throw new ArgumentNullException(nameof(pageIndices));
-        if (insertAtIndex < 0 || insertAtIndex > PDFium.FPDF_GetPageCount(_document))
-            throw new ArgumentOutOfRangeException(nameof(insertAtIndex));
+        ThrowIfInvalidInsertIndex(insertAtIndex);
 
         var sourceHandle = GetDocumentHandle(sourceDoc);
         bool success;
         using (PdfiumDiagnostics.NativeInterval(NativeOp.Import))
-            success = PDFium.FPDF_ImportPagesByIndex(_document, sourceHandle,
+            success = PDFium.FPDF_ImportPagesByIndex(_target.Document, sourceHandle,
                 pageIndices, (ulong)pageIndices.Length, insertAtIndex);
 
         if (!success)
@@ -339,10 +244,7 @@ public class PdfMerger : IDisposable
     {
         using var _ = PdfiumRuntime.Enter();
         ThrowIfDisposed();
-        if (pageIndex < 0 || pageIndex >= PDFium.FPDF_GetPageCount(_document))
-            throw new ArgumentOutOfRangeException(nameof(pageIndex));
-
-        PDFium.FPDFPage_Delete(_document, pageIndex);
+        _target.DeletePageCore(pageIndex);
     }
 
     /// <summary>
@@ -361,7 +263,7 @@ public class PdfMerger : IDisposable
 
         foreach (var index in sortedIndices)
         {
-            DeletePage(index);
+            _target.DeletePageCore(index);
         }
     }
 
@@ -370,24 +272,11 @@ public class PdfMerger : IDisposable
     /// </summary>
     public void Save(string outputPath, uint flags = 0)
     {
-        byte[] buffer;
-        int length;
-        using (PdfiumRuntime.Enter())
-        {
-            ThrowIfDisposed();
-            ArgumentException.ThrowIfNullOrWhiteSpace(outputPath);
-            (buffer, length) = SaveCore(flags);
-        }
-
-        try
-        {
-            using var fileStream = PdfHelpers.OpenWriteFileStream(outputPath);
-            fileStream.Write(buffer, 0, length);
-        }
-        finally
-        {
-            ArrayPool<byte>.Shared.Return(buffer);
-        }
+        // Checked here so that a disposed merger names itself; the target repeats the check inside
+        // the gate before any native call. Entering the gate here would hold it across the write.
+        ThrowIfDisposed();
+        ArgumentException.ThrowIfNullOrWhiteSpace(outputPath);
+        _target.Save(outputPath, flags);
     }
 
     /// <summary>
@@ -400,24 +289,9 @@ public class PdfMerger : IDisposable
     /// </remarks>
     public void Save(Stream outputStream, uint flags = 0)
     {
-        byte[] buffer;
-        int length;
-        using (PdfiumRuntime.Enter())
-        {
-            ThrowIfDisposed();
-            if (outputStream == null)
-                throw new ArgumentNullException(nameof(outputStream));
-            (buffer, length) = SaveCore(flags);
-        }
-
-        try
-        {
-            outputStream.Write(buffer, 0, length);
-        }
-        finally
-        {
-            ArrayPool<byte>.Shared.Return(buffer);
-        }
+        ThrowIfDisposed();
+        ArgumentNullException.ThrowIfNull(outputStream);
+        _target.SaveToStream(outputStream, flags);
     }
 
     /// <summary>
@@ -425,31 +299,8 @@ public class PdfMerger : IDisposable
     /// </summary>
     public byte[] ToBytes(uint flags = 0)
     {
-        byte[] buffer;
-        int length;
-        using (PdfiumRuntime.Enter())
-        {
-            ThrowIfDisposed();
-            (buffer, length) = SaveCore(flags);
-        }
-
-        try
-        {
-            return buffer.AsSpan(0, length).ToArray();
-        }
-        finally
-        {
-            ArrayPool<byte>.Shared.Return(buffer);
-        }
-    }
-
-    /// <summary>Serializes into a pooled buffer the caller must return. The native gate must be held.</summary>
-    private (byte[] Buffer, int Length) SaveCore(uint flags)
-    {
-        if (!PooledFileWriter.TrySave(_document, flags, out var buffer, out int length, out uint error))
-            throw new InvalidOperationException($"Failed to save PDF. Error: {error}");
-
-        return (buffer, length);
+        ThrowIfDisposed();
+        return _target.SaveToArray(flags);
     }
 
     /// <summary>
@@ -463,7 +314,7 @@ public class PdfMerger : IDisposable
             throw new ArgumentNullException(nameof(sourceDoc));
 
         var sourceHandle = GetDocumentHandle(sourceDoc);
-        bool success = PDFium.FPDF_CopyViewerPreferences(_document, sourceHandle);
+        bool success = PDFium.FPDF_CopyViewerPreferences(_target.Document, sourceHandle);
         if (!success)
         {
             throw new InvalidOperationException($"Failed to copy viewer preferences. Error: {PDFium.FPDF_GetLastError()}");
@@ -476,9 +327,17 @@ public class PdfMerger : IDisposable
         return doc.Document;
     }
 
+    /// <summary>The native gate must be held.</summary>
+    private void ThrowIfInvalidInsertIndex(int insertAtIndex)
+    {
+        int pageCount = _target.PageCountCore;
+        if (insertAtIndex < 0 || insertAtIndex > pageCount)
+            throw new ArgumentOutOfRangeException(nameof(insertAtIndex), $"Insert index must be between 0 and {pageCount}");
+    }
+
     private void ThrowIfDisposed()
     {
-        ObjectDisposedException.ThrowIf(_disposed, this);
+        ObjectDisposedException.ThrowIf(_target.IsDisposed, this);
     }
 
     /// <summary>
@@ -486,11 +345,7 @@ public class PdfMerger : IDisposable
     /// </summary>
     public void Dispose()
     {
-        using (PdfiumRuntime.Enter())
-        {
-            Dispose(true);
-        }
-
+        Dispose(true);
         GC.SuppressFinalize(this);
     }
 
@@ -498,52 +353,13 @@ public class PdfMerger : IDisposable
     /// Releases the unmanaged resources and optionally releases managed resources.
     /// </summary>
     /// <param name="disposing">
-    /// true when called from <see cref="Dispose()"/>: the document is closed now, under the native gate.
-    /// false when called from the finalizer: the handle is queued and closed by the next gated operation.
+    /// true when called from <see cref="Dispose()"/>: the merged document is closed now, under the native gate.
+    /// false when called from a derived type's finalizer: nothing to do here, because the merged
+    /// document's own finalizer queues its handles for the next gated operation.
     /// </param>
     protected virtual void Dispose(bool disposing)
     {
-        if (!disposing)
-        {
-            // Finalizer thread: never call PDFium, never wait on the gate.
-            // The document goes first; what it was reading from is released after it closes.
-            PdfiumRuntime.EnqueueRelease(NativeHandleKind.Document, Interlocked.Exchange(ref _document, IntPtr.Zero));
-            if (_documentBytesHandle.IsAllocated)
-            {
-                PdfiumRuntime.EnqueueRelease(NativeHandleKind.PinnedBuffer, GCHandle.ToIntPtr(_documentBytesHandle));
-                _documentBytesHandle = default;
-            }
-
-            PdfiumRuntime.EnqueueTempFile(_spoolPath);
-            return;
-        }
-
-        if (_disposed)
-            return;
-
-        using var _ = PdfiumRuntime.Enter();
-        _disposed = true;
-
-        if (_document != IntPtr.Zero)
-        {
-            using (PdfiumDiagnostics.NativeInterval(NativeOp.Close))
-                PDFium.FPDF_CloseDocument(_document);
-            PdfiumRuntime.HandleClosed();
-            _document = IntPtr.Zero;
-        }
-
-        // Only after the document is closed: PDFium reads from these for as long as it is open.
-        ReleasePinnedMemoryDocument();
-        SpooledInput.TryDelete(_spoolPath);
-        _spoolPath = null;
+        if (disposing)
+            _target.Dispose();
     }
-
-    /// <summary>
-    /// Queues the native handle for deferred release if Dispose was not called.
-    /// </summary>
-    ~PdfMerger()
-    {
-        Dispose(false);
-    }
-
 }

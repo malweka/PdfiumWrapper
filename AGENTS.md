@@ -192,6 +192,8 @@ All PDF and TIFF objects implement `IDisposable`. Always use `using`. Pages from
 
 A document owns its pages, the forms returned by `GetForm()` (a new form per call), and page objects removed from its pages with `RemoveObject`; disposing the document disposes them. An object dropped without `Dispose()` has its handles queued by its finalizer and closed by the next gated operation or `PdfiumRuntime.ReleasePending()`.
 
+`PdfMerger` wraps a private `PdfDocument` (`_target`), built by the matching `PdfDocument` constructor. That document owns the native handle, the pinned input buffer or spool file, saving, disposal and the finalizer; the merger has no finalizer or load code of its own. Make document lifecycle changes in `PdfDocument` only.
+
 ### Page Editing Workflow
 
 After adding/modifying page objects, `page.GenerateContent()` MUST be called before saving. Without it, changes are not written to the content stream.

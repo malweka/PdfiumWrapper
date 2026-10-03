@@ -963,6 +963,8 @@ Starts with an existing PDF from stream.
 
 The stream is read from its current position to its end during construction and is left positioned at its end, with the same in-memory and temporary-file rules as [`PdfDocument(Stream)`](#pdfdocumentstream-pdfstream-string-password--null). The merger does not use the stream afterwards, so it can be closed immediately. (Before 2.0 a seekable stream had to stay open for the lifetime of the merger.)
 
+Each constructor builds the merger on a private `PdfDocument` loaded through the matching `PdfDocument` constructor, so loading, error messages, saving and disposal behave exactly as they do for `PdfDocument`. A merger dropped without `Dispose()` is released by that document's finalizer.
+
 ### Thread Safety
 
 One `PdfMerger` instance must not be used from two threads at once. Different mergers and documents may be used from different threads at the same time; the wrapper serializes the native work.
