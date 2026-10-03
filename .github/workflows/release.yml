@@ -79,14 +79,22 @@ jobs:
           pattern: nupkg-runtime-*
           merge-multiple: true
 
+      # The main package depends on the four runtime packages packed above (see
+      # PackRuntimeDependencies in PdfiumWrapper.csproj); restore them from ./artifacts.
       - name: Restore main package
-        run: dotnet restore src/PdfiumWrapper/PdfiumWrapper.csproj
+        run: |
+          dotnet restore src/PdfiumWrapper/PdfiumWrapper.csproj \
+            --source ./artifacts \
+            --source https://api.nuget.org/v3/index.json \
+            /p:PackRuntimeDependencies=true \
+            /p:Version=${{ needs.guard.outputs.version }}
 
       - name: Build main package
         run: |
           dotnet build src/PdfiumWrapper/PdfiumWrapper.csproj \
             --configuration Release \
             --no-restore \
+            /p:PackRuntimeDependencies=true \
             /p:Version=${{ needs.guard.outputs.version }} \
             /p:FileVersion=${{ needs.guard.outputs.version }} \
             /p:AssemblyVersion=${{ needs.guard.outputs.version }}
@@ -97,9 +105,19 @@ jobs:
             --configuration Release \
             --no-build \
             --output ./artifacts \
+            /p:PackRuntimeDependencies=true \
             /p:Version=${{ needs.guard.outputs.version }} \
             /p:FileVersion=${{ needs.guard.outputs.version }} \
             /p:AssemblyVersion=${{ needs.guard.outputs.version }}
+
+      - name: Verify the main package depends on every runtime package
+        run: |
+          VERSION=${{ needs.guard.outputs.version }}
+          NUSPEC=$(unzip -p "artifacts/PdfiumWrapper.$VERSION.nupkg" PdfiumWrapper.nuspec)
+          for RID in win-x64 linux-x64 osx-x64 osx-arm64; do
+            echo "$NUSPEC" | grep -qF "id=\"PdfiumWrapper.runtime.$RID\" version=\"[$VERSION]\"" \
+              || { echo "PdfiumWrapper.$VERSION.nupkg lacks a dependency on PdfiumWrapper.runtime.$RID [$VERSION]"; exit 1; }
+          done
 
       - name: Build and pack PdfiumWrapper.Processing (+ symbols)
         run: |
