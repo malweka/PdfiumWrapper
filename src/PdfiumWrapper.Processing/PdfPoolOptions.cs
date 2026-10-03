@@ -37,7 +37,7 @@ public sealed class PdfPoolOptions
 
     /// <summary>
     /// Time allowed for one attempt of a job. On expiry the worker is killed and replaced and the
-    /// attempt is reported as timed out. Default 2 minutes.
+    /// attempt is reported as timed out. Default 2 minutes; at most <see cref="MaxTimeout"/>.
     /// </summary>
     public TimeSpan JobTimeout { get; set; } = TimeSpan.FromMinutes(2);
 
@@ -45,6 +45,13 @@ public sealed class PdfPoolOptions
     /// Attempts a job gets when its worker crashes or times out. A job that fails with an error
     /// from the document itself is not retried. Default 2.
     /// </summary>
+    /// <remarks>
+    /// An attempt is charged to the job that ended it. A job whose worker was killed for another
+    /// job's timeout or cancellation runs again without using an attempt. When a worker running
+    /// several jobs crashes, which one caused it is unknown: each of them runs again alone on a
+    /// worker without using an attempt, and the one that crashes its worker again is charged. A
+    /// job gets at most <see cref="MaxAttempts"/> such free runs, so none is retried forever.
+    /// </remarks>
     public int MaxAttempts { get; set; } = 2;
 
     /// <summary>
@@ -55,15 +62,38 @@ public sealed class PdfPoolOptions
 
     /// <summary>
     /// When set, a worker whose working set exceeds this many bytes after a job is retired and
-    /// replaced. Null (the default) never retires a worker for memory.
+    /// replaced. A retired worker takes no new job; the jobs it is running finish (each within its
+    /// <see cref="JobTimeout"/>) and then it is shut down. Null (the default) never retires a
+    /// worker for memory.
     /// </summary>
     public long? MaxWorkerMemoryBytes { get; set; }
 
     /// <summary>
-    /// Time a new worker gets to report ready. Default 30 s. Covers process start, native
-    /// initialization and warm-up; raise it for slow hosts.
+    /// Time a new worker gets to report ready. Default 30 s; at most <see cref="MaxTimeout"/>.
+    /// Covers process start, native initialization and warm-up; raise it for slow hosts.
     /// </summary>
     public TimeSpan WorkerStartTimeout { get; set; } = TimeSpan.FromSeconds(30);
+
+    /// <summary>
+    /// Worker starts that may fail in a row, with no worker alive, before waiting jobs give up.
+    /// Default 3.
+    /// </summary>
+    /// <remarks>
+    /// Once this many starts in a row have failed (the worker executable is missing or broken, the
+    /// disk is full, a start exceeds <see cref="WorkerStartTimeout"/>) and no worker is alive, every
+    /// job waiting for a worker finishes as <see cref="PdfJobStatus.Failed"/> with the last start
+    /// error. Until a start succeeds, a job submitted later waits for one more start attempt and
+    /// fails with it if that fails too. A successful start resets the count. Starts that fail while
+    /// another worker is alive count, but fail no job: that worker still serves the queue.
+    /// </remarks>
+    public int MaxConsecutiveStartFailures { get; set; } = 3;
+
+    /// <summary>
+    /// The longest <see cref="JobTimeout"/> or <see cref="WorkerStartTimeout"/> accepted: about
+    /// 49.7 days (<see cref="uint.MaxValue"/> - 1 milliseconds), the limit of .NET timers. There is
+    /// no infinite timeout; use this value for "practically never".
+    /// </summary>
+    public static TimeSpan MaxTimeout { get; } = TimeSpan.FromMilliseconds(uint.MaxValue - 1);
 
     /// <summary>
     /// Executable (or <c>.dll</c>, run through <c>dotnet</c>) to start as a worker. Null (the
@@ -89,11 +119,15 @@ public sealed class PdfPoolOptions
         if (JobsPerWorker is < 1 or > 16) throw new ArgumentOutOfRangeException(nameof(JobsPerWorker), "JobsPerWorker must be between 1 and 16.");
         if (ScaleUpAfter < TimeSpan.Zero) throw new ArgumentOutOfRangeException(nameof(ScaleUpAfter));
         if (IdleTimeout <= TimeSpan.Zero) throw new ArgumentOutOfRangeException(nameof(IdleTimeout));
-        if (JobTimeout <= TimeSpan.Zero) throw new ArgumentOutOfRangeException(nameof(JobTimeout));
+        // Timeouts become timers (CancellationTokenSource, Task.Delay), which reject anything longer.
+        if (JobTimeout <= TimeSpan.Zero || JobTimeout > MaxTimeout)
+            throw new ArgumentOutOfRangeException(nameof(JobTimeout), $"JobTimeout must be positive and at most {MaxTimeout}.");
         if (MaxAttempts < 1) throw new ArgumentOutOfRangeException(nameof(MaxAttempts), "MaxAttempts must be at least 1.");
         if (QueueCapacity < 1) throw new ArgumentOutOfRangeException(nameof(QueueCapacity), "QueueCapacity must be at least 1.");
         if (MaxWorkerMemoryBytes is <= 0) throw new ArgumentOutOfRangeException(nameof(MaxWorkerMemoryBytes));
-        if (WorkerStartTimeout <= TimeSpan.Zero) throw new ArgumentOutOfRangeException(nameof(WorkerStartTimeout));
+        if (WorkerStartTimeout <= TimeSpan.Zero || WorkerStartTimeout > MaxTimeout)
+            throw new ArgumentOutOfRangeException(nameof(WorkerStartTimeout), $"WorkerStartTimeout must be positive and at most {MaxTimeout}.");
+        if (MaxConsecutiveStartFailures < 1) throw new ArgumentOutOfRangeException(nameof(MaxConsecutiveStartFailures), "MaxConsecutiveStartFailures must be at least 1.");
         if (WorkerPath != null && !File.Exists(WorkerPath)) throw new PdfPoolException($"WorkerPath '{WorkerPath}' does not exist.");
     }
 
@@ -109,6 +143,7 @@ public sealed class PdfPoolOptions
         QueueCapacity = QueueCapacity,
         MaxWorkerMemoryBytes = MaxWorkerMemoryBytes,
         WorkerStartTimeout = WorkerStartTimeout,
+        MaxConsecutiveStartFailures = MaxConsecutiveStartFailures,
         WorkerPath = WorkerPath,
         WorkerArguments = WorkerArguments.ToArray(),
         TempDirectory = TempDirectory,

@@ -1450,7 +1450,9 @@ Each call is one job on one worker. Inputs are `PdfInput` values; a `string` pat
 | `ConvertToTiffAsync(PdfInput input, string outputPath, int dpi = 200, TiffColorMode colorMode = TiffColorMode.Bilevel, byte threshold = 128, CancellationToken ct = default)` | `Task<PdfJobResult<TiffFile>>`: one multi-page file |
 | `ExtractTextAsync(PdfInput input, CancellationToken ct = default)` | `Task<PdfJobResult<string[]>>`: one string per page |
 
-Batch overloads take `IEnumerable<PdfInput>` and return `IAsyncEnumerable<PdfJobResult<T>>`, yielding results **in completion order** as they finish. Image and TIFF batches take an `outputRoot` and write each document to `{outputRoot}/{document name without extension}` (`.tiff` appended for TIFF); a name that repeats within the batch gets `-2`, `-3`, ... appended so documents never overwrite each other.
+Batch overloads take `IEnumerable<PdfInput>` and return `IAsyncEnumerable<PdfJobResult<T>>`, yielding results **in completion order** as they finish. Image and TIFF batches take an `outputRoot` and write each document to `{outputRoot}/{document name without extension}` (`.tiff` appended for TIFF); a name that repeats within the batch gets `-2`, `-3`, ... appended so documents never overwrite each other. Names are compared as the file system resolves them, ignoring case, so `a.pdf`, `A.pdf` and (on Windows) `a .pdf` never share a directory. Characters a file name cannot hold become `_`, and a name that is empty, `.` or `..`, or ends in a dot or a space, becomes `document`; every output lies directly under `outputRoot`.
+
+Leaving a batch early (`break`, an exception, or disposing the enumerator) cancels the jobs it has already submitted, which end as `Cancelled`, and submits no more.
 
 ```csharp
 await foreach (var r in pool.ConvertToPngAsync(files, "out", dpi: 150, ct: ct))
@@ -1471,6 +1473,9 @@ Output files are written to a temporary name and renamed when complete, so a cra
 
 - **Backpressure:** at most `QueueCapacity` jobs wait for a worker; a submission beyond that awaits a slot. No exception, no unbounded growth.
 - **Failures never fail the pool.** A worker that crashes (for example a native abort on a damaged PDF), hangs past `JobTimeout` or sends malformed data is killed and replaced. Its job is reported as `WorkerCrashed` or `TimedOut` and retried on a fresh worker up to `MaxAttempts`. A job the document itself rejects (bad file, wrong password) is `Failed` and not retried. Other jobs are unaffected.
+- **Neighbours on a worker are not charged.** With `JobsPerWorker` above 1, a worker killed for one job's timeout or cancellation takes its other jobs down too; they run again without using an attempt. When a worker running several jobs crashes, which one caused it is unknown: each runs again alone on a worker without using an attempt, and only the one that crashes again is charged. A job gets at most `MaxAttempts` such free runs.
+- **Workers that cannot start.** Once `MaxConsecutiveStartFailures` starts in a row have failed and no worker is alive, the jobs waiting for a worker end as `Failed` with the start error instead of waiting forever. A job submitted later waits for one more start attempt; the first successful start resets the count.
+- **Memory retirement** (`MaxWorkerMemoryBytes`): the worker takes no new job, finishes the ones it is running (each within its `JobTimeout`), then shuts down and is replaced.
 - **Cancellation:** a cancelled job that has not started is dropped; one in flight is asked to stop between pages and its partial output removed. Either way the result is `Cancelled`.
 - **`DisposeAsync`:** stops accepting jobs, cancels queued ones, lets in-flight ones finish (up to `JobTimeout`), then stops every worker. Submitting afterwards throws `ObjectDisposedException`.
 
@@ -1495,11 +1500,12 @@ Validated when the pool is created (`ArgumentOutOfRangeException`, or `PdfPoolEx
 | `JobsPerWorker` | 2 | Jobs a worker runs at once. PDFium serializes rendering inside a process, so a second job lets one document encode and write while the other renders. More mostly adds memory (one rendered page per job in flight) |
 | `ScaleUpAfter` | 500 ms | A worker is added when every slot of every worker has been busy and jobs have been waiting for this long. A burst reaches `MaxWorkers` in seconds; a single stray job never starts a process |
 | `IdleTimeout` | 60 s | A worker idle for this long is stopped, down to `MinWorkers` |
-| `JobTimeout` | 2 min | Per attempt. On expiry the worker is killed and replaced |
-| `MaxAttempts` | 2 | Attempts for a job whose worker crashed or timed out |
+| `JobTimeout` | 2 min | Per attempt. On expiry the worker is killed and replaced. At most `PdfPoolOptions.MaxTimeout` (about 49.7 days, the limit of .NET timers); there is no infinite timeout |
+| `MaxAttempts` | 2 | Attempts for a job whose worker crashed or timed out. Only the job that ended the attempt is charged (see Behavior) |
 | `QueueCapacity` | 1,000 | Jobs that may wait. Submissions beyond this wait for a slot |
-| `MaxWorkerMemoryBytes` | null | When set, a worker whose working set exceeds this after a job is retired and replaced |
-| `WorkerStartTimeout` | 30 s | Time a new worker gets to report ready |
+| `MaxWorkerMemoryBytes` | null | When set, a worker whose working set exceeds this after a job is retired: it finishes its running jobs, then is replaced |
+| `WorkerStartTimeout` | 30 s | Time a new worker gets to report ready. At most `PdfPoolOptions.MaxTimeout` |
+| `MaxConsecutiveStartFailures` | 3 | Worker starts that may fail in a row, with no worker alive, before the jobs waiting for a worker end as `Failed` with the start error |
 | `WorkerPath` | null | Executable (or `.dll`, run through `dotnet`) to start as a worker. Null re-launches this process |
 | `WorkerArguments` | empty | Arguments for `WorkerPath` |
 | `WorkerEnvironment` | empty | Extra environment variables for workers |
@@ -1520,10 +1526,12 @@ public sealed record PdfJobResult<T>(string Input, PdfJobStatus Status, T? Value
 | `PdfJobStatus` | Meaning |
 |---|---|
 | `Succeeded` | `Value` is set |
-| `Failed` | The document or request was rejected (bad file, wrong password, missing output path). Not retried |
+| `Failed` | The document or request was rejected (bad file, wrong password, missing output path). Not retried. Also the status when no worker could be started (`MaxConsecutiveStartFailures`) or the pool's dispatcher stopped on an unexpected error; `Error` says which |
 | `TimedOut` | The last attempt exceeded `JobTimeout` |
 | `Cancelled` | Cancelled by the caller, or the pool was disposed while the job waited |
 | `WorkerCrashed` | The worker process died during the last attempt |
+
+`Attempts` counts the attempts charged to the job: 1 unless its own worker crashed or it timed out, and 0 for a job that never reached a worker. A run ended only because a neighbour on the same worker brought it down is not counted.
 
 `PdfJobTimings` has `Queued` (submission to dispatch), `Processing` (dispatch to result, last attempt) and `Total`. `ImageFiles` is `(int PageCount, IReadOnlyList<string> Files, long TotalBytes)`; `TiffFile` is `(int PageCount, string Path, long Bytes)`.
 
