@@ -245,10 +245,12 @@ public void ConvertPdfToImages(string pdfPath, string outputDirectory, int dpi =
     // Save all pages as PNG
     doc.SaveAsPngs(outputDirectory, "page", dpi);
     
-    // Or save as JPEG with quality setting
+    // Or save as JPEG with quality setting (90 is also the default)
     doc.SaveAsJpegs(outputDirectory, "page", quality: 90, dpi);
 }
 ```
+
+Pages are written as `{prefix}_001.png`, `{prefix}_002.png`, and so on. Every output file, TIFF included, is opened by .NET, so non-ASCII directories, prefixes and document names behave the same on Windows, Linux and macOS. The worker pool's image jobs use the same names.
 
 ### Streaming Image Bytes Without Saving to Disk
 
@@ -259,19 +261,19 @@ public void ProcessPdfPageImages(string pdfPath, ImageFormat format, int dpi = 3
 {
     using var doc = new PdfDocument(pdfPath);
     int i = 0;
-    foreach (var bytes in doc.StreamImageBytes(format, quality: 100, dpi))
+    foreach (var bytes in doc.StreamImageBytes(format, quality: 90, dpi))
     {
         File.WriteAllBytes($"page_{i++}.png", bytes);
         // Previous page's bytes are now eligible for GC
     }
 }
 
-// Async version — yields between pages for UI responsiveness
+// Async version: renders and encodes on the thread pool, never on the caller's context
 public async Task ProcessPdfPageImagesAsync(string pdfPath, ImageFormat format, int dpi = 300)
 {
     using var doc = new PdfDocument(pdfPath);
     int i = 0;
-    await foreach (var bytes in doc.StreamImageBytesAsync(format, quality: 100, dpi))
+    await foreach (var bytes in doc.StreamImageBytesAsync(format, quality: 90, dpi))
     {
         await File.WriteAllBytesAsync($"page_{i++}.png", bytes);
     }
@@ -665,7 +667,15 @@ Most memory used while processing PDFs is native: PDFium's document and font dat
 
 - Dispose every document, page, form and merger. If one is dropped without `Dispose()`, its finalizer does not call PDFium; it queues the native handles and the next PdfiumWrapper operation on any thread closes them (`PdfiumRuntime.ReleasePending()` does so on demand). That delays the release of native memory, so treat it as a safety net.
 - Do not force garbage collection between documents or batches. It does not release PDF memory and only pauses the process.
-- `RenderPages` returns every page as a managed `byte[]` at once. For large documents prefer `StreamImageBytes` / `StreamImageBytesAsync` or the `SaveAs...` methods, which hold one page at a time.
+- `RenderPages` / `RenderPagesAsync` buffer the whole document: every page is held as a managed `byte[]` until the call returns, so a 100-page document at 300 DPI needs about 3.3 GB. For large documents prefer `StreamImageBytes` / `StreamImageBytesAsync` or the `SaveAs...` methods, which hold one page at a time.
+- Every render is capped at 268,435,456 pixels (1 GiB as BGRA). The cap is checked before PDFium allocates the bitmap, so a PDF with a huge page box, or a mistaken DPI, fails fast with an `InvalidOperationException` that names the page and its pixel size. Without the cap, such a file could force a multi-GiB allocation per caller. A DPI of zero or less throws `ArgumentOutOfRangeException`. The cap applies to each bitmap: with N concurrent callers, up to N bitmaps of that size can exist at once. Raise or lower it with the `PdfiumWrapper.MaxRenderPixels` `AppContext` data key (pixels):
+
+  ```csharp
+  // A service that only renders ordinary pages can afford a tighter bound per caller.
+  AppContext.SetData("PdfiumWrapper.MaxRenderPixels", 64L * 1024 * 1024);
+  ```
+
+  The worker pool's `MaxWorkerMemoryBytes` bounds a whole worker process. This cap also protects in-process callers and bounds each render inside a worker.
 - Saving a PDF (`Save`, `SaveToStream`, `PdfMerger.Save`, `PdfMerger.ToBytes`) serializes the whole output into a pooled in-memory buffer and writes it to the file or stream afterwards. Peak memory includes the full output size.
 - Bound the number of concurrent callers: each one in flight holds a rendered page.
 

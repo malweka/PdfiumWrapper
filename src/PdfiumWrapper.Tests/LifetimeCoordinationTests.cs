@@ -91,8 +91,11 @@ public class LifetimeCoordinationTests
         Assert.Throws<ObjectDisposedException>(() => page.ExtractText());
         Assert.Throws<ObjectDisposedException>(() => page.RenderToBytes(100, 100));
         Assert.Throws<ObjectDisposedException>(() => _ = page.HasEmbeddedThumbnail);
+        Assert.Throws<ObjectDisposedException>(() => page.GetEmbeddedThumbnail());
+#pragma warning disable CS0618 // obsolete but still public, so their disposed checks are covered
         Assert.Throws<ObjectDisposedException>(() => page.GetEmbeddedThumbnailBytes());
         Assert.Throws<ObjectDisposedException>(() => page.GetEmbeddedThumbnailSize());
+#pragma warning restore CS0618
         Assert.Throws<ObjectDisposedException>(() => page.GenerateContent());
         Assert.Throws<ObjectDisposedException>(() => _ = page.ObjectCount);
         Assert.Throws<ObjectDisposedException>(() => page.GetObject(0));
@@ -215,6 +218,9 @@ public class LifetimeCoordinationTests
         await Assert.ThrowsAsync<ObjectDisposedException>(() => doc.SaveAsTiffAsync(new MemoryStream()));
         await Assert.ThrowsAsync<ObjectDisposedException>(() => doc.SaveAsJpegsAsync(Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"))));
         await Assert.ThrowsAsync<ObjectDisposedException>(() => doc.SaveAsImagesAsync(Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N")), "page", ImageFormat.Png, 100, 300, 300));
+        await Assert.ThrowsAsync<ObjectDisposedException>(() => doc.SaveAsImagesAsync(Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N")), "page", ImageFormat.Png));
+        await Assert.ThrowsAsync<ObjectDisposedException>(() => doc.SaveAsImagesAsync(Array.Empty<Stream>(), ImageFormat.Png, 100, 300, 300));
+        await Assert.ThrowsAsync<ObjectDisposedException>(() => doc.SaveAsPngsAsync(Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"))));
     }
 
     #endregion

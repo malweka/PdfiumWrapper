@@ -17,8 +17,8 @@ public static partial class LibTiff
 
     #region Lifecycle
 
-    [LibraryImport(LibraryName, StringMarshalling = StringMarshalling.Utf8)]
-    public static partial IntPtr TIFFOpen(string filename, string mode);
+    // TIFFOpen is not imported: on Windows it reads the char* path in the ANSI code page, so
+    // non-ASCII paths break. Files are opened as a managed FileStream and passed to TIFFClientOpen.
 
     /// <summary>
     /// Opens a TIFF with custom I/O callbacks (e.g. for writing to a Stream).
