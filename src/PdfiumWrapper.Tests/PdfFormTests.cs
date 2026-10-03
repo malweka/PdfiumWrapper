@@ -485,4 +485,213 @@ public class PdfFormTests
             _testOutputHelper.WriteLine($"Checkbox '{fieldName}' is {(isChecked ? "checked" : "unchecked")}");
         }
     }
+
+    // A one-page AcroForm: check boxes "agree" (checked) and "news" (unchecked), both with the
+    // export value "On", and a list box "colors" whose second option contains a comma. Written
+    // without an xref table; PDFium rebuilds it.
+    private static byte[] BuildFormPdf(bool multiSelect)
+    {
+        int listFlags = multiSelect ? PDFium.FPDF_FORMFLAG_CHOICE_MULTI_SELECT : 0;
+        string pdf = $"""
+            %PDF-1.7
+            1 0 obj << /Type /Catalog /Pages 2 0 R /AcroForm << /Fields [4 0 R 5 0 R 6 0 R] /DR << /Font << /Helv 9 0 R >> >> /DA (/Helv 0 Tf 0 g) >> >> endobj
+            2 0 obj << /Type /Pages /Kids [3 0 R] /Count 1 >> endobj
+            3 0 obj << /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Annots [4 0 R 5 0 R 6 0 R] >> endobj
+            4 0 obj << /Type /Annot /Subtype /Widget /FT /Btn /T (agree) /Rect [20 20 40 40] /P 3 0 R /V /On /AS /On /AP << /N << /On 7 0 R /Off 8 0 R >> >> >> endobj
+            5 0 obj << /Type /Annot /Subtype /Widget /FT /Btn /T (news) /Rect [60 20 80 40] /P 3 0 R /V /Off /AS /Off /AP << /N << /On 7 0 R /Off 8 0 R >> >> >> endobj
+            6 0 obj << /Type /Annot /Subtype /Widget /FT /Ch /Ff {listFlags} /T (colors) /Rect [20 60 180 160] /P 3 0 R /Opt [(Red) (Green, light) (Blue)] /DA (/Helv 10 Tf 0 g) >> endobj
+            7 0 obj << /Length 0 >> stream
+            endstream
+            endobj
+            8 0 obj << /Length 0 >> stream
+            endstream
+            endobj
+            9 0 obj << /Type /Font /Subtype /Type1 /BaseFont /Helvetica >> endobj
+            trailer << /Root 1 0 R >>
+            %%EOF
+
+            """;
+        return System.Text.Encoding.ASCII.GetBytes(pdf);
+    }
+
+    private const int ColorsAnnotIndex = 2;
+
+    // Reads the list box's selection from the field itself (/V and /I), not from the form filler.
+    private static bool[] SelectedOptions(PdfDocument doc, PdfForm form)
+    {
+        using var _ = PdfiumRuntime.Enter();
+        var page = PDFium.FPDF_LoadPage(doc.Document, 0);
+        try
+        {
+            var annot = PDFium.FPDFPage_GetAnnot(page, ColorsAnnotIndex);
+            try
+            {
+                int count = PDFium.FPDFAnnot_GetOptionCount(form._formHandle, annot);
+                return Enumerable.Range(0, count)
+                    .Select(i => PDFium.FPDFAnnot_IsOptionSelected(form._formHandle, annot, i))
+                    .ToArray();
+            }
+            finally
+            {
+                PDFium.FPDFPage_CloseAnnot(annot);
+            }
+        }
+        finally
+        {
+            PDFium.FPDF_ClosePage(page);
+        }
+    }
+
+    [Fact]
+    public void GetFormFieldChecked_WithExportValueOn_ReadsTheCheckedState()
+    {
+        // fw2.pdf's check boxes all export "1"; most real forms export "On" or "Yes".
+        using var doc = new PdfDocument(BuildFormPdf(multiSelect: true));
+        using var form = doc.GetForm();
+        Assert.NotNull(form);
+
+        Assert.True(form.GetFormFieldChecked("agree"));
+        Assert.False(form.GetFormFieldChecked("news"));
+        Assert.Equal("true", form.GetFormFieldValue("agree"));
+        Assert.Equal("false", form.GetFormFieldValue("news"));
+    }
+
+    [Fact]
+    public void SetFormFieldChecked_WithExportValueOn_RoundTripsThroughSave()
+    {
+        string outputPath = GetUniqueTestFilePath("checkbox_on_roundtrip");
+        using (var doc = new PdfDocument(BuildFormPdf(multiSelect: true)))
+        using (var form = doc.GetForm())
+        {
+            Assert.NotNull(form);
+
+            form.SetFormFieldChecked("agree", false);
+            form.SetFormFieldChecked("news", true);
+
+            Assert.False(form.GetFormFieldChecked("agree"));
+            Assert.True(form.GetFormFieldChecked("news"));
+            doc.Save(outputPath);
+        }
+
+        using var verifyDoc = new PdfDocument(outputPath);
+        using var verifyForm = verifyDoc.GetForm();
+        Assert.NotNull(verifyForm);
+        Assert.False(verifyForm.GetFormFieldChecked("agree"));
+        Assert.True(verifyForm.GetFormFieldChecked("news"));
+    }
+
+    [Fact]
+    public void SetFormFieldChecked_OnW2Checkbox_IsReadBack()
+    {
+        using var doc = new PdfDocument(FormW2Path);
+        using var form = doc.GetForm();
+        Assert.NotNull(form);
+        string fieldName = W2FieldMapping.CopyA["box13_retirement_plan"];
+
+        form.SetFormFieldChecked(fieldName, true);
+        Assert.True(form.GetFormFieldChecked(fieldName));
+
+        form.SetFormFieldChecked(fieldName, false);
+        Assert.False(form.GetFormFieldChecked(fieldName));
+    }
+
+    [Fact]
+    public void GetFormFieldChecked_WithTextField_Throws()
+    {
+        using var doc = new PdfDocument(FormW2Path);
+        using var form = doc.GetForm();
+        Assert.NotNull(form);
+
+        Assert.Throws<InvalidOperationException>(() => form.GetFormFieldChecked(W2FieldMapping.CopyA["employer_ein"]));
+    }
+
+    [Fact]
+    public void SetListBoxSelections_MultiSelect_SelectsEveryValue()
+    {
+        string outputPath = GetUniqueTestFilePath("listbox_multiselect");
+        using (var doc = new PdfDocument(BuildFormPdf(multiSelect: true)))
+        using (var form = doc.GetForm())
+        {
+            Assert.NotNull(form);
+
+            form.SetListBoxSelections("colors", new[] { "Red", "Blue" });
+
+            Assert.Equal(new[] { true, false, true }, SelectedOptions(doc, form));
+            Assert.Equal("Red", form.GetFormFieldValue("colors"));
+            doc.Save(outputPath);
+        }
+
+        using var verifyDoc = new PdfDocument(outputPath);
+        using var verifyForm = verifyDoc.GetForm();
+        Assert.NotNull(verifyForm);
+        Assert.Equal(new[] { true, false, true }, SelectedOptions(verifyDoc, verifyForm));
+    }
+
+    [Fact]
+    public void SetListBoxSelections_ValueWithComma_SelectsThatOneOption()
+    {
+        string outputPath = GetUniqueTestFilePath("listbox_comma");
+        using (var doc = new PdfDocument(BuildFormPdf(multiSelect: true)))
+        using (var form = doc.GetForm())
+        {
+            Assert.NotNull(form);
+
+            form.SetListBoxSelections("colors", new[] { "Green, light", "Blue" });
+
+            Assert.Equal(new[] { false, true, true }, SelectedOptions(doc, form));
+            doc.Save(outputPath);
+        }
+
+        using var verifyDoc = new PdfDocument(outputPath);
+        using var verifyForm = verifyDoc.GetForm();
+        Assert.NotNull(verifyForm);
+        Assert.Equal(new[] { false, true, true }, SelectedOptions(verifyDoc, verifyForm));
+        Assert.Equal("Green, light", verifyForm.GetFormFieldValue("colors"));
+        Assert.Equal(new[] { "Red", "Green, light", "Blue" }, verifyForm.GetAllFormFields().Single(f => f.Name == "colors").Options);
+    }
+
+    [Fact]
+    public void SetListBoxSelections_ReplacesThePreviousSelection()
+    {
+        using var doc = new PdfDocument(BuildFormPdf(multiSelect: true));
+        using var form = doc.GetForm();
+        Assert.NotNull(form);
+
+        form.SetListBoxSelections("colors", new[] { "Red", "Blue" });
+        form.SetListBoxSelections("colors", new[] { "Green, light" });
+        Assert.Equal(new[] { false, true, false }, SelectedOptions(doc, form));
+
+        form.SetListBoxSelections("colors", Array.Empty<string>());
+        Assert.Equal(new[] { false, false, false }, SelectedOptions(doc, form));
+    }
+
+    [Fact]
+    public void SetListBoxSelections_SingleSelect_TakesOneValueAndRejectsTwo()
+    {
+        using var doc = new PdfDocument(BuildFormPdf(multiSelect: false));
+        using var form = doc.GetForm();
+        Assert.NotNull(form);
+
+        form.SetListBoxSelections("colors", new[] { "Blue" });
+        form.SetListBoxSelections("colors", new[] { "Green, light" });
+        Assert.Equal(new[] { false, true, false }, SelectedOptions(doc, form));
+
+        Assert.Throws<ArgumentException>(() => form.SetListBoxSelections("colors", new[] { "Red", "Blue" }));
+        Assert.Equal(new[] { false, true, false }, SelectedOptions(doc, form));
+    }
+
+    [Fact]
+    public void SetListBoxSelections_RejectsValuesThatAreNotOptions()
+    {
+        using var doc = new PdfDocument(BuildFormPdf(multiSelect: true));
+        using var form = doc.GetForm();
+        Assert.NotNull(form);
+
+        // The old implementation joined values with commas; "Green" and "light" are not options.
+        Assert.Throws<ArgumentException>(() => form.SetListBoxSelections("colors", new[] { "Green", "light" }));
+        Assert.Throws<ArgumentException>(() => form.SetListBoxSelections("colors", new[] { "red" }));
+        Assert.Throws<ArgumentNullException>(() => form.SetListBoxSelections("colors", null!));
+        Assert.Throws<InvalidOperationException>(() => form.SetListBoxSelections("agree", new[] { "On" }));
+        Assert.Equal(new[] { false, false, false }, SelectedOptions(doc, form));
+    }
 }

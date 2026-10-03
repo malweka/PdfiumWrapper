@@ -182,14 +182,17 @@ public class PdfForm : IDisposable
 
         for (int i = 0; i < optionCount; i++)
         {
-            var label = NativeText.ReadUtf16((_formHandle, annot, i),
-                static (s, buffer, length) => PDFium.FPDFAnnot_GetOptionLabel(s._formHandle, s.annot, s.i, buffer, length));
+            var label = GetOptionLabel(annot, i);
             if (label != null)
                 options.Add(label);
         }
 
         return options;
     }
+
+    private string? GetOptionLabel(IntPtr annot, int index) =>
+        NativeText.ReadUtf16((_formHandle, annot, index),
+            static (s, buffer, length) => PDFium.FPDFAnnot_GetOptionLabel(s._formHandle, s.annot, s.index, buffer, length));
 
     public string? GetFormFieldValue(string fieldName)
     {
@@ -215,21 +218,15 @@ public class PdfForm : IDisposable
         try
         {
             using (PdfiumDiagnostics.NativeInterval(NativeOp.FormFill))
-                SetAnnotFieldValue(fieldInfo.Value.annot, fieldInfo.Value.field.Type, value);
+                SetAnnotFieldValue(fieldInfo.Value.page, fieldInfo.Value.annot, fieldInfo.Value.field.Type, fieldName, value);
         }
         finally
         {
-            PDFium.FPDFPage_CloseAnnot(fieldInfo.Value.annot);
-
-            if (_formInitialized)
-            {
-                PDFium.FORM_OnBeforeClosePage(fieldInfo.Value.page, _formHandle);
-            }
-            PDFium.FPDF_ClosePage(fieldInfo.Value.page);
+            CloseFieldAnnotation(fieldInfo.Value.annot, fieldInfo.Value.page);
         }
     }
 
-    private void SetAnnotFieldValue(IntPtr annot, FormFieldType fieldType, string value)
+    private void SetAnnotFieldValue(IntPtr page, IntPtr annot, FormFieldType fieldType, string fieldName, string value)
     {
         switch ((int)fieldType)
         {
@@ -245,18 +242,7 @@ public class PdfForm : IDisposable
                 bool shouldCheck = value.Equals("true", StringComparison.OrdinalIgnoreCase) ||
                                    value.Equals("1") ||
                                    value.Equals("yes", StringComparison.OrdinalIgnoreCase);
-
-                if (shouldCheck)
-                {
-                    // Get export value for the field
-                    var exportValue = NativeText.ReadUtf16((_formHandle, annot),
-                        static (s, buffer, length) => PDFium.FPDFAnnot_GetFormFieldExportValue(s._formHandle, s.annot, buffer, length));
-                    PDFium.FPDFAnnot_SetStringValue(annot, "V", exportValue ?? "Yes");
-                }
-                else
-                {
-                    PDFium.FPDFAnnot_SetStringValue(annot, "V", "Off");
-                }
+                SetChecked(page, annot, fieldName, shouldCheck);
                 break;
 
             case PDFium.FPDF_FORMFIELD_LISTBOX:
@@ -269,17 +255,78 @@ public class PdfForm : IDisposable
         }
     }
 
+    // PDFium has no call that sets a button's state. Focusing the widget and pressing space toggles
+    // it as a viewer would; removing the focus writes /AS and /V (as a name) back to the field.
+    private void SetChecked(IntPtr page, IntPtr annot, string fieldName, bool isChecked)
+    {
+        if (PDFium.FPDFAnnot_IsChecked(_formHandle, annot) == isChecked)
+            return;
+
+        FocusForEditing(annot, fieldName);
+        try
+        {
+            PDFium.FORM_OnChar(_formHandle, page, ' ', 0);
+        }
+        finally
+        {
+            PDFium.FORM_ForceToKillFocus(_formHandle);
+        }
+
+        // A read-only button does not toggle, and a radio button turns off only when another
+        // button of its group is selected.
+        if (PDFium.FPDFAnnot_IsChecked(_formHandle, annot) != isChecked)
+            throw new InvalidOperationException(
+                $"Form field '{fieldName}' could not be {(isChecked ? "checked" : "unchecked")}");
+    }
+
+    /// <summary>
+    /// Checks or unchecks a check box or radio button, as a click in a viewer would: the field's
+    /// appearance state (/AS) and value (/V) are set to its export value or Off.
+    /// </summary>
+    /// <remarks>
+    /// Acts on the first widget with this name. A radio button cannot be unchecked; check another
+    /// button of its group instead.
+    /// </remarks>
+    /// <exception cref="ArgumentException">No field has this name.</exception>
+    /// <exception cref="NotSupportedException">The field type does not take a value.</exception>
+    /// <exception cref="InvalidOperationException">PDFium did not change the state (for example a
+    /// read-only field, or unchecking a radio button).</exception>
     public void SetFormFieldChecked(string fieldName, bool isChecked)
     {
         SetFormFieldValue(fieldName, isChecked ? "true" : "false");
     }
 
+    /// <summary>
+    /// Gets whether a check box or radio button is checked, from PDFium's checked state
+    /// (<c>FPDFAnnot_IsChecked</c>), whatever the field's export value is ("On", "Yes", "1", ...).
+    /// </summary>
+    /// <remarks>
+    /// Reads the first widget with this name, as <see cref="GetFormFieldValue"/> does: for a radio
+    /// button group, which has one widget per button under one name, that is its first button.
+    /// <see cref="FormField.Value"/> holds the same state as "true" or "false".
+    /// </remarks>
+    /// <exception cref="ArgumentException">No field has this name.</exception>
+    /// <exception cref="InvalidOperationException">The field is not a check box or radio button.</exception>
     public bool GetFormFieldChecked(string fieldName)
     {
-        string value = GetFormFieldValue(fieldName)!;
-        return value.Equals("true", StringComparison.OrdinalIgnoreCase) ||
-               value.Equals("1") ||
-               value.Equals("yes", StringComparison.OrdinalIgnoreCase);
+        using var _ = PdfiumRuntime.Enter();
+        ThrowIfDisposed();
+
+        var fieldInfo = FindFormFieldWithAnnotation(fieldName);
+        if (fieldInfo == null)
+            throw new ArgumentException($"Form field '{fieldName}' not found");
+
+        try
+        {
+            if (fieldInfo.Value.field.Type is not (FormFieldType.CheckBox or FormFieldType.RadioButton))
+                throw new InvalidOperationException($"Field '{fieldName}' is not a check box or radio button");
+
+            return PDFium.FPDFAnnot_IsChecked(_formHandle, fieldInfo.Value.annot);
+        }
+        finally
+        {
+            CloseFieldAnnotation(fieldInfo.Value.annot, fieldInfo.Value.page);
+        }
     }
 
     public void SetListBoxSelection(string fieldName, string selectedValue)
@@ -287,12 +334,27 @@ public class PdfForm : IDisposable
         SetFormFieldValue(fieldName, selectedValue);
     }
 
+    /// <summary>
+    /// Selects exactly the given options of a list box and clears the others.
+    /// </summary>
+    /// <remarks>
+    /// Values are matched (ordinal, case-sensitive) against the option labels in
+    /// <see cref="FormField.Options"/>; a value may contain commas. The options are selected through
+    /// PDFium's form filler (<c>FORM_SetIndexSelected</c> on the focused widget), which writes the
+    /// field as a viewer does: /I holds the selected indexes, and /V an array of the selected values
+    /// (a single value when one is selected). An empty array clears the selection.
+    /// </remarks>
+    /// <exception cref="ArgumentNullException"><paramref name="selectedValues"/> is null.</exception>
+    /// <exception cref="ArgumentException">No field has this name, a value is null or not one of the
+    /// options, or more than one value is given for a list box without the multi-select flag.</exception>
+    /// <exception cref="InvalidOperationException">The field is not a list box, or PDFium did not apply
+    /// the selection (for example a read-only field).</exception>
     public void SetListBoxSelections(string fieldName, string[] selectedValues)
     {
         using var _ = PdfiumRuntime.Enter();
         ThrowIfDisposed();
+        ArgumentNullException.ThrowIfNull(selectedValues);
 
-        // For multi-select list boxes
         var fieldInfo = FindFormFieldWithAnnotation(fieldName);
         if (fieldInfo == null)
             throw new ArgumentException($"Form field '{fieldName}' not found");
@@ -302,21 +364,90 @@ public class PdfForm : IDisposable
             if (fieldInfo.Value.field.Type != FormFieldType.ListBox)
                 throw new InvalidOperationException($"Field '{fieldName}' is not a list box");
 
-            // Join multiple selections (PDFium typically uses arrays, but we'll use comma-separated for simplicity)
-            string value = string.Join(",", selectedValues);
+            var annot = fieldInfo.Value.annot;
+            int optionCount = PDFium.FPDFAnnot_GetOptionCount(_formHandle, annot);
+            var selected = FindOptionIndexes(annot, fieldName, optionCount, selectedValues);
+
             using (PdfiumDiagnostics.NativeInterval(NativeOp.FormFill))
-                PDFium.FPDFAnnot_SetStringValue(fieldInfo.Value.annot, "V", value);
+                SelectOptions(fieldInfo.Value.page, annot, fieldName, optionCount, selected);
         }
         finally
         {
-            PDFium.FPDFPage_CloseAnnot(fieldInfo.Value.annot);
-
-            if (_formInitialized)
-            {
-                PDFium.FORM_OnBeforeClosePage(fieldInfo.Value.page, _formHandle);
-            }
-            PDFium.FPDF_ClosePage(fieldInfo.Value.page);
+            CloseFieldAnnotation(fieldInfo.Value.annot, fieldInfo.Value.page);
         }
+    }
+
+    // Maps each value to the index of the first option with that label. Indexes come from PDFium,
+    // not from FormField.Options, which skips options without a label.
+    private HashSet<int> FindOptionIndexes(IntPtr annot, string fieldName, int optionCount, string[] values)
+    {
+        var labels = new string?[Math.Max(optionCount, 0)];
+        for (int i = 0; i < labels.Length; i++)
+            labels[i] = GetOptionLabel(annot, i);
+
+        var selected = new HashSet<int>();
+        foreach (var value in values)
+        {
+            if (value == null)
+                throw new ArgumentException("A selected value is null", "selectedValues");
+
+            int index = Array.IndexOf(labels, value);
+            if (index < 0)
+                throw new ArgumentException($"'{value}' is not an option of list box '{fieldName}'", "selectedValues");
+            selected.Add(index);
+        }
+
+        int flags = PDFium.FPDFAnnot_GetFormFieldFlags(_formHandle, annot);
+        if (selected.Count > 1 && (flags & PDFium.FPDF_FORMFLAG_CHOICE_MULTI_SELECT) == 0)
+            throw new ArgumentException($"List box '{fieldName}' is not multi-select; give at most one value", "selectedValues");
+
+        return selected;
+    }
+
+    // FORM_SetIndexSelected changes the focused widget's list; removing the focus commits the list
+    // to the field (/V, /I) and regenerates its appearance.
+    private void SelectOptions(IntPtr page, IntPtr annot, string fieldName, int optionCount, HashSet<int> selected)
+    {
+        FocusForEditing(annot, fieldName);
+        try
+        {
+            for (int i = 0; i < optionCount; i++)
+            {
+                if (!selected.Contains(i) && PDFium.FORM_IsIndexSelected(_formHandle, page, i))
+                    PDFium.FORM_SetIndexSelected(_formHandle, page, i, false);
+            }
+            foreach (int index in selected)
+                PDFium.FORM_SetIndexSelected(_formHandle, page, index, true);
+        }
+        finally
+        {
+            PDFium.FORM_ForceToKillFocus(_formHandle);
+        }
+
+        for (int i = 0; i < optionCount; i++)
+        {
+            if (PDFium.FPDFAnnot_IsOptionSelected(_formHandle, annot, i) != selected.Contains(i))
+                throw new InvalidOperationException($"PDFium did not apply the selection to list box '{fieldName}'");
+        }
+    }
+
+    // The form filler edits only the focused widget. Callers remove the focus with
+    // FORM_ForceToKillFocus before the page is closed.
+    private void FocusForEditing(IntPtr annot, string fieldName)
+    {
+        if (!_formInitialized || !PDFium.FORM_SetFocusedAnnot(_formHandle, annot))
+            throw new InvalidOperationException($"Form field '{fieldName}' cannot be edited: PDFium did not focus it");
+    }
+
+    private void CloseFieldAnnotation(IntPtr annot, IntPtr page)
+    {
+        PDFium.FPDFPage_CloseAnnot(annot);
+
+        if (_formInitialized)
+        {
+            PDFium.FORM_OnBeforeClosePage(page, _formHandle);
+        }
+        PDFium.FPDF_ClosePage(page);
     }
 
     private FormField? FindFormField(string fieldName)
