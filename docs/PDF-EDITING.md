@@ -1,6 +1,6 @@
 # PDF Editing Guide
 
-This guide covers creating new PDF documents and adding content using PdfiumWrapper's page editing API.
+This guide covers creating PDF documents, adding content to new or existing pages, and reading the objects already on a page with PdfiumWrapper's page editing API.
 
 ## Table of Contents
 
@@ -10,30 +10,35 @@ This guide covers creating new PDF documents and adding content using PdfiumWrap
 - [Adding Text](#adding-text)
 - [Adding Images](#adding-images)
 - [Adding Shapes](#adding-shapes)
+- [Editing Existing Documents](#editing-existing-documents)
+- [Reading Page Objects](#reading-page-objects)
+- [Removing Page Objects](#removing-page-objects)
 - [Page Object Classes](#page-object-classes)
 - [Coordinate System](#coordinate-system)
 - [Standard Fonts](#standard-fonts)
 - [Complete Examples](#complete-examples)
 - [Quick Reference](#quick-reference)
+- [Notes](#notes)
 
 ---
 
 ## Overview
 
-The SDK supports creating and editing PDF documents with the following capabilities:
+The library supports:
 
-- Create new PDF documents from scratch
-- Add pages with custom dimensions
-- Add text objects with custom fonts and styling
-- Add image objects (PNG, JPEG, etc.)
-- Add path objects (shapes, lines, curves)
-- Add rectangles with fill and stroke colors
-- Transform and position page objects
-- Generate page content and save documents
+- Creating new PDF documents from scratch
+- Adding pages with custom dimensions
+- Adding text in one of the 14 standard PDF fonts, with size and color
+- Adding PNG and JPEG images
+- Adding paths (lines, curves, shapes) and rectangles with fill and stroke colors
+- Transforming and positioning page objects
+- Adding content to pages of an existing PDF
+- Reading the objects on a page (text, images, paths, shadings, form XObjects) and removing them
+- Generating page content and saving documents
 
 ### Important Workflow
 
-After adding or modifying page objects, you **must** call `GenerateContent()` before saving:
+After adding, changing or removing page objects, you **must** call `GenerateContent()` on the page before saving:
 
 ```csharp
 page.AddText("Hello", 100, 700);
@@ -43,6 +48,8 @@ page.GenerateContent();  // Required!
 document.Save("output.pdf");
 ```
 
+The samples use `System.Drawing.Color`. Add `using System.Drawing;` to your file.
+
 ---
 
 ## Creating Documents
@@ -51,6 +58,7 @@ document.Save("output.pdf");
 
 ```csharp
 using PdfiumWrapper;
+using System.Drawing;
 
 // Create a new empty PDF document
 using var document = new PdfDocument();
@@ -87,23 +95,23 @@ using var page = document.AddPage();
 
 ```csharp
 // A4 Portrait (595 x 842 points)
-using var page = document.AddPage(width: 595, height: 842);
+using var a4 = document.AddPage(width: 595, height: 842);
 
 // A4 Landscape
-using var page = document.AddPage(width: 842, height: 595);
+using var a4Landscape = document.AddPage(width: 842, height: 595);
 
 // Custom size
-using var page = document.AddPage(width: 400, height: 600);
+using var custom = document.AddPage(width: 400, height: 600);
 ```
 
 ### Insert Page at Specific Position
 
 ```csharp
 // Insert at the beginning (index 0)
-using var page = document.AddPage(width: 612, height: 792, index: 0);
+using var cover = document.AddPage(width: 612, height: 792, index: 0);
 
 // Insert at position 2 (third page)
-using var page = document.AddPage(width: 612, height: 792, index: 2);
+using var third = document.AddPage(width: 612, height: 792, index: 2);
 ```
 
 ### Common Page Sizes
@@ -123,72 +131,50 @@ using var page = document.AddPage(width: 612, height: 792, index: 2);
 ### Basic Text
 
 ```csharp
+// Helvetica, 12 pt by default
 var text = page.AddText("Hello World", x: 100, y: 700);
 ```
 
-### Styled Text
+`x` and `y` are the start of the text's baseline.
+
+### Font, Size and Color
 
 ```csharp
-var text = page.AddText("Hello World", x: 100, y: 700, font: "Helvetica", fontSize: 24);
-text.Color = Color.Black;
-```
-
-### Text with Font Specified Inline
-
-```csharp
-var text = page.AddText("Hello World", x: 100, y: 700, font: "Helvetica", fontSize: 12);
-text.Color = Color.DarkBlue;
-```
-
-### Multiple Text Objects
-
-```csharp
-// Title
 var title = page.AddText("Document Title", x: 100, y: 750, font: "Helvetica-Bold", fontSize: 24);
 title.Color = Color.Black;
 
-// Subtitle
 var subtitle = page.AddText("A sample document", x: 100, y: 720, font: "Helvetica", fontSize: 14);
 subtitle.Color = Color.Gray;
 
-// Body text
 var body = page.AddText("This is the main content of the document.", x: 100, y: 680, font: "Times-Roman", fontSize: 12);
 body.Color = Color.Black;
 ```
+
+The font is chosen when the text is added and cannot be changed afterwards; the size can (`FontSize` has a getter and a setter). Only the [standard fonts](#standard-fonts) are available: `AddText` throws `InvalidOperationException` for any other font name.
 
 ---
 
 ## Adding Images
 
-### From File
-
 ```csharp
-var imageBytes = File.ReadAllBytes("logo.png");
+// From a file, or bytes from any other source (database, HTTP response, ...)
+byte[] imageBytes = File.ReadAllBytes("logo.png");
 var image = page.AddImage(imageBytes, x: 100, y: 500, width: 200, height: 100);
-```
 
-### From Byte Array
-
-```csharp
-// Image bytes from any source (database, HTTP response, etc.)
-byte[] imageBytes = GetImageFromDatabase();
-var image = page.AddImage(imageBytes, x: 100, y: 500, width: 200, height: 100);
+// Move or resize it later
+image.SetPositionAndSize(x: 120, y: 480, width: 240, height: 120);
 ```
 
 ### Supported Formats
 
-Images are decoded using native libraries (libjpeg-turbo and libpng), so the following formats are supported:
-
-- PNG
-- JPEG
+PNG and JPEG only. They are decoded with libpng and libjpeg-turbo. Any other format throws `NotSupportedException`. An image larger than the render pixel limit (268,435,456 pixels by default, see [Troubleshooting](TROUBLESHOOTING.md)) throws `InvalidOperationException`.
 
 ### Image Positioning
 
 The `x` and `y` parameters specify the **bottom-left corner** of the image:
 
 ```csharp
-// Image positioned at bottom-left corner (100, 500)
-// Extends 200 points right and 100 points up
+// Bottom-left corner at (100, 500); extends 200 points right and 100 points up
 var image = page.AddImage(imageBytes, x: 100, y: 500, width: 200, height: 100);
 ```
 
@@ -196,14 +182,16 @@ var image = page.AddImage(imageBytes, x: 100, y: 500, width: 200, height: 100);
 
 ## Adding Shapes
 
+A path or rectangle is only drawn if it has a fill mode or a stroke. `AddRectangle` sets the draw mode from the colors you pass; with both colors `null` the rectangle is invisible. A path from `AddPath()` draws nothing until you call `SetDrawMode`.
+
 ### Rectangle
 
 ```csharp
 // Filled rectangle with stroke
 var rect = page.AddRectangle(
-    x: 100, 
-    y: 400, 
-    width: 200, 
+    x: 100,
+    y: 400,
+    width: 200,
     height: 100,
     fillColor: Color.LightBlue,
     strokeColor: Color.Black
@@ -216,9 +204,9 @@ rect.StrokeWidth = 2;
 ```csharp
 // Border only, no fill
 var border = page.AddRectangle(
-    x: 50, 
-    y: 50, 
-    width: 512, 
+    x: 50,
+    y: 50,
+    width: 512,
     height: 692,
     fillColor: null,  // No fill
     strokeColor: Color.Gray
@@ -240,25 +228,6 @@ triangle.StrokeColor = Color.Black;
 triangle.SetDrawMode(PdfPathFillMode.Winding, stroke: true);
 ```
 
-### Custom Path (Complex Shape)
-
-```csharp
-var path = page.AddPath();
-
-// Draw a house shape
-path.MoveTo(100, 200);   // Bottom-left
-path.LineTo(100, 300);   // Up left wall
-path.LineTo(150, 350);   // Up to roof peak
-path.LineTo(200, 300);   // Down right roof
-path.LineTo(200, 200);   // Down right wall
-path.Close();            // Bottom
-
-path.FillColor = Color.LightYellow;
-path.StrokeColor = Color.Brown;
-path.StrokeWidth = 2;
-path.SetDrawMode(PdfPathFillMode.Winding, stroke: true);
-```
-
 ### Path with Curves (Bézier)
 
 ```csharp
@@ -271,71 +240,200 @@ curve.BezierTo(
 );
 curve.StrokeColor = Color.Blue;
 curve.StrokeWidth = 2;
+curve.LineCap = PdfLineCapStyle.Round;
 curve.SetDrawMode(PdfPathFillMode.None, stroke: true);
 ```
 
 ### Fluent Path API
 
-```csharp
-var path = page.AddPath();
-path.MoveTo(100, 300)
-    .LineTo(200, 300)
-    .LineTo(150, 200)
-    .Close();
+`MoveTo`, `LineTo`, `BezierTo` and `Close` return the path:
 
-path.FillColor = Color.Green;
-path.StrokeColor = Color.DarkGreen;
-path.SetDrawMode(PdfPathFillMode.Winding, stroke: true);
+```csharp
+var house = page.AddPath();
+house.MoveTo(100, 200)   // Bottom-left
+    .LineTo(100, 300)    // Left wall
+    .LineTo(150, 350)    // Roof peak
+    .LineTo(200, 300)    // Right roof
+    .LineTo(200, 200)    // Right wall
+    .Close();            // Floor
+
+house.FillColor = Color.LightYellow;
+house.StrokeColor = Color.Brown;
+house.StrokeWidth = 2;
+house.LineJoin = PdfLineJoinStyle.Round;
+house.SetDrawMode(PdfPathFillMode.Winding, stroke: true);
 ```
+
+---
+
+## Editing Existing Documents
+
+The same methods add content to pages of a loaded PDF. Load the document, get the page, add objects, call `GenerateContent()` and save to a new file:
+
+```csharp
+using var document = new PdfDocument("contract.pdf");
+
+using (var page = document.GetPage(0))
+{
+    var stamp = page.AddText("APPROVED", x: 400, y: 750, font: "Helvetica-Bold", fontSize: 24);
+    stamp.Color = Color.Red;
+
+    page.AddRectangle(390, 740, 160, 36, fillColor: null, strokeColor: Color.Red);
+
+    page.GenerateContent();
+}
+
+document.Save("contract_approved.pdf");
+```
+
+`PdfDocument.DeletePage(index)` removes a page. To combine, reorder or extract pages across documents, use `PdfMerger` (see [Examples](EXAMPLES.md#pdf-merging)).
+
+---
+
+## Reading Page Objects
+
+`PdfPage.ObjectCount` and `PdfPage.GetObject(index)` list the objects on a page. `GetObject` returns the wrapper type that matches the object's kind, so use pattern matching:
+
+```csharp
+using var document = new PdfDocument("document.pdf");
+using var page = document.GetPage(0);
+
+for (int i = 0; i < page.ObjectCount; i++)
+{
+    PdfPageObject obj = page.GetObject(i);
+    var (left, bottom, right, top) = obj.GetBounds();
+
+    switch (obj)
+    {
+        case PdfTextObject text:
+            Console.WriteLine($"Text, {text.FontSize} pt, at ({left:0}, {bottom:0})");
+            break;
+
+        case PdfImageObject image:
+            // The image's own pixels as tightly packed BGRA (stride = width * 4), or null
+            RawBitmap? pixels = image.GetBitmap();
+            Console.WriteLine($"Image {pixels?.Width} x {pixels?.Height} px, drawn at ({left:0}, {bottom:0})-({right:0}, {top:0})");
+            break;
+
+        case PdfPathObject path:
+            Console.WriteLine($"Path with {path.SegmentCount} segments");
+            break;
+
+        case PdfFormObject form:
+            Console.WriteLine($"Form XObject with {form.ObjectCount} sub-objects");
+            break;
+
+        case PdfShadingObject:
+            Console.WriteLine("Shading");
+            break;
+    }
+}
+```
+
+A form XObject contains its own objects. `PdfFormObject.GetObject(index)` returns them the same way, so walk them recursively:
+
+```csharp
+static void Walk(PdfFormObject form, int depth)
+{
+    for (int i = 0; i < form.ObjectCount; i++)
+    {
+        PdfPageObject child = form.GetObject(i);
+        Console.WriteLine($"{new string(' ', depth * 2)}{child.GetType().Name}");
+
+        if (child is PdfFormObject nested)
+            Walk(nested, depth + 1);
+    }
+}
+```
+
+`PdfImageObject.GetRenderedBitmap(page)` returns the image as it appears on the page, with its mask and transformation applied. Both bitmap methods return `RawBitmap?` and copy the pixels into managed memory, so there is nothing to release.
+
+### Ownership
+
+- The page owns the objects `GetObject` returns. Disposing a wrapper does not delete the object, and the wrapper becomes unusable when the page (or its document) is disposed.
+- While a wrapper is not disposed, `GetObject` returns the same wrapper for the same object.
+- Sub-objects returned by `PdfFormObject.GetObject` belong to the form object and are unusable once it is disposed.
+
+---
+
+## Removing Page Objects
+
+`PdfPage.RemoveObject(obj)` takes an object off the page. After a successful removal **you own the object**: dispose it, or the document destroys it when the document is disposed.
+
+```csharp
+using var document = new PdfDocument("document.pdf");
+using var page = document.GetPage(0);
+
+// Remove every image. Go backwards: removing an object shifts the indices after it.
+for (int i = page.ObjectCount - 1; i >= 0; i--)
+{
+    if (page.GetObject(i) is PdfImageObject image && page.RemoveObject(image))
+    {
+        image.Dispose();
+    }
+}
+
+page.GenerateContent();
+document.Save("without_images.pdf");
+```
+
+`RemoveObject`:
+
+- returns `false` when the object is not on this page: an object of another page, a sub-object of a form object, or one already removed;
+- throws `ObjectDisposedException` when the wrapper you pass is disposed;
+- throws `ArgumentNullException` for `null`.
 
 ---
 
 ## Page Object Classes
 
+You never construct page objects yourself: `AddText`, `AddImage`, `AddPath` and `AddRectangle` create them, and `GetObject` wraps existing ones.
+
 ### PdfPageObject (Base Class)
 
-Base class for all page objects with common functionality:
-
-| Property/Method | Description |
-|----------------|-------------|
-| `GetBounds()` | Get the bounding rectangle |
-| `GetMatrix()` | Get the transformation matrix |
-| `SetMatrix()` | Set the transformation matrix |
-| `HasTransparency` | Check if object has transparency |
-| `Transform()` | Apply transformation |
+| Member | Description |
+|--------|-------------|
+| `ObjectType` | Raw object kind (`int`); prefer pattern matching on the wrapper type |
+| `GetBounds()` | Bounding box as `(left, bottom, right, top)` |
+| `GetMatrix()` / `SetMatrix(a, b, c, d, e, f)` | Get or replace the transformation matrix |
+| `Transform(a, b, c, d, e, f)` | Multiply the current matrix by another |
+| `HasTransparency` | Whether the object uses transparency |
+| `Dispose()` | Destroys an object you own (removed from its page); does nothing to an object still on a page |
 
 ### PdfTextObject
 
-Represents text on a PDF page.
+| Member | Type | Description |
+|--------|------|-------------|
+| `Text` | `string` (set only) | Replace the text |
+| `FontSize` | `float` (get/set) | Font size in points |
+| `Color` | `Color` (set only) | Fill color |
+| `StrokeColor` | `Color` (set only) | Outline color |
 
-| Property | Type | Description |
-|----------|------|-------------|
-| `Font` | `string` | Font name (e.g., "Helvetica") |
-| `FontSize` | `float` | Font size in points |
-| `Color` | `Color` | Text color |
+The font is fixed when the text is added (`AddText(text, x, y, font, fontSize)`).
 
 ### PdfImageObject
 
-Represents images on a PDF page.
-
-| Property/Method | Description |
-|----------------|-------------|
-| Position set via constructor | `x`, `y`, `width`, `height` |
+| Member | Description |
+|--------|-------------|
+| `SetPositionAndSize(x, y, width, height)` | Place the image; `x`, `y` is the bottom-left corner |
+| `GetBitmap()` | The image's own pixels as BGRA, `RawBitmap?` |
+| `GetRenderedBitmap(page)` | The image as drawn on the page, `RawBitmap?` |
 
 ### PdfPathObject
 
-Represents vector shapes and paths.
-
-| Property/Method | Description |
-|----------------|-------------|
-| `MoveTo(x, y)` | Move to point (start new subpath) |
-| `LineTo(x, y)` | Draw line to point |
-| `BezierTo(...)` | Draw cubic Bézier curve |
+| Member | Description |
+|--------|-------------|
+| `MoveTo(x, y)` | Start a new subpath |
+| `LineTo(x, y)` | Line to a point |
+| `BezierTo(x1, y1, x2, y2, x3, y3)` | Cubic Bézier curve |
 | `Close()` | Close the current subpath |
-| `FillColor` | Fill color |
-| `StrokeColor` | Stroke (outline) color |
-| `StrokeWidth` | Stroke width in points |
-| `SetDrawMode(fillMode, stroke)` | Set fill and stroke behavior |
+| `FillColor` | Fill color (set only) |
+| `StrokeColor` | Stroke color (set only) |
+| `StrokeWidth` | Stroke width in points (get/set) |
+| `LineJoin` | `PdfLineJoinStyle`: `Miter`, `Round`, `Bevel` (set only) |
+| `LineCap` | `PdfLineCapStyle`: `Butt`, `Round`, `Square` (set only) |
+| `SegmentCount` | Number of path segments |
+| `SetDrawMode(fillMode, stroke)` | Fill rule and whether to stroke; required for the path to be drawn |
 
 ### PdfPathFillMode
 
@@ -344,6 +442,10 @@ Represents vector shapes and paths.
 | `None` | No fill |
 | `Alternate` | Alternate fill rule (even-odd) |
 | `Winding` | Winding fill rule (non-zero) |
+
+### PdfFormObject and PdfShadingObject
+
+`PdfFormObject` (a form XObject) has `ObjectCount` and `GetObject(index)` for its sub-objects. `PdfShadingObject` (a smooth gradient) has only the base class members. Both are read from existing PDFs; they cannot be created.
 
 ---
 
@@ -372,24 +474,17 @@ PDF uses a coordinate system where:
 ### Converting Between Units
 
 ```csharp
-// Inches to points
-float points = inches * 72;
-
-// Points to inches
-float inches = points / 72;
-
-// Millimeters to points
-float points = mm * 72 / 25.4f;
-
-// Points to millimeters
-float mm = points * 25.4f / 72;
+static float InchesToPoints(float inches) => inches * 72;
+static float PointsToInches(float points) => points / 72;
+static float MillimetersToPoints(float mm) => mm * 72 / 25.4f;
+static float PointsToMillimeters(float points) => points * 25.4f / 72;
 ```
 
 ---
 
 ## Standard Fonts
 
-The following fonts are built into PDF and don't require embedding:
+These fonts are built into PDF readers and need no embedding. They are the only fonts `AddText` accepts:
 
 | Font Family | Variants |
 |-------------|----------|
@@ -419,11 +514,9 @@ using System.Drawing;
 using var document = new PdfDocument();
 using var page = document.AddPage(width: 612, height: 792);
 
-// Add title
 var title = page.AddText("Hello World", x: 100, y: 700, font: "Helvetica", fontSize: 24);
 title.Color = Color.Black;
 
-// Add body text
 var body = page.AddText("This is a sample PDF created with PdfiumWrapper", x: 100, y: 650, font: "Helvetica", fontSize: 12);
 body.Color = Color.Gray;
 
@@ -437,15 +530,12 @@ document.Save("hello_world.pdf");
 using var document = new PdfDocument();
 using var page = document.AddPage(width: 612, height: 792);
 
-// Add title
 var title = page.AddText("Document with Image", x: 100, y: 700, font: "Helvetica-Bold", fontSize: 18);
 title.Color = Color.Black;
 
-// Add image
 var imageBytes = File.ReadAllBytes("logo.png");
-var image = page.AddImage(imageBytes, x: 100, y: 500, width: 200, height: 100);
+page.AddImage(imageBytes, x: 100, y: 500, width: 200, height: 100);
 
-// Add caption
 var caption = page.AddText("Figure 1: Company Logo", x: 100, y: 480, font: "Helvetica-Oblique", fontSize: 10);
 caption.Color = Color.Gray;
 
@@ -457,28 +547,29 @@ document.Save("with_image.pdf");
 
 ```csharp
 using var document = new PdfDocument();
+const int pageCount = 3;
 
-for (int i = 0; i < 3; i++)
+for (int i = 0; i < pageCount; i++)
 {
     using var page = document.AddPage();
-    
-    // Page title
-    var title = page.AddText($"Page {i + 1}", x: 250, y: 750, font: "Helvetica-Bold", fontSize: 24);
-    title.Color = Color.DarkBlue;
-    
-    // Page border
+
+    var header = page.AddText($"Page {i + 1} of {pageCount}", x: 250, y: 750, font: "Helvetica-Bold", fontSize: 18);
+    header.Color = Color.DarkBlue;
+
     var border = page.AddRectangle(
-        x: 50, y: 50, 
+        x: 50, y: 50,
         width: 512, height: 692,
-        fillColor: null, 
+        fillColor: null,
         strokeColor: Color.Gray
     );
     border.StrokeWidth = 1;
-    
-    // Content
+
     var content = page.AddText($"This is the content of page {i + 1}.", x: 100, y: 600, font: "Times-Roman", fontSize: 12);
     content.Color = Color.Black;
-    
+
+    var footer = page.AddText("Generated with PdfiumWrapper", x: 200, y: 30, font: "Helvetica", fontSize: 8);
+    footer.Color = Color.Gray;
+
     page.GenerateContent();
 }
 
@@ -491,7 +582,6 @@ document.Save("multipage.pdf");
 using var document = new PdfDocument();
 using var page = document.AddPage();
 
-// Title
 var title = page.AddText("Shapes Demo", x: 250, y: 750, font: "Helvetica-Bold", fontSize: 20);
 title.Color = Color.Black;
 
@@ -527,34 +617,102 @@ page.GenerateContent();
 document.Save("shapes.pdf");
 ```
 
+### Example 5: Invoice Layout
+
+```csharp
+using var document = new PdfDocument();
+using var page = document.AddPage();
+
+float pageWidth = 612;
+float pageHeight = 792;
+float margin = 50;
+
+// Company header
+var companyName = page.AddText("ACME Corporation", margin, pageHeight - 50, font: "Helvetica-Bold", fontSize: 24);
+companyName.Color = Color.DarkBlue;
+
+var tagline = page.AddText("Quality Products Since 1990", margin, pageHeight - 75, font: "Helvetica", fontSize: 10);
+tagline.Color = Color.Gray;
+
+// Invoice title and details
+page.AddText("INVOICE", pageWidth - 150, pageHeight - 50, font: "Helvetica-Bold", fontSize: 28);
+page.AddText("Invoice #: INV-2024-001", pageWidth - 200, pageHeight - 100, font: "Helvetica", fontSize: 10);
+page.AddText("Date: January 15, 2024", pageWidth - 200, pageHeight - 115, font: "Helvetica", fontSize: 10);
+
+// Horizontal rule
+page.AddRectangle(margin, pageHeight - 140, pageWidth - 2 * margin, 1, Color.Gray, null);
+
+// Bill To section
+page.AddText("Bill To:", margin, pageHeight - 170, font: "Helvetica-Bold", fontSize: 12);
+page.AddText("John Smith", margin, pageHeight - 190);
+page.AddText("123 Main Street", margin, pageHeight - 205);
+page.AddText("Anytown, ST 12345", margin, pageHeight - 220);
+
+// Table header
+page.AddRectangle(margin, pageHeight - 280, pageWidth - 2 * margin, 25, Color.LightGray, null);
+page.AddText("Description", margin + 10, pageHeight - 270, font: "Helvetica-Bold", fontSize: 10);
+page.AddText("Qty", 350, pageHeight - 270, font: "Helvetica-Bold", fontSize: 10);
+page.AddText("Price", 420, pageHeight - 270, font: "Helvetica-Bold", fontSize: 10);
+page.AddText("Total", 500, pageHeight - 270, font: "Helvetica-Bold", fontSize: 10);
+
+// Table row
+page.AddText("Widget Pro", margin + 10, pageHeight - 300);
+page.AddText("5", 350, pageHeight - 300);
+page.AddText("$99.99", 420, pageHeight - 300);
+page.AddText("$499.95", 500, pageHeight - 300);
+
+// Totals
+page.AddText("Subtotal:", 420, pageHeight - 350);
+page.AddText("$499.95", 500, pageHeight - 350);
+page.AddText("Tax (8%):", 420, pageHeight - 370);
+page.AddText("$40.00", 500, pageHeight - 370);
+page.AddText("Total:", 420, pageHeight - 400, font: "Helvetica-Bold", fontSize: 14);
+page.AddText("$539.95", 500, pageHeight - 400, font: "Helvetica-Bold", fontSize: 14);
+
+// Footer
+var thankYou = page.AddText("Thank you for your business!", margin, 80, font: "Helvetica-Oblique", fontSize: 12);
+thankYou.Color = Color.Gray;
+
+page.GenerateContent();
+document.Save("invoice.pdf");
+```
+
 ---
 
 ## Quick Reference
 
 ```csharp
-// Create document
+// Create document and page
 using var document = new PdfDocument();
-
-// Add page
 using var page = document.AddPage(width: 612, height: 792);
 
-// Add text
+// Text (standard fonts only)
 var text = page.AddText("Hello", x: 100, y: 700, font: "Helvetica", fontSize: 12);
 text.Color = Color.Black;
 
-// Add image
+// Image (PNG or JPEG)
+byte[] imageBytes = File.ReadAllBytes("logo.png");
 var image = page.AddImage(imageBytes, x: 100, y: 500, width: 200, height: 100);
 
-// Add rectangle
+// Rectangle
 var rect = page.AddRectangle(x: 100, y: 400, width: 200, height: 100,
     fillColor: Color.LightBlue, strokeColor: Color.Black);
 
-// Add path
+// Path
 var path = page.AddPath();
 path.MoveTo(100, 300).LineTo(200, 300).LineTo(150, 200).Close();
 path.FillColor = Color.Red;
 path.StrokeColor = Color.Black;
 path.SetDrawMode(PdfPathFillMode.Winding, stroke: true);
+
+// Read objects
+for (int i = 0; i < page.ObjectCount; i++)
+{
+    if (page.GetObject(i) is PdfImageObject img)
+    {
+        RawBitmap? pixels = img.GetBitmap();
+    }
+}
 
 // Save
 page.GenerateContent();  // Required!
@@ -565,13 +723,14 @@ document.Save("output.pdf");
 
 ## Notes
 
-1. **Always call `GenerateContent()`** after adding or modifying page objects, before saving.
+1. **Always call `GenerateContent()`** after adding, changing or removing page objects, before saving.
 
-2. **Page objects are disposable** — they are automatically disposed when removed from a page or when the page is disposed.
+2. **Ownership of page objects.** An object on a page belongs to the page: disposing its wrapper does nothing to it, and the wrapper becomes unusable when the page is disposed. An object removed with `RemoveObject` belongs to you: dispose it, or the document destroys it when the document is disposed.
 
-3. **Images are decoded using native libraries** (libjpeg-turbo and libpng) and converted to PDFium's internal format.
+3. **Fonts.** Only the 14 standard fonts are available. Embedding other fonts is not supported.
 
-4. **Custom fonts** can be loaded using `FPDFText_LoadFont` for embedding non-standard fonts.
+4. **Images** are decoded with libjpeg-turbo and libpng; only PNG and JPEG are accepted.
 
-5. **Coordinate system** — remember that Y increases upward, and (0,0) is at the bottom-left.
+5. **Coordinate system.** Y increases upward, and (0,0) is at the bottom-left.
 
+6. **One object, one thread.** Do not use the same document, page or page object from two threads at once. See [Best Practices](BEST-PRACTICES.md#thread-safety).

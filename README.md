@@ -1,24 +1,27 @@
 # PdfiumWrapper
 
-<img src="icon.png" alt="PdfiumWrapper Icon" width="64" height="64" align="left" />
+<img src="https://raw.githubusercontent.com/malweka/PdfiumWrapper/main/icon.png" alt="PdfiumWrapper Icon" width="64" height="64" align="left" />
 
-A modern, high-level .NET 10 wrapper for PDFium that makes PDF manipulation easy and intuitive. This library provides a clean C# API for working with PDF documents, including creation, rendering, merging, form filling, metadata management, and more.
+A modern, high-level .NET 10 wrapper for PDFium that makes PDF manipulation easy and intuitive. This library provides a clean C# API for working with PDF documents, including creation, rendering, merging, form filling, metadata, bookmarks, attachments, and more.
 
 ## Features
 
 - **PDF Creation** — Create new PDF documents from scratch with text, images, and shapes
 - **Page Editing** — Add text objects, images, paths, and rectangles to pages
-- **PDF Rendering** — Convert PDF pages to images (PNG, JPEG) or raw pixel buffers with customizable DPI
+- **PDF Rendering** — Convert PDF pages to images (PNG, JPEG) or raw BGRA pixel buffers with customizable DPI; render sizes are capped (2^28 pixels by default) so a hostile page box cannot exhaust memory
 - **TIFF Export** — High-performance multi-page TIFF output (bilevel CCITT G4 or grayscale LZW) via native libtiff
 - **PDF Merging** — Combine multiple PDFs or extract specific pages
 - **Form Filling** — Read and write PDF form fields (text fields, checkboxes, dropdowns, radio buttons)
-- **Metadata Management** — Read and modify PDF metadata (title, author, keywords, etc.)
-- **Bookmarks** — Access PDF bookmarks/outlines with full hierarchy
-- **Attachments** — Extract and manage embedded file attachments
-- **Page Management** — Extract text, get page dimensions, render individual pages
-- **Async Support** — Async/await patterns for UI responsiveness
+- **Metadata** — Read PDF metadata (title, author, keywords, dates, PDF version, document ID, permissions); metadata is read-only
+- **Bookmarks** — Read PDF bookmarks/outlines with full hierarchy
+- **Attachments** — List and extract embedded file attachments (read-only)
+- **Page Management** — Extract text, get page sizes and page labels, read embedded thumbnails, add and delete pages
+- **Async Support** — Async methods that never block on the native gate or post to the caller's synchronization context, with `CancellationToken` support
+- **Thread Safety** — Different documents can be used from different threads; the library serializes native calls itself
+- **Typed Load Errors** — A document that fails to load throws `PdfiumException` with an `ErrorCode` (wrong password, corrupt file, ...)
 - **Password-Protected PDFs** — Open and work with encrypted documents
 - **Save Support** — Save modified documents back to file or stream
+- **Worker Pool** (separate package `PdfiumWrapper.Processing`) — Run conversions in parallel worker processes, so a native crash costs one job and not the service
 
 ## Installation
 
@@ -36,9 +39,14 @@ See [High-Throughput Processing](docs/HIGH-THROUGHPUT-PROCESSING.md#worker-pool)
 
 ## Requirements
 
-- .NET 10.0 or later
-- Platform-specific PDFium binaries (included in the package)
-- Platform-specific native libraries (included): libtiff + tiff_shim (TIFF), libjpeg-turbo (JPEG), pdfium_png (PNG)
+- .NET 10.0 or later (2.0 targets `net10.0` only)
+- Windows x64, Linux x64, or macOS x64/ARM64
+- On Windows, the Visual C++ 2015-2022 x64 runtime (`tiff.dll` and `pdfium_png.dll` link against it; it is present on most machines)
+
+The native libraries (PDFium, libtiff + tiff_shim, libjpeg-turbo, pdfium_png) ship in four runtime packages, `PdfiumWrapper.runtime.win-x64`, `linux-x64`, `osx-x64` and `osx-arm64`. `PdfiumWrapper` depends on all four, so `dotnet add package PdfiumWrapper` is all you need:
+
+- **Portable build** (no `RuntimeIdentifier`): the output gets every platform under `runtimes/<rid>/native`, and the matching one is loaded at run time.
+- **RID-specific build or publish** (for example `dotnet publish -r linux-x64`): only that platform's binaries are copied, which gives a smaller output.
 
 ## Quick Start
 
@@ -48,18 +56,28 @@ See [High-Throughput Processing](docs/HIGH-THROUGHPUT-PROCESSING.md#worker-pool)
 using PdfiumWrapper;
 
 // Load from file
-using var document = new PdfDocument("sample.pdf");
+using var fromFile = new PdfDocument("sample.pdf");
 
-// Load from byte array
+// Load from byte array (used in place: do not modify the array while the document is open)
 byte[] pdfBytes = File.ReadAllBytes("sample.pdf");
-using var document = new PdfDocument(pdfBytes);
+using var fromBytes = new PdfDocument(pdfBytes);
 
-// Load from stream
-using var stream = File.OpenRead("sample.pdf");
-using var document = new PdfDocument(stream);
+// Load from stream (read to its end during construction; the stream can be closed afterwards)
+using (var stream = File.OpenRead("sample.pdf"))
+using (var fromStream = new PdfDocument(stream))
+{
+    Console.WriteLine(fromStream.PageCount);
+}
 
-// Load password-protected PDF
-using var document = new PdfDocument("secure.pdf", password: "secret");
+// Load a password-protected PDF; a failed load throws PdfiumException
+try
+{
+    using var secured = new PdfDocument("secure.pdf", password: "secret");
+}
+catch (PdfiumException ex) when (ex.ErrorCode == PdfiumErrorCode.Password)
+{
+    Console.WriteLine("Wrong or missing password");
+}
 ```
 
 ### Create a New PDF Document
@@ -95,8 +113,8 @@ using var document = new PdfDocument("document.pdf");
 // Save all pages as PNG at 300 DPI
 document.SaveAsPngs("output_folder", fileNamePrefix: "page", dpi: 300);
 
-// Save as JPEG with quality setting
-document.SaveAsJpegs("output_folder", fileNamePrefix: "page", quality: 90, dpi: 200);
+// Save as JPEG with quality setting (default quality is 90)
+document.SaveAsJpegs("output_folder", fileNamePrefix: "page", quality: 85, dpi: 200);
 
 // Save as multi-page TIFF (bilevel CCITT G4 — ideal for scanned documents)
 document.SaveAsTiff("output.tiff", dpi: 200);
@@ -104,7 +122,13 @@ document.SaveAsTiff("output.tiff", dpi: 200);
 // Save TIFF to a stream
 using var stream = new MemoryStream();
 document.SaveAsTiff(stream, dpi: 200, colorMode: TiffColorMode.Grayscale);
+
+// Async, with cancellation (checked before each page)
+using var cts = new CancellationTokenSource(TimeSpan.FromMinutes(1));
+await document.SaveAsPngsAsync("output_folder", "page", dpi: 150, cancellationToken: cts.Token);
 ```
+
+Files are named `{prefix}_{n:D3}.{ext}` (`page_001.png`, ...). Each render is capped at 268,435,456 pixels; the `PdfiumWrapper.MaxRenderPixels` `AppContext` data key changes the cap (see [Render size limit](docs/API-REFERENCE.md#render-size-limit-and-dpi-validation)).
 
 ### Fill a PDF Form
 
@@ -140,8 +164,9 @@ merger.Save("merged.pdf");
 | [Best Practices](docs/BEST-PRACTICES.md) | Thread safety, ASP.NET Core guidance, performance tips |
 | [Examples](docs/EXAMPLES.md) | Detailed code examples for common scenarios |
 | [Troubleshooting](docs/TROUBLESHOOTING.md) | Common issues and solutions |
-| [High-Throughput Processing](docs/HIGH-THROUGHPUT-PROCESSING.md) | Batch processing, parallelism, memory management |
+| [High-Throughput Processing](docs/HIGH-THROUGHPUT-PROCESSING.md) | Batch processing, parallelism, memory management, the worker pool |
 | [Building Native Libraries](docs/BUILDING-NATIVE-LIBS.md) | How to compile native libraries (libtiff, libjpeg-turbo, libpng, zlib-ng) for each platform |
+| [Changelog](CHANGELOG.md) | Release notes and breaking changes |
 
 ## Platform Support
 
@@ -151,7 +176,7 @@ This library includes native binaries for:
 - macOS (x64 and ARM64)
 - Linux (x64)
 
-Native libraries bundled: **PDFium** (PDF rendering), **libtiff** + **tiff_shim** (TIFF export), **libjpeg-turbo** (JPEG encoding/decoding), **pdfium_png** (PNG encoding/decoding, statically links libpng + zlib-ng). See [Building Native Libraries](docs/BUILDING-NATIVE-LIBS.md) for compilation instructions.
+Native libraries bundled: **PDFium** chromium/8076 (PDF rendering), **libtiff** 4.7.2 + **tiff_shim** (TIFF export), **libjpeg-turbo** 3.2.0 (JPEG encoding/decoding), **pdfium_png** (PNG encoding/decoding, statically links libpng 1.6.59 + zlib-ng 2.3.3). See [Building Native Libraries](docs/BUILDING-NATIVE-LIBS.md) for compilation instructions.
 
 ## Thread Safety
 
@@ -165,24 +190,18 @@ See [Best Practices](docs/BEST-PRACTICES.md) and [High-Throughput Processing](do
 
 ## Upgrading to 2.0
 
-- The raw native imports on the `PDFium` class (for example `PDFium.FPDF_LoadDocument`) are now `internal`, as are its interop structs and the `LibTiff` and `LibTurboJpeg` classes. The `PDFium` class stays public for its constants (`PDFium.FPDF_ANNOT`, `PDFium.FPDF_INCREMENTAL`, ...). There is no supported raw-call path in 2.0, and no public member takes or returns a native pointer; use the wrapper types.
-- `PdfPage.GetObject(index)` and `PdfFormObject.GetObject(index)` return the typed wrapper (`PdfTextObject`, `PdfPathObject`, ...) instead of an `IntPtr`. The `Create(IntPtr documentHandle, ...)` factories of the page object classes are internal; use `PdfPage.AddText`, `AddImage`, `AddPath` and `AddRectangle`.
-- A document that fails to load throws `PdfiumException` (derived from `InvalidOperationException`) with an `ErrorCode` such as `PdfiumErrorCode.Password` or `Format`. See [Load errors](docs/API-REFERENCE.md#load-errors).
-- `PdfMetadata` is read-only. Its setters and `SetMetadataString`, `SetCreationDateTime`, `SetModificationDateTime`, `SetAllMetadata` and `ClearAllMetadata` are removed: they called a function PDFium does not have and always threw `EntryPointNotFoundException`.
-- `DocumentId` no longer ends in `00` (PDFium's terminator was hex-encoded): a 16-byte ID is 32 hex characters.
-- The async render and save methods take an optional `CancellationToken`, checked before each page.
-- New `PdfiumRuntime` class: `Enter()`, `ReleasePending()`, `Shutdown()`, `IsHeldByCurrentThread`, `LiveHandleCount`. See the [API Reference](docs/API-REFERENCE.md#pdfiumruntime).
-- `new PdfDocument(Stream)` and `new PdfMerger(Stream)` read the stream to its end during construction, copying a `MemoryStream`'s bytes as well; the stream can be closed, reset or reused immediately afterwards. The `byte[]` constructors still use the array in place: do not modify it while the document is open.
-- Saving to a stream writes after the PDF has been serialized in memory. An exception thrown by the destination stream (for example `IOException`) now reaches the caller unchanged.
-- A document owns the forms returned by `GetForm()` and the page objects removed from its pages; disposing the document disposes them.
-- `PdfImageObject.GetBitmap()` and `GetRenderedBitmap()` return managed BGRA pixels (`RawBitmap?`) instead of a native bitmap handle. `GetRenderedBitmap` takes a `PdfPage` instead of a page handle. `PdfImageObject.SetBitmap` and `SetImage`, which took native handles, are `internal`; add images with `PdfPage.AddImage`.
-- `StreamImageBytesAsync` and `StreamJpegBytesAsync` return without waiting for the native gate; an empty document is reported when enumeration starts rather than by the call.
-- Renders are capped at 268,435,456 pixels per bitmap (the `PdfiumWrapper.MaxRenderPixels` `AppContext` data key changes the cap). A larger page throws `InvalidOperationException` before PDFium allocates the bitmap. A DPI, width or height of zero or less throws `ArgumentOutOfRangeException`. A failed bitmap allocation is no longer reported as `OutOfMemoryException`. See [Render size limit](docs/API-REFERENCE.md#render-size-limit-and-dpi-validation).
-- The default JPEG quality is 90 for every entry point. `StreamImageBytes`, `StreamImageBytesAsync` and `SaveAsImages` used to default to 100.
-- Every output file (PNG, JPEG, TIFF) is opened by .NET, so non-ASCII directories and file names work on Windows. `LibTiff.TIFFOpen` is no longer exposed.
-- The async methods run page work on the thread pool and never post to the caller's `SynchronizationContext`. The delegate passed to `ProcessAllPagesAsync` therefore runs on a thread-pool thread. New: `SaveAsPngsAsync`, `SaveAsImagesAsync(Stream[], ...)`, and a `SaveAsImagesAsync` overload with default quality and DPI.
-- `PdfPage.GetEmbeddedThumbnail()` returns the thumbnail as BGRA pixels with its size and stride (`RawBitmap?`). `GetEmbeddedThumbnailBytes()` and `GetEmbeddedThumbnailSize()` are obsolete; the bytes are now BGRA as documented.
-- TIFF output (`SaveAsTiff`, `SaveAsTiffAsync`) renders pages in 8-bit gray instead of 32-bit color. It is faster and uses a quarter of the memory per page. Text is anti-aliased slightly differently at that depth, so TIFF files are not pixel-identical to those from 1.x: on text pages roughly 1-2% of pixels differ, at glyph edges.
+2.0 targets .NET 10 and has breaking changes. The main ones:
+
+- the raw `PDFium` imports and the interop classes are internal;
+- `GetObject` returns typed page objects;
+- load failures throw `PdfiumException` with an `ErrorCode`;
+- `PdfMetadata` is read-only;
+- async methods take a `CancellationToken`;
+- renders are capped in size;
+- the default JPEG quality is 90;
+- TIFF pages render in 8-bit gray.
+
+See [CHANGELOG.md](CHANGELOG.md) for the full list.
 
 ## License
 

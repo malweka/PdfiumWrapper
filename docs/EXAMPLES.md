@@ -1,261 +1,135 @@
 # Examples
 
-This document provides detailed code examples for common scenarios using PdfiumWrapper.
+This document provides code examples for common scenarios using PdfiumWrapper.
 
 ## Table of Contents
 
+- [Loading Documents and Handling Errors](#loading-documents-and-handling-errors)
 - [PDF Creation](#pdf-creation)
 - [PDF Rendering](#pdf-rendering)
+- [Cancellation](#cancellation)
 - [PDF Merging](#pdf-merging)
 - [Form Filling](#form-filling)
 - [Text Extraction](#text-extraction)
-- [Metadata Operations](#metadata-operations)
+- [Metadata](#metadata)
+- [Document Properties](#document-properties)
 - [Bookmarks](#bookmarks)
 - [Attachments](#attachments)
+- [Thumbnails and Embedded Images](#thumbnails-and-embedded-images)
 - [Advanced Scenarios](#advanced-scenarios)
+
+---
+
+## Loading Documents and Handling Errors
+
+### Open a File, Stream or Byte Array
+
+```csharp
+using PdfiumWrapper;
+
+using var fromFile = new PdfDocument("document.pdf");
+using var protectedFile = new PdfDocument("secure.pdf", password: "secret123");
+
+// The stream is read to its end during construction; the document does not keep it
+using var input = File.OpenRead("document.pdf");
+using var fromStream = new PdfDocument(input);
+
+// The array is used in place and pinned: do not modify it until the document is disposed
+byte[] data = File.ReadAllBytes("document.pdf");
+using var fromBytes = new PdfDocument(data);
+```
+
+### Tell a Wrong Password from a Broken File
+
+When PDFium cannot open a document, the constructor throws `PdfiumException`. It derives from `InvalidOperationException`, and its `ErrorCode` says why:
+
+| `PdfiumErrorCode` | Meaning |
+|-------------------|---------|
+| `File` | The file was not found or could not be opened |
+| `Format` | The input is not a PDF or is corrupted |
+| `Password` | The document is encrypted and the password is missing or wrong |
+| `Security` | The document uses a security handler PDFium does not support |
+| `Page` | A page was not found or its content is broken |
+| `Unknown` | PDFium gave no specific reason |
+
+```csharp
+try
+{
+    using var document = new PdfDocument("upload.pdf");
+    Console.WriteLine($"{document.PageCount} pages");
+}
+catch (PdfiumException ex) when (ex.ErrorCode == PdfiumErrorCode.Password)
+{
+    Console.WriteLine("The PDF is password protected");
+}
+catch (PdfiumException ex)
+{
+    Console.WriteLine($"Cannot open the PDF ({ex.ErrorCode}): {ex.Message}");
+}
+```
+
+### Retry with a Password
+
+```csharp
+static PdfDocument OpenWithPasswords(string path, IEnumerable<string> candidates)
+{
+    try
+    {
+        return new PdfDocument(path);
+    }
+    catch (PdfiumException ex) when (ex.ErrorCode == PdfiumErrorCode.Password)
+    {
+        // Encrypted: try the passwords below
+    }
+
+    foreach (var password in candidates)
+    {
+        try
+        {
+            return new PdfDocument(path, password);
+        }
+        catch (PdfiumException ex) when (ex.ErrorCode == PdfiumErrorCode.Password)
+        {
+            // Wrong password: try the next one
+        }
+    }
+
+    throw new UnauthorizedAccessException($"No known password opens {path}.");
+}
+```
+
+`PdfMerger` constructors and the `PdfMerger` methods that take a file path or bytes load a document too, so they throw `PdfiumException` the same way. Other failures use the usual .NET exceptions:
+
+- `ArgumentException` and `ArgumentOutOfRangeException` for invalid arguments, such as a page index out of range or a DPI that is zero or negative.
+- `InvalidOperationException` for a render that would exceed the pixel limit, a failed save, or a failed page import.
+- `ObjectDisposedException` for a disposed object.
 
 ---
 
 ## PDF Creation
 
-### Create a Simple PDF
+Creating documents and adding text, images and shapes is covered in the [PDF Editing Guide](PDF-EDITING.md):
 
-```csharp
-using PdfiumWrapper;
-using System.Drawing;
-
-using var document = new PdfDocument();
-using var page = document.AddPage(width: 612, height: 792); // US Letter
-
-// Add title
-var title = page.AddText("Hello World", x: 100, y: 700, font: "Helvetica", fontSize: 24);
-title.Color = Color.Black;
-
-// Add body text
-var body = page.AddText("This is a sample PDF.", x: 100, y: 650, font: "Helvetica", fontSize: 12);
-body.Color = Color.Gray;
-
-page.GenerateContent();
-document.Save("hello_world.pdf");
-```
-
-### Create PDF with Different Page Sizes
-
-```csharp
-using var document = new PdfDocument();
-
-// US Letter (default)
-using var letterPage = document.AddPage();
-
-// A4 Portrait
-using var a4Page = document.AddPage(width: 595, height: 842);
-
-// A4 Landscape  
-using var a4Landscape = document.AddPage(width: 842, height: 595);
-
-// Custom size
-using var customPage = document.AddPage(width: 400, height: 600);
-
-// Add content to each page...
-letterPage.AddText("US Letter", 100, 700);
-letterPage.GenerateContent();
-
-a4Page.AddText("A4 Portrait", 100, 800);
-a4Page.GenerateContent();
-
-a4Landscape.AddText("A4 Landscape", 100, 550);
-a4Landscape.GenerateContent();
-
-customPage.AddText("Custom Size", 100, 550);
-customPage.GenerateContent();
-
-document.Save("multiple_sizes.pdf");
-```
-
-### Create PDF with Images
-
-```csharp
-using var document = new PdfDocument();
-using var page = document.AddPage();
-
-// Add title
-var title = page.AddText("Document with Image", x: 100, y: 700, font: "Helvetica-Bold", fontSize: 18);
-title.Color = Color.Black;
-
-// Add image from file
-var imageBytes = File.ReadAllBytes("logo.png");
-var image = page.AddImage(imageBytes, x: 100, y: 500, width: 200, height: 100);
-
-// Add caption below image
-var caption = page.AddText("Figure 1: Company Logo", x: 100, y: 480, font: "Helvetica-Oblique", fontSize: 10);
-caption.Color = Color.Gray;
-
-page.GenerateContent();
-document.Save("with_image.pdf");
-```
-
-### Create PDF with Shapes
-
-```csharp
-using var document = new PdfDocument();
-using var page = document.AddPage();
-
-// Title
-var title = page.AddText("Shapes Demo", x: 250, y: 750, font: "Helvetica-Bold", fontSize: 20);
-title.Color = Color.Black;
-
-// Filled rectangle
-var rect = page.AddRectangle(
-    x: 100, y: 600, 
-    width: 150, height: 80,
-    fillColor: Color.LightBlue, 
-    strokeColor: Color.Blue
-);
-rect.StrokeWidth = 2;
-
-// Rectangle outline only (border)
-var border = page.AddRectangle(
-    x: 300, y: 600,
-    width: 150, height: 80,
-    fillColor: null,
-    strokeColor: Color.Red
-);
-border.StrokeWidth = 3;
-
-// Triangle using path
-var triangle = page.AddPath();
-triangle.MoveTo(175, 500);   // Top point
-triangle.LineTo(100, 400);   // Bottom-left
-triangle.LineTo(250, 400);   // Bottom-right
-triangle.Close();
-triangle.FillColor = Color.LightGreen;
-triangle.StrokeColor = Color.DarkGreen;
-triangle.StrokeWidth = 2;
-triangle.SetDrawMode(PdfPathFillMode.Winding, stroke: true);
-
-page.GenerateContent();
-document.Save("shapes.pdf");
-```
-
-### Create Multi-Page PDF
-
-```csharp
-using var document = new PdfDocument();
-
-for (int i = 0; i < 5; i++)
-{
-    using var page = document.AddPage();
-    
-    // Page header
-    var header = page.AddText($"Page {i + 1} of 5", x: 250, y: 750, font: "Helvetica-Bold", fontSize: 18);
-    header.Color = Color.DarkBlue;
-    
-    // Page border
-    var border = page.AddRectangle(
-        x: 50, y: 50, 
-        width: 512, height: 692,
-        fillColor: null, 
-        strokeColor: Color.LightGray
-    );
-    
-    // Page content
-    var content = page.AddText(
-        $"This is the content of page {i + 1}.", 
-        x: 100, y: 600, font: "Times-Roman", fontSize: 12
-    );
-    content.Color = Color.Black;
-    
-    // Footer
-    var footer = page.AddText(
-        "Generated with PdfiumWrapper", 
-        x: 200, y: 30, font: "Helvetica", fontSize: 8
-    );
-    footer.Color = Color.Gray;
-    
-    page.GenerateContent();
-}
-
-document.Save("multipage.pdf");
-```
-
-### Create PDF Invoice Template
-
-```csharp
-using var document = new PdfDocument();
-using var page = document.AddPage();
-
-float pageWidth = 612;
-float pageHeight = 792;
-float margin = 50;
-
-// Company header
-var companyName = page.AddText("ACME Corporation", margin, pageHeight - 50, font: "Helvetica-Bold", fontSize: 24);
-companyName.Color = Color.DarkBlue;
-
-var tagline = page.AddText("Quality Products Since 1990", margin, pageHeight - 75, font: "Helvetica", fontSize: 10);
-tagline.Color = Color.Gray;
-
-// Invoice title
-var invoiceTitle = page.AddText("INVOICE", pageWidth - 150, pageHeight - 50, font: "Helvetica-Bold", fontSize: 28);
-invoiceTitle.Color = Color.Black;
-
-// Invoice details
-var invoiceNum = page.AddText("Invoice #: INV-2024-001", pageWidth - 200, pageHeight - 100, font: "Helvetica", fontSize: 10);
-invoiceNum.Color = Color.Black;
-
-var invoiceDate = page.AddText("Date: January 15, 2024", pageWidth - 200, pageHeight - 115, font: "Helvetica", fontSize: 10);
-invoiceDate.Color = Color.Black;
-
-// Horizontal line
-var line = page.AddRectangle(margin, pageHeight - 140, pageWidth - 2 * margin, 1, Color.Gray, null);
-
-// Bill To section
-var billTo = page.AddText("Bill To:", margin, pageHeight - 170, font: "Helvetica-Bold", fontSize: 12);
-billTo.Color = Color.Black;
-
-var customerName = page.AddText("John Smith", margin, pageHeight - 190);
-var customerAddr = page.AddText("123 Main Street", margin, pageHeight - 205);
-var customerCity = page.AddText("Anytown, ST 12345", margin, pageHeight - 220);
-
-// Table header background
-var tableHeader = page.AddRectangle(margin, pageHeight - 280, pageWidth - 2 * margin, 25, Color.LightGray, null);
-
-// Table headers
-var descHeader = page.AddText("Description", margin + 10, pageHeight - 270, font: "Helvetica-Bold", fontSize: 10);
-
-var qtyHeader = page.AddText("Qty", 350, pageHeight - 270, font: "Helvetica-Bold", fontSize: 10);
-
-var priceHeader = page.AddText("Price", 420, pageHeight - 270, font: "Helvetica-Bold", fontSize: 10);
-
-var totalHeader = page.AddText("Total", 500, pageHeight - 270, font: "Helvetica-Bold", fontSize: 10);
-
-// Table row
-var item1 = page.AddText("Widget Pro", margin + 10, pageHeight - 300);
-var qty1 = page.AddText("5", 350, pageHeight - 300);
-var price1 = page.AddText("$99.99", 420, pageHeight - 300);
-var total1 = page.AddText("$499.95", 500, pageHeight - 300);
-
-// Subtotal
-var subtotalLabel = page.AddText("Subtotal:", 420, pageHeight - 350);
-var subtotalValue = page.AddText("$499.95", 500, pageHeight - 350);
-
-var taxLabel = page.AddText("Tax (8%):", 420, pageHeight - 370);
-var taxValue = page.AddText("$40.00", 500, pageHeight - 370);
-
-var grandTotalLabel = page.AddText("Total:", 420, pageHeight - 400, font: "Helvetica-Bold", fontSize: 14);
-var grandTotalValue = page.AddText("$539.95", 500, pageHeight - 400, font: "Helvetica-Bold", fontSize: 14);
-
-// Footer
-var thankYou = page.AddText("Thank you for your business!", margin, 80, font: "Helvetica-Oblique", fontSize: 12);
-thankYou.Color = Color.Gray;
-
-page.GenerateContent();
-document.Save("invoice.pdf");
-```
+- [Simple document](PDF-EDITING.md#example-1-simple-document)
+- [Document with image](PDF-EDITING.md#example-2-document-with-image)
+- [Multi-page document](PDF-EDITING.md#example-3-multi-page-document)
+- [Shapes and graphics](PDF-EDITING.md#example-4-shapes-and-graphics)
+- [Invoice layout](PDF-EDITING.md#example-5-invoice-layout)
+- [Adding content to an existing PDF](PDF-EDITING.md#editing-existing-documents)
+- [Reading and removing page objects](PDF-EDITING.md#reading-page-objects)
 
 ---
 
 ## PDF Rendering
+
+### Defaults and Rules
+
+- **DPI** defaults to 300 for PNG and JPEG output and to 200 for TIFF. It must be positive; zero or a negative value throws `ArgumentOutOfRangeException`.
+- **JPEG quality** defaults to 90 everywhere. PNG output ignores the `quality` argument.
+- **Render limit.** Each rendered page is limited to 268,435,456 pixels by default (for example 16,384 x 16,384). A larger page throws `InvalidOperationException`; lower the DPI, or raise the limit with the `PdfiumWrapper.MaxRenderPixels` AppContext data key (see [Troubleshooting](TROUBLESHOOTING.md)).
+- **File names.** Directory exports write `{prefix}_{n:D3}.png` or `.jpg` (`page_001.png`, ...), creating the directory if needed.
+- **Output files** are opened by .NET, so any path .NET accepts works, including non-ASCII paths on Windows.
+- **Annotations** are drawn by all document-level render methods.
 
 ### Convert All Pages to PNG Images
 
@@ -264,9 +138,8 @@ using PdfiumWrapper;
 
 using var document = new PdfDocument("document.pdf");
 
-// Simple: Save all pages as PNG at 300 DPI
 document.SaveAsPngs("output_folder", fileNamePrefix: "page", dpi: 300);
-// Creates: output_folder/page_001.png, output_folder/page_002.png, etc.
+// Creates: output_folder/page_001.png, output_folder/page_002.png, ...
 ```
 
 ### Convert to JPEG with Quality Control
@@ -274,23 +147,23 @@ document.SaveAsPngs("output_folder", fileNamePrefix: "page", dpi: 300);
 ```csharp
 using var document = new PdfDocument("document.pdf");
 
-// JPEG with 85% quality at 200 DPI (good balance of size and quality)
+// 85% quality at 200 DPI (default quality is 90)
 document.SaveAsJpegs("output_folder", fileNamePrefix: "scan", quality: 85, dpi: 200);
 ```
 
-### Convert to a Specific Image Format
+### Choose the Format at Run Time
+
+`SaveAsImages` writes PNG or JPEG. TIFF is a multi-page format with its own method, `SaveAsTiff`; passing `ImageFormat.Tiff` to `SaveAsImages` throws `ArgumentOutOfRangeException`.
 
 ```csharp
-using PdfiumWrapper;
-
 using var document = new PdfDocument("document.pdf");
 
-// Supported formats: ImageFormat.Png, ImageFormat.Jpeg, ImageFormat.Tiff
+ImageFormat format = ImageFormat.Jpeg; // or ImageFormat.Png
 document.SaveAsImages(
     outputDirectory: "output_folder",
     fileNamePrefix: "page",
-    format: ImageFormat.Png,
-    quality: 100,
+    format: format,
+    quality: 90,      // JPEG only; ignored for PNG
     dpiWidth: 150,
     dpiHeight: 150
 );
@@ -301,53 +174,58 @@ document.SaveAsImages(
 ```csharp
 using var document = new PdfDocument("document.pdf");
 
-// Stream pages one at a time — only one page's bytes in memory at any point
-int i = 0;
-foreach (var bytes in document.StreamImageBytes(ImageFormat.Png, quality: 100, dpi: 150))
+// One page at a time: only one page's bytes are in memory at any point
+int pageNumber = 0;
+foreach (var bytes in document.StreamImageBytes(ImageFormat.Png, dpi: 150))
 {
-    File.WriteAllBytes($"page_{++i}.png", bytes);
+    File.WriteAllBytes($"page_{++pageNumber}.png", bytes);
 }
 
 // Async version
+pageNumber = 0;
 await foreach (var bytes in document.StreamImageBytesAsync(ImageFormat.Jpeg, quality: 85, dpi: 200))
 {
-    await File.WriteAllBytesAsync($"page_{++i}.jpg", bytes);
+    await File.WriteAllBytesAsync($"page_{++pageNumber}.jpg", bytes);
 }
 ```
 
 ### Save as Multi-Page TIFF
 
+TIFF pages are rendered in 8-bit gray, then written as bilevel or grayscale.
+
 ```csharp
 using var document = new PdfDocument("document.pdf");
 
-// Bilevel CCITT G4 (default) — ideal for scanned documents
+// Bilevel CCITT G4 (default): ideal for scanned documents
 document.SaveAsTiff("output.tiff", dpi: 200);
 
 // Grayscale LZW
-document.SaveAsTiff("output.tiff", dpi: 200, colorMode: TiffColorMode.Grayscale);
+document.SaveAsTiff("output_gray.tiff", dpi: 200, colorMode: TiffColorMode.Grayscale);
 
-// Write to a stream
+// Write to a stream; it must be writable and seekable
 using var stream = new MemoryStream();
 document.SaveAsTiff(stream, dpi: 200);
 ```
 
+If writing a TIFF file fails, the partly written file is deleted.
+
 ### Get Raw Bitmaps for Custom Processing
+
+`RenderPages` returns every page at once (a US Letter page at 300 DPI is about 32 MiB), so use it for short documents or low DPI. The pixels are BGRx: blue, green, red, then a fourth byte that is not alpha.
 
 ```csharp
 using PdfiumWrapper;
 
 using var document = new PdfDocument("document.pdf");
-RawBitmap[] bitmaps = document.RenderPages(dpi: 300);
+RawBitmap[] bitmaps = document.RenderPages(dpi: 150);
 
 foreach (var bitmap in bitmaps)
 {
-    // Access raw pixel data (BGRA format)
     byte[] pixels = bitmap.Pixels;
     int width = bitmap.Width;
     int height = bitmap.Height;
-    int stride = bitmap.Stride;
+    int stride = bitmap.Stride;   // bytes per row
 
-    // Example: iterate over pixels
     for (int y = 0; y < height; y++)
     {
         for (int x = 0; x < width; x++)
@@ -356,47 +234,42 @@ foreach (var bitmap in bitmaps)
             byte b = pixels[offset];
             byte g = pixels[offset + 1];
             byte r = pixels[offset + 2];
-            byte a = pixels[offset + 3];
-            // Apply custom processing...
+            // pixels[offset + 3] is unused
         }
     }
 }
-// No disposal needed — RawBitmap is a lightweight record
+// No disposal needed: RawBitmap is a record holding a managed array
 ```
 
-### Async Rendering for UI Applications
+### Async Rendering
+
+The async methods render on the thread pool and wait for the native gate without blocking a thread, so a UI stays responsive. Your own `await` still resumes on your context as usual.
 
 ```csharp
 using var document = new PdfDocument("large_document.pdf");
 
-// Async version keeps UI responsive
 RawBitmap[] bitmaps = await document.RenderPagesAsync(dpi: 150);
 
-// Or save directly to files asynchronously
-await document.SaveAsImagesAsync(
-    "output_folder",
-    "page",
-    ImageFormat.Png,
-    quality: 100,
-    dpiWidth: 300,
-    dpiHeight: 300
-);
+// Or write files directly
+await document.SaveAsImagesAsync("output_folder", "page", ImageFormat.Png, dpi: 300);
 ```
 
-### Render Single Page
+The delegate passed to `ProcessAllPagesAsync` runs on a thread-pool thread, so it must not touch UI objects.
+
+### Render a Single Page
+
+`PdfPage.RenderToBytes(width, height, flags)` renders one page into a bitmap of exactly that size, stretching the page if the aspect ratio differs. It returns BGRx pixels, rows of `width * 4` bytes. With the default `flags` of 0 annotations are not drawn; pass `PDFium.FPDF_ANNOT` to draw them as the document-level methods do.
 
 ```csharp
 using var document = new PdfDocument("document.pdf");
 using var page = document.GetPage(0); // First page
 
-// Get raw BGRA bytes
-byte[] pixels = page.RenderToBytes(width: 1920, height: 1080);
+// Keep the aspect ratio: size the bitmap from the page size in points
+const double dpi = 150;
+int width = (int)Math.Round(page.Width / 72.0 * dpi);
+int height = (int)Math.Round(page.Height / 72.0 * dpi);
 
-// Or calculate dimensions based on DPI
-double dpi = 150;
-int width = (int)(page.Width / 72.0 * dpi);
-int height = (int)(page.Height / 72.0 * dpi);
-byte[] highResPixels = page.RenderToBytes(width, height);
+byte[] pixels = page.RenderToBytes(width, height, PDFium.FPDF_ANNOT);
 ```
 
 ### Different DPI for Width and Height
@@ -407,6 +280,43 @@ using var document = new PdfDocument("document.pdf");
 // Non-uniform DPI (rare use case)
 var bitmaps = document.RenderPages(dpiWidth: 300, dpiHeight: 150);
 ```
+
+---
+
+## Cancellation
+
+Every async method of `PdfDocument` can be cancelled.
+
+- **Task-returning methods** take an optional `CancellationToken` as their last parameter: `RenderPagesAsync`, `SaveAsPngsAsync`, `SaveAsJpegsAsync`, `SaveAsImagesAsync`, `SaveAsTiffAsync` and `ProcessAllPagesAsync`.
+- **Streaming methods** (`StreamImageBytesAsync`, `StreamJpegBytesAsync`) return `IAsyncEnumerable<byte[]>`. Pass the token with `WithCancellation`.
+
+```csharp
+using var cts = new CancellationTokenSource(TimeSpan.FromMinutes(2));
+var ct = cts.Token;
+
+using var document = new PdfDocument("document.pdf");
+
+await document.SaveAsPngsAsync("output_folder", "page", dpi: 150, cancellationToken: ct);
+await document.SaveAsTiffAsync("output.tiff", dpi: 200, cancellationToken: ct);
+RawBitmap[] bitmaps = await document.RenderPagesAsync(dpi: 150, cancellationToken: ct);
+string[] texts = await document.ProcessAllPagesAsync(page => page.ExtractText(), ct);
+
+int pageNumber = 0;
+await foreach (var bytes in document.StreamImageBytesAsync(ImageFormat.Jpeg, dpi: 200).WithCancellation(ct))
+{
+    await File.WriteAllBytesAsync($"page_{++pageNumber}.jpg", bytes, ct);
+}
+```
+
+The token is checked before each page and while waiting for the native gate, and cancellation throws `OperationCanceledException`. A page that is already rendering finishes first, because a native render cannot be interrupted. What a cancelled export leaves behind:
+
+| Method | After cancellation |
+|--------|--------------------|
+| `SaveAsTiffAsync(path, ...)` | The partly written file is deleted |
+| `SaveAsTiffAsync(stream, ...)` | The stream holds an incomplete TIFF |
+| `SaveAsPngsAsync`, `SaveAsJpegsAsync`, `SaveAsImagesAsync` | Pages written before the cancellation are kept |
+
+The synchronous methods take no token.
 
 ---
 
@@ -438,13 +348,15 @@ merger.AppendDocument("secure.pdf", password: "secret123");
 merger.Save("combined.pdf");
 ```
 
+A wrong password throws `PdfiumException` with `ErrorCode == PdfiumErrorCode.Password`.
+
 ### Extract Specific Pages
 
 ```csharp
 using var merger = new PdfMerger();
 using var source = new PdfDocument("large_document.pdf");
 
-// Extract pages 1, 3, 5-10 (1-based page numbers)
+// Pages 1, 3 and 5-10 (1-based page numbers)
 merger.AppendPages(source, "1,3,5-10");
 merger.Save("selected_pages.pdf");
 ```
@@ -455,7 +367,7 @@ merger.Save("selected_pages.pdf");
 using var merger = new PdfMerger();
 using var source = new PdfDocument("document.pdf");
 
-// Extract first, fifth, and last pages (0-based indices)
+// First, fifth and last pages (0-based indices)
 int lastPageIndex = source.PageCount - 1;
 merger.AppendPages(source, new[] { 0, 4, lastPageIndex });
 merger.Save("extracted.pdf");
@@ -468,10 +380,10 @@ using var merger = new PdfMerger("main_document.pdf");
 using var coverPage = new PdfDocument("cover.pdf");
 using var appendix = new PdfDocument("appendix.pdf");
 
-// Insert cover at the beginning
+// Insert the cover at the beginning
 merger.InsertDocument(coverPage, insertAtIndex: 0);
 
-// Appendix goes at the end (already default behavior for Append)
+// Append adds at the end
 merger.AppendDocument(appendix);
 
 merger.Save("complete_document.pdf");
@@ -482,11 +394,11 @@ merger.Save("complete_document.pdf");
 ```csharp
 using var merger = new PdfMerger("document.pdf");
 
-// Delete single page (0-based index)
-merger.DeletePage(0); // Remove first page
+// Delete a single page (0-based index)
+merger.DeletePage(0);
 
-// Delete multiple pages
-merger.DeletePages(new[] { 1, 3, 5 }); // Indices handled in correct order
+// Delete several pages; the indices refer to the document before the call
+merger.DeletePages(new[] { 1, 3, 5 });
 
 merger.Save("trimmed.pdf");
 ```
@@ -513,7 +425,6 @@ merger.AppendDocument("doc2.pdf");
 
 byte[] mergedPdf = merger.ToBytes();
 
-// Use directly or save
 await File.WriteAllBytesAsync("merged.pdf", mergedPdf);
 ```
 
@@ -524,7 +435,7 @@ using var merger = new PdfMerger();
 using var sourceWithPrefs = new PdfDocument("source_with_zoom.pdf");
 
 merger.AppendDocument("document.pdf");
-merger.CopyViewerPreferences(sourceWithPrefs); // Copy zoom, layout settings
+merger.CopyViewerPreferences(sourceWithPrefs); // zoom, layout settings
 
 merger.Save("with_preferences.pdf");
 ```
@@ -533,11 +444,13 @@ merger.Save("with_preferences.pdf");
 
 ## Form Filling
 
+`GetForm()` returns `null` when the document has no form fields. The form belongs to its document: use it while the document is open. It is disposed with the document, and `using` disposes it earlier.
+
 ### List All Form Fields
 
 ```csharp
 using var document = new PdfDocument("form.pdf");
-var form = document.GetForm();
+using var form = document.GetForm();
 
 if (form == null)
 {
@@ -545,9 +458,7 @@ if (form == null)
     return;
 }
 
-FormField[] fields = form.GetAllFormFields();
-
-foreach (var field in fields)
+foreach (var field in form.GetAllFormFields())
 {
     Console.WriteLine($"Field: {field.Name}");
     Console.WriteLine($"  Type: {field.Type}");
@@ -555,22 +466,21 @@ foreach (var field in fields)
     Console.WriteLine($"  Page: {field.PageIndex + 1}");
     Console.WriteLine($"  Required: {field.IsRequired}");
     Console.WriteLine($"  ReadOnly: {field.IsReadOnly}");
-    
-    if (field.Options?.Count > 0)
+
+    if (field.Options.Count > 0)
     {
         Console.WriteLine($"  Options: {string.Join(", ", field.Options)}");
     }
-    Console.WriteLine();
 }
-
-form.Dispose();
 ```
+
+`form.GetFormFieldsOnPage(pageIndex)` lists the fields of one page.
 
 ### Fill Text Fields
 
 ```csharp
 using var document = new PdfDocument("application_form.pdf");
-var form = document.GetForm();
+using var form = document.GetForm();
 
 if (form != null)
 {
@@ -579,8 +489,7 @@ if (form != null)
     form.SetFormFieldValue("Email", "john.doe@example.com");
     form.SetFormFieldValue("Phone", "555-123-4567");
     form.SetFormFieldValue("Address", "123 Main Street\nAnytown, USA 12345");
-    
-    form.Dispose();
+
     document.Save("filled_application.pdf");
 }
 ```
@@ -589,40 +498,31 @@ if (form != null)
 
 ```csharp
 using var document = new PdfDocument("consent_form.pdf");
-var form = document.GetForm();
+using var form = document.GetForm();
 
 if (form != null)
 {
-    // Check boxes
     form.SetFormFieldChecked("AgreeToTerms", true);
     form.SetFormFieldChecked("ReceiveNewsletter", false);
-    form.SetFormFieldChecked("ShareData", false);
-    
-    // Read checkbox state
+
     bool hasAgreed = form.GetFormFieldChecked("AgreeToTerms");
     Console.WriteLine($"User agreed to terms: {hasAgreed}");
-    
-    form.Dispose();
+
     document.Save("signed_consent.pdf");
 }
 ```
 
-### Work with Dropdown/ComboBox
+### Work with Dropdowns (Combo Boxes)
 
 ```csharp
 using var document = new PdfDocument("registration.pdf");
-var form = document.GetForm();
+using var form = document.GetForm();
 
 if (form != null)
 {
-    // Set dropdown selection
     form.SetFormFieldValue("Country", "United States");
     form.SetFormFieldValue("State", "California");
-    
-    // For combo boxes, you can also type custom values
-    form.SetFormFieldValue("Occupation", "Software Engineer");
-    
-    form.Dispose();
+
     document.Save("completed_registration.pdf");
 }
 ```
@@ -631,32 +531,27 @@ if (form != null)
 
 ```csharp
 using var document = new PdfDocument("preferences.pdf");
-var form = document.GetForm();
+using var form = document.GetForm();
 
 if (form != null)
 {
     // Single selection
     form.SetListBoxSelection("PrimaryLanguage", "English");
-    
-    // Multiple selections (for multi-select list boxes)
-    form.SetListBoxSelections("Skills", new[] 
-    { 
-        "C#", 
-        "JavaScript", 
-        "SQL",
-        "Azure"
-    });
-    
-    form.Dispose();
+
+    // Several selections in a multi-select list box
+    form.SetListBoxSelections("Skills", new[] { "C#", "JavaScript", "SQL", "Azure" });
+
     document.Save("preferences_filled.pdf");
 }
 ```
 
 ### Fill Form from Dictionary
 
+A field name that does not exist throws `ArgumentException`.
+
 ```csharp
 using var document = new PdfDocument("form.pdf");
-var form = document.GetForm();
+using var form = document.GetForm();
 
 if (form != null)
 {
@@ -667,7 +562,7 @@ if (form != null)
         ["Department"] = "Engineering",
         ["StartDate"] = "2024-01-15"
     };
-    
+
     foreach (var (fieldName, value) in formData)
     {
         try
@@ -679,8 +574,7 @@ if (form != null)
             Console.WriteLine($"Warning: Field '{fieldName}' not found");
         }
     }
-    
-    form.Dispose();
+
     document.Save("filled_form.pdf");
 }
 ```
@@ -690,20 +584,11 @@ if (form != null)
 ```csharp
 using System.Text.Json;
 
-public record FormData(
-    string FullName,
-    string Email,
-    string Phone,
-    bool AgreeToTerms,
-    string Country
-);
-
-// Load JSON
 string json = await File.ReadAllTextAsync("form_data.json");
 var data = JsonSerializer.Deserialize<FormData>(json);
 
 using var document = new PdfDocument("form.pdf");
-var form = document.GetForm();
+using var form = document.GetForm();
 
 if (form != null && data != null)
 {
@@ -712,10 +597,17 @@ if (form != null && data != null)
     form.SetFormFieldValue("Phone", data.Phone);
     form.SetFormFieldChecked("AgreeToTerms", data.AgreeToTerms);
     form.SetFormFieldValue("Country", data.Country);
-    
-    form.Dispose();
+
     document.Save("completed.pdf");
 }
+
+public record FormData(
+    string FullName,
+    string Email,
+    string Phone,
+    bool AgreeToTerms,
+    string Country
+);
 ```
 
 ---
@@ -724,85 +616,71 @@ if (form != null && data != null)
 
 ### Extract Text from All Pages
 
+`ProcessAllPages` loads, processes and disposes one page at a time:
+
 ```csharp
 using var document = new PdfDocument("document.pdf");
 
-var allText = new StringBuilder();
+string[] pageTexts = document.ProcessAllPages(page => page.ExtractText());
 
-for (int i = 0; i < document.PageCount; i++)
+for (int i = 0; i < pageTexts.Length; i++)
 {
-    using var page = document.GetPage(i);
-    string pageText = page.ExtractText();
-    
-    allText.AppendLine($"=== Page {i + 1} ===");
-    allText.AppendLine(pageText);
-    allText.AppendLine();
+    Console.WriteLine($"=== Page {i + 1} ===");
+    Console.WriteLine(pageTexts[i]);
 }
 
-Console.WriteLine(allText.ToString());
+// Async: waits for the native gate without blocking a thread
+string[] texts = await document.ProcessAllPagesAsync(page => page.ExtractText());
 ```
 
-### Extract Text from Specific Page
+### Extract Text from a Specific Page
 
 ```csharp
 using var document = new PdfDocument("document.pdf");
 
-// Extract from page 5 (0-indexed)
+// Page 5 (0-based index 4)
 using var page = document.GetPage(4);
-string text = page.ExtractText();
-
-Console.WriteLine(text);
+Console.WriteLine(page.ExtractText());
 ```
 
-### Search for Text in PDF
+### Search for Text in a PDF
 
 ```csharp
 using var document = new PdfDocument("document.pdf");
 
 string searchTerm = "important";
-var results = new List<(int PageNumber, string Context)>();
+string[] pageTexts = document.ProcessAllPages(page => page.ExtractText());
 
-for (int i = 0; i < document.PageCount; i++)
+for (int i = 0; i < pageTexts.Length; i++)
 {
-    using var page = document.GetPage(i);
-    string text = page.ExtractText();
-    
-    if (text.Contains(searchTerm, StringComparison.OrdinalIgnoreCase))
-    {
-        // Get context around the match
-        int index = text.IndexOf(searchTerm, StringComparison.OrdinalIgnoreCase);
-        int start = Math.Max(0, index - 50);
-        int length = Math.Min(text.Length - start, 100 + searchTerm.Length);
-        string context = text.Substring(start, length);
-        
-        results.Add((i + 1, context.Trim()));
-    }
-}
+    string text = pageTexts[i];
+    int index = text.IndexOf(searchTerm, StringComparison.OrdinalIgnoreCase);
+    if (index < 0)
+        continue;
 
-foreach (var (pageNum, context) in results)
-{
-    Console.WriteLine($"Page {pageNum}: ...{context}...");
+    int start = Math.Max(0, index - 50);
+    int length = Math.Min(text.Length - start, 100 + searchTerm.Length);
+    Console.WriteLine($"Page {i + 1}: ...{text.Substring(start, length).Trim()}...");
 }
 ```
 
-### Export Text to File
+### Export Text to a File
 
 ```csharp
 using var document = new PdfDocument("document.pdf");
 using var writer = new StreamWriter("extracted_text.txt");
 
-for (int i = 0; i < document.PageCount; i++)
+document.ProcessAllPages(page =>
 {
-    using var page = document.GetPage(i);
-    await writer.WriteLineAsync($"--- Page {i + 1} ---");
-    await writer.WriteLineAsync(page.ExtractText());
-    await writer.WriteLineAsync();
-}
+    writer.WriteLine($"--- Page {page.PageIndex + 1} ---");
+    writer.WriteLine(page.ExtractText());
+    writer.WriteLine();
+});
 ```
 
 ---
 
-## Metadata Operations
+## Metadata
 
 ### Read All Metadata
 
@@ -816,16 +694,18 @@ Console.WriteLine($"Subject: {metadata.Subject}");
 Console.WriteLine($"Keywords: {metadata.Keywords}");
 Console.WriteLine($"Creator: {metadata.Creator}");
 Console.WriteLine($"Producer: {metadata.Producer}");
-Console.WriteLine($"PDF Version: {metadata.FileVersionString}");
+Console.WriteLine($"PDF Version: {metadata.PdfVersionString}");   // "1.7"; metadata.PdfVersion is 17
 
 if (metadata.CreationDateTime.HasValue)
     Console.WriteLine($"Created: {metadata.CreationDateTime.Value:yyyy-MM-dd HH:mm:ss}");
-    
+
 if (metadata.ModificationDateTime.HasValue)
     Console.WriteLine($"Modified: {metadata.ModificationDateTime.Value:yyyy-MM-dd HH:mm:ss}");
 ```
 
-### Get Metadata as Dictionary
+Missing entries are empty strings. `CreationDate` and `ModificationDate` hold the raw PDF date strings. `CreationDateTime` and `ModificationDateTime` parse them: the result is in UTC when the date carries a time zone, and `DateTimeKind.Unspecified` when it does not.
+
+### Get Metadata as a Dictionary
 
 ```csharp
 using var document = new PdfDocument("document.pdf");
@@ -838,13 +718,109 @@ foreach (var (key, value) in allMetadata)
 }
 ```
 
+The keys are `Title`, `Author`, `Subject`, `Keywords`, `Creator`, `Producer`, `CreationDate`, `ModificationDate`, `Trapped` and `FileVersion`. For a custom Info dictionary entry, use `document.Metadata.GetMetadataString("MyKey")`.
+
 ### Writing Metadata
 
 Metadata is read-only. PDFium has no function to write the Info dictionary, so `PdfMetadata` has no setters (the 1.x setters always failed with `EntryPointNotFoundException`). To change metadata, edit the saved PDF with a library that writes PDF objects.
 
 ---
 
+## Document Properties
+
+### Check Permissions
+
+`Permissions` is a `[Flags]` enum, `PdfPermissions`. An unencrypted document reports every permission.
+
+```csharp
+using var document = new PdfDocument("sample.pdf");
+PdfPermissions permissions = document.Permissions;
+
+if (permissions.HasFlag(PdfPermissions.Print))
+    Console.WriteLine("Printing is allowed");
+
+if (permissions.HasFlag(PdfPermissions.ModifyContents))
+    Console.WriteLine("Modifying is allowed");
+
+// HasFlag with several flags is true only when all of them are set
+if (permissions.HasFlag(PdfPermissions.Print | PdfPermissions.CopyContents))
+    Console.WriteLine("Can print and copy");
+```
+
+| Flag | Allows |
+|------|--------|
+| `Print` | Printing |
+| `PrintHighQuality` | Printing at full quality |
+| `ModifyContents` | Changing the document's contents |
+| `CopyContents` | Copying or extracting text and graphics |
+| `ExtractForAccessibility` | Extracting text and graphics for accessibility |
+| `ModifyAnnotations` | Adding or changing annotations and form fields |
+| `FillForms` | Filling in form fields |
+| `AssembleDocument` | Inserting, rotating or deleting pages, creating bookmarks and thumbnails |
+
+`(uint)document.Permissions` gives the raw permission bits.
+
+### Get the Document ID
+
+`DocumentId` is the original file identifier from the trailer's `/ID` entry, as uppercase hex. It is 32 characters for the usual 16-byte ID. It is `null` when the file has none.
+
+```csharp
+using var document = new PdfDocument("sample.pdf");
+
+string? docId = document.DocumentId;
+Console.WriteLine(docId != null ? $"Document ID: {docId}" : "No document ID");
+```
+
+### Get Page Labels
+
+Page labels are the page numbers a viewer shows, for example "i", "ii" for front matter and "1", "2" for the body. `GetPageLabel` returns `null` for a page without a label, and throws `ArgumentOutOfRangeException` for an index outside the document.
+
+```csharp
+using var document = new PdfDocument("book.pdf");
+
+string? first = document.GetPageLabel(0);
+Console.WriteLine($"First page label: {first ?? "(none)"}");
+
+string?[] labels = document.GetAllPageLabels();
+for (int i = 0; i < labels.Length; i++)
+{
+    Console.WriteLine($"Page index {i}: {labels[i] ?? "(none)"}");
+}
+```
+
+Labels can use any of the PDF numbering styles, with an optional prefix:
+
+- Decimal: 1, 2, 3, ...
+- Roman numerals: i, ii, iii, ... or I, II, III, ...
+- Letters: a, b, c, ... or A, B, C, ...
+- Prefixed: "A-1", "A-2", "Appendix-1", ...
+
+```
+Page index 0: "i"     (front matter)
+Page index 1: "ii"
+Page index 2: "1"     (body)
+Page index 3: "2"
+Page index 4: "A-1"   (appendix)
+```
+
+### Find a Page by Its Label
+
+```csharp
+using var document = new PdfDocument("book.pdf");
+
+int index = Array.IndexOf(document.GetAllPageLabels(), "A-1");
+if (index >= 0)
+{
+    using var page = document.GetPage(index);
+    Console.WriteLine(page.ExtractText());
+}
+```
+
+---
+
 ## Bookmarks
+
+`PageIndex` is the 0-based target page, or `null` when a bookmark has no destination or it cannot be resolved.
 
 ### Read Bookmark Hierarchy
 
@@ -852,14 +828,15 @@ Metadata is read-only. PDFium has no function to write the Info dictionary, so `
 using var document = new PdfDocument("document.pdf");
 List<PdfBookmark> bookmarks = document.Bookmarks.GetAllBookmarks();
 
-void PrintBookmarks(List<PdfBookmark> bookmarks, int level = 0)
+void PrintBookmarks(List<PdfBookmark> items, int level = 0)
 {
     string indent = new string(' ', level * 2);
-    
-    foreach (var bookmark in bookmarks)
+
+    foreach (var bookmark in items)
     {
-        Console.WriteLine($"{indent}{bookmark.Title} -> Page {bookmark.PageIndex + 1}");
-        
+        string target = bookmark.PageIndex is int index ? $"page {index + 1}" : "no target";
+        Console.WriteLine($"{indent}{bookmark.Title} -> {target}");
+
         if (bookmark.Children.Count > 0)
         {
             PrintBookmarks(bookmark.Children, level + 1);
@@ -870,9 +847,11 @@ void PrintBookmarks(List<PdfBookmark> bookmarks, int level = 0)
 PrintBookmarks(bookmarks);
 ```
 
-### Generate Table of Contents
+### Generate a Table of Contents
 
 ```csharp
+using System.Text;
+
 using var document = new PdfDocument("book.pdf");
 var bookmarks = document.Bookmarks.GetAllBookmarks();
 
@@ -880,13 +859,14 @@ var toc = new StringBuilder();
 toc.AppendLine("# Table of Contents");
 toc.AppendLine();
 
-void AddToToc(List<PdfBookmark> bookmarks, int level)
+void AddToToc(List<PdfBookmark> items, int level)
 {
-    foreach (var bookmark in bookmarks)
+    foreach (var bookmark in items)
     {
         string prefix = new string('#', level + 1);
-        toc.AppendLine($"{prefix} {bookmark.Title} (Page {bookmark.PageIndex + 1})");
-        
+        string target = bookmark.PageIndex is int index ? $" (Page {index + 1})" : "";
+        toc.AppendLine($"{prefix} {bookmark.Title}{target}");
+
         if (bookmark.Children.Count > 0)
         {
             AddToToc(bookmark.Children, level + 1);
@@ -902,6 +882,8 @@ await File.WriteAllTextAsync("toc.md", toc.ToString());
 
 ## Attachments
 
+Attachment names come from the PDF and may contain paths such as `..\..\file.exe`. Never use a name as a path as it is.
+
 ### List Attachments
 
 ```csharp
@@ -912,40 +894,87 @@ Console.WriteLine($"Found {attachments.Count} attachment(s)");
 
 foreach (var attachment in attachments.GetAllAttachments())
 {
-    Console.WriteLine($"  {attachment.Name} ({attachment.Size:N0} bytes)");
-}
-```
-
-### Extract Single Attachment
-
-```csharp
-using var document = new PdfDocument("document.pdf");
-
-if (document.Attachments.Count > 0)
-{
-    var attachment = document.Attachments.GetAttachment(0);
-    
-    if (attachment != null)
-    {
-        await File.WriteAllBytesAsync(attachment.Name, attachment.Data);
-        Console.WriteLine($"Extracted: {attachment.Name}");
-    }
+    Console.WriteLine($"  {attachment.Name ?? "(unnamed)"} ({attachment.Size:N0} bytes)");
 }
 ```
 
 ### Extract All Attachments
 
+`ExtractAll` is the safe way to write attachments to disk:
+
+- Each file is named after the last path component of its attachment name, with characters the file system rejects replaced, so nothing is written outside the directory.
+- An attachment without a usable name is written as `attachment_N`.
+- Names that collide get `_2`, `_3`, ... before the extension.
+
 ```csharp
 using var document = new PdfDocument("document.pdf");
 
 if (document.Attachments.Count > 0)
 {
-    string outputDir = "extracted_attachments";
-    document.Attachments.ExtractAll(outputDir);
-    
-    Console.WriteLine($"Extracted {document.Attachments.Count} files to {outputDir}");
+    document.Attachments.ExtractAll("extracted_attachments");
 }
 ```
+
+### Extract a Single Attachment
+
+`Name` and `Data` are nullable. Sanitize the name before writing:
+
+```csharp
+using var document = new PdfDocument("document.pdf");
+
+PdfAttachment? attachment = document.Attachments.Count > 0 ? document.Attachments.GetAttachment(0) : null;
+if (attachment?.Data is byte[] data)
+{
+    Directory.CreateDirectory("extracted");
+    string path = Path.Combine("extracted", SafeFileName(attachment.Name));
+    await File.WriteAllBytesAsync(path, data);
+    Console.WriteLine($"Extracted: {path}");
+}
+
+static string SafeFileName(string? name)
+{
+    // Keep only the last path component, whichever separator the PDF used
+    string fileName = Path.GetFileName((name ?? string.Empty).Replace('\\', '/'));
+    foreach (char c in Path.GetInvalidFileNameChars())
+        fileName = fileName.Replace(c, '_');
+    return fileName is "" or "." or ".." ? "attachment.bin" : fileName;
+}
+```
+
+---
+
+## Thumbnails and Embedded Images
+
+### Embedded Page Thumbnails
+
+Some PDFs store a small preview image per page. `GetEmbeddedThumbnail` returns it as BGRA pixels, or `null` when the page has none or it cannot be decoded:
+
+```csharp
+using var document = new PdfDocument("document.pdf");
+using var page = document.GetPage(0);
+
+if (page.HasEmbeddedThumbnail)
+{
+    RawBitmap? thumbnail = page.GetEmbeddedThumbnail();
+    if (thumbnail != null)
+        Console.WriteLine($"Thumbnail: {thumbnail.Width} x {thumbnail.Height}");
+}
+```
+
+`GetEmbeddedThumbnailBytes()` and `GetEmbeddedThumbnailSize()` are obsolete; `GetEmbeddedThumbnail()` returns the pixels, size and stride from one decode.
+
+When there is no embedded thumbnail, render the first page at a low DPI instead:
+
+```csharp
+using var document = new PdfDocument("document.pdf");
+
+// The stream is lazy: First() renders only the first page
+byte[] preview = document.StreamImageBytes(ImageFormat.Jpeg, quality: 75, dpi: 36).First();
+```
+
+### Images on a Page
+
+`PdfImageObject.GetBitmap()` returns an image's own pixels as `RawBitmap?`. See [Reading Page Objects](PDF-EDITING.md#reading-page-objects).
 
 ---
 
@@ -954,100 +983,80 @@ if (document.Attachments.Count > 0)
 ### Batch PDF Processing
 
 ```csharp
-public static async Task BatchConvertPdfsToImages(string inputFolder, string outputFolder, int dpi = 150)
+public static async Task BatchConvertPdfsToImagesAsync(
+    string inputFolder, string outputFolder, int dpi = 150, CancellationToken ct = default)
 {
-    var pdfFiles = Directory.GetFiles(inputFolder, "*.pdf");
-    
-    foreach (var pdfFile in pdfFiles)
+    foreach (var pdfFile in Directory.GetFiles(inputFolder, "*.pdf"))
     {
         string fileName = Path.GetFileNameWithoutExtension(pdfFile);
         string pdfOutputFolder = Path.Combine(outputFolder, fileName);
-        
-        Console.WriteLine($"Processing: {fileName}");
-        
+
         try
         {
             using var document = new PdfDocument(pdfFile);
-            await document.SaveAsImagesAsync(
-                pdfOutputFolder,
-                "page",
-                ImageFormat.Png,
-                100,
-                dpi,
-                dpi
-            );
-            
-            Console.WriteLine($"  Converted {document.PageCount} pages");
+            await document.SaveAsPngsAsync(pdfOutputFolder, "page", dpi, ct);
+            Console.WriteLine($"{fileName}: converted {document.PageCount} pages");
         }
-        catch (Exception ex)
+        catch (PdfiumException ex)
         {
-            Console.WriteLine($"  Error: {ex.Message}");
+            Console.WriteLine($"{fileName}: cannot open ({ex.ErrorCode})");
+        }
+        catch (InvalidOperationException ex)
+        {
+            Console.WriteLine($"{fileName}: {ex.Message}");   // for example the render limit
         }
     }
 }
 ```
+
+For many files at once, see [High-Throughput Processing](HIGH-THROUGHPUT-PROCESSING.md).
 
 ### PDF Processing Pipeline
 
 ```csharp
 public class PdfProcessor
 {
-    public async Task<ProcessingResult> ProcessAsync(Stream pdfStream)
+    public ProcessingResult Process(Stream pdfStream)
     {
         using var document = new PdfDocument(pdfStream);
-        
+
         var result = new ProcessingResult
         {
             PageCount = document.PageCount,
-            Metadata = document.Metadata.GetAllMetadata()
+            Metadata = document.Metadata.GetAllMetadata(),
+            FullText = string.Join(Environment.NewLine, document.ProcessAllPages(page => page.ExtractText())),
+
+            // Thumbnail of the first page only: the stream is lazy
+            ThumbnailBytes = document.StreamImageBytes(ImageFormat.Jpeg, quality: 75, dpi: 72).First(),
+
+            Bookmarks = document.Bookmarks.GetAllBookmarks()
+                .Select(b => b.Title ?? string.Empty)
+                .ToList()
         };
-        
-        // Extract text from all pages
-        var textBuilder = new StringBuilder();
-        for (int i = 0; i < document.PageCount; i++)
-        {
-            using var page = document.GetPage(i);
-            textBuilder.AppendLine(page.ExtractText());
-        }
-        result.FullText = textBuilder.ToString();
-        
-        // Generate thumbnail of first page
-        result.ThumbnailBytes = document.StreamImageBytes(
-            ImageFormat.Jpeg,
-            quality: 75,
-            dpi: 72
-        ).FirstOrDefault();
-        
-        // Check for forms
-        var form = document.GetForm();
+
+        using var form = document.GetForm();
         if (form != null)
         {
             result.FormFields = form.GetAllFormFields()
                 .Select(f => new FormFieldInfo(f.Name, f.Type.ToString(), f.Value))
                 .ToList();
-            form.Dispose();
         }
-        
-        // Get bookmarks
-        result.Bookmarks = document.Bookmarks.GetAllBookmarks()
-            .Select(b => b.Title)
-            .ToList();
-        
+
         return result;
     }
 }
 
-public record ProcessingResult
+public class ProcessingResult
 {
     public int PageCount { get; set; }
-    public Dictionary<string, string> Metadata { get; set; }
-    public string FullText { get; set; }
-    public byte[] ThumbnailBytes { get; set; }
-    public List<FormFieldInfo> FormFields { get; set; }
-    public List<string> Bookmarks { get; set; }
+    public Dictionary<string, string> Metadata { get; set; } = new();
+    public string FullText { get; set; } = string.Empty;
+    public byte[] ThumbnailBytes { get; set; } = Array.Empty<byte>();
+    public List<FormFieldInfo> FormFields { get; set; } = new();
+    public List<string> Bookmarks { get; set; } = new();
 }
 
-public record FormFieldInfo(string Name, string Type, string Value);
+public record FormFieldInfo(string? Name, string Type, string? Value);
 ```
 
 ### ASP.NET Core File Upload and Processing
@@ -1062,79 +1071,120 @@ public class PdfApiController : ControllerBase
     {
         if (file == null || file.Length == 0)
             return BadRequest("No file provided");
-        
+
         using var stream = new MemoryStream();
-        await file.CopyToAsync(stream);
+        await file.CopyToAsync(stream, HttpContext.RequestAborted);
         stream.Position = 0;
-        
+
         try
         {
             using var document = new PdfDocument(stream);
-            
+            using var form = document.GetForm();
+
             return Ok(new
             {
                 FileName = file.FileName,
                 PageCount = document.PageCount,
                 Metadata = document.Metadata.GetAllMetadata(),
-                HasForm = document.GetForm() != null,
+                HasForm = form != null,
                 AttachmentCount = document.Attachments.Count,
                 BookmarkCount = document.Bookmarks.GetAllBookmarks().Count
             });
         }
-        catch (InvalidOperationException ex)
+        catch (PdfiumException ex) when (ex.ErrorCode == PdfiumErrorCode.Password)
         {
-            return BadRequest($"Invalid PDF: {ex.Message}");
+            return BadRequest("The PDF is password protected");
+        }
+        catch (PdfiumException ex)
+        {
+            return BadRequest($"Invalid PDF ({ex.ErrorCode})");
         }
     }
-    
+
     [HttpPost("thumbnail")]
     public async Task<IActionResult> GetThumbnail(IFormFile file, [FromQuery] int dpi = 72)
     {
-        if (file == null)
+        if (file == null || file.Length == 0)
             return BadRequest("No file provided");
-        
-        using var stream = new MemoryStream();
-        await file.CopyToAsync(stream);
-        stream.Position = 0;
-        
-        using var document = new PdfDocument(stream);
-        var thumbnail = document.StreamImageBytes(ImageFormat.Jpeg, 80, dpi).First();
 
-        return File(thumbnail, "image/jpeg");
+        dpi = Math.Clamp(dpi, 18, 300);
+
+        using var stream = new MemoryStream();
+        await file.CopyToAsync(stream, HttpContext.RequestAborted);
+        stream.Position = 0;
+
+        try
+        {
+            using var document = new PdfDocument(stream);
+
+            // First page only; stops rendering if the client disconnects
+            await foreach (var jpeg in document.StreamImageBytesAsync(ImageFormat.Jpeg, quality: 80, dpi: dpi)
+                               .WithCancellation(HttpContext.RequestAborted))
+            {
+                return File(jpeg, "image/jpeg");
+            }
+
+            return NoContent();
+        }
+        catch (PdfiumException ex)
+        {
+            return BadRequest($"Invalid PDF ({ex.ErrorCode})");
+        }
     }
 }
 ```
 
-### Generate PDF Report from Multiple Sources
+The controller needs `using Microsoft.AspNetCore.Mvc;`. For untrusted uploads at volume, see [Isolate Untrusted PDFs in Worker Processes](#isolate-untrusted-pdfs-in-worker-processes).
+
+### Generate a PDF Report from Multiple Sources
 
 ```csharp
-public async Task<byte[]> GenerateReportAsync(
-    string coverPagePath,
-    string[] contentPaths,
-    string appendixPath)
+public byte[] GenerateReport(string coverPagePath, string[] contentPaths, string appendixPath)
 {
     using var merger = new PdfMerger();
-    
-    // Add cover page
+
     merger.AppendDocument(coverPagePath);
-    
-    // Add all content pages
+
     foreach (var contentPath in contentPaths)
     {
         merger.AppendDocument(contentPath);
     }
-    
-    // Add appendix
+
     if (File.Exists(appendixPath))
     {
         merger.AppendDocument(appendixPath);
     }
-    
-    // Set metadata
+
+    // Take the viewer preferences (zoom, layout) from the cover document
     using var coverDoc = new PdfDocument(coverPagePath);
     merger.CopyViewerPreferences(coverDoc);
-    
+
     return merger.ToBytes();
 }
 ```
 
+### Isolate Untrusted PDFs in Worker Processes
+
+A damaged or hostile PDF can make PDFium abort the process; no `catch` can stop that. The optional `PdfiumWrapper.Processing` package runs the same operations in worker processes it manages. Each document's outcome is a status on the result instead of an exception, and a worker that dies is replaced.
+
+```csharp
+using PdfiumWrapper.Processing;
+
+using var cts = new CancellationTokenSource(TimeSpan.FromMinutes(5));
+await using var pool = await PdfProcessingPool.CreateAsync();
+
+PdfJobResult<ImageFiles> result = await pool.ConvertToPngAsync(
+    PdfInput.FromFile("upload.pdf"), "output_folder", dpi: 150, ct: cts.Token);
+
+if (result.IsSuccess)
+{
+    ImageFiles images = result.Value!;
+    Console.WriteLine($"{images.PageCount} pages: {string.Join(", ", images.Files)}");
+}
+else
+{
+    Console.WriteLine($"{result.Status}: {result.Error}");   // Failed, TimedOut, Cancelled or WorkerCrashed
+}
+```
+
+A cancelled single job reports `PdfJobStatus.Cancelled`. Cancelling the token of a batch (the `IEnumerable<PdfInput>` overloads) throws `OperationCanceledException`. See [High-Throughput Processing](HIGH-THROUGHPUT-PROCESSING.md#worker-pool) for options, sizing and events.

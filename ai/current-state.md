@@ -2,19 +2,15 @@
 
 ## Current focus
 
-Fix for the disposed-wrapper leak found by the PR #21 review (2026-10-03), branch `fix/remove-disposed-page-object` from `main` at `60f46eb`. `PdfPage.RemoveObject` passed a disposed wrapper's pointer to PDFium, took the object off the page and handed it to a wrapper whose `Dispose` does nothing, so the object was never destroyed (`LiveHandleCount` stayed 1 after the document was disposed) and a second live wrapper stayed registered for an object nobody owned. `RemoveObject` now throws `ObjectDisposedException` for a disposed wrapper and returns false unless the wrapper is the one the page tracks for that object. Regression tests in `PdfPageEditingTests`.
+Release 2.0.0 preparation (2026-10-03); checklist in `ai/tmp/release-2.0-checklist.md`. Merged today: PR #23 (the core package depends on the four `PdfiumWrapper.runtime.<rid>` packages instead of `runtime.json`, which left portable apps without natives) and PR #24 (check box set/get through PDFium's form filler, real list-box multi-select, `PdfBookmark.PageIndex` is `int?`, short PDF dates parse). In review: the documentation pass on `docs/2.0-review` with `CHANGELOG.md` (notes since `9021729`, major items only). macOS done (2026-10-03, on `main` at `a1f98de`): `build-natives.sh` for osx-arm64 and osx-x64 reproduced the ten dylibs from `8f14ef3` byte for byte, so the macOS natives already match the pinned versions; the full suite passed 397/397 on osx-arm64. osx-x64 has no test run (no x64 .NET SDK on the Mac). Next: the pool qualification run, then `release/2.0.0`. 2.0 targets .NET 10 only (decided).
+
+### Earlier focus (2026-10-03, PR #22 merged)
+
+Nothing active. PR #22 is merged into `main` (`683da87`, 2026-10-03): `PdfPage.RemoveObject` throws `ObjectDisposedException` for a disposed wrapper and returns false unless the wrapper is the one the page tracks, so an object can no longer be removed through a disposed wrapper and leaked. Every technical-audit finding (AUD-001 to AUD-024) is fixed on `main`. Open: run the full test suite once on macOS (CI only builds there).
 
 ### Earlier focus (2026-10-03, PR #21 merged)
 
 PR #21 is merged into `main` (merge commit `60f46eb`, 2026-10-03): audit findings AUD-018 to AUD-024 and the new package icon. All audit findings (AUD-001 to AUD-024) are now fixed on `main`. Open: run the full suite once on macOS; the disposed-wrapper handle leak is fixed on `fix/remove-disposed-page-object`.
-
-### Earlier focus (2026-10-03, PR #21 follow-up review)
-
-PR #21 follow-up review is complete (2026-10-03) at `aa7d162263dcb9e1481e475bffc08d9b04527ca1`, merge base `e9c11ac43d801e9fa99508e93d4602000aa86f0e`. Both Moderate findings are resolved by `df2a304`: page labels preserve embedded U+0000 and wrapper lookup is keyed by native handle. Verdict: no blocking findings in the follow-up changes. Independently verified 356/356 Windows tests and both original review probes; exact-commit Linux CI reports 356/356 tests, and all four platform build/package jobs pass. No implementation changes or GitHub comments were made.
-
-### Earlier focus (2026-10-03, PR #21 review)
-
-PR #21 architecture review is complete (2026-10-03), using the `ai-pr-review` skill. Reviewed `feature/audit-low-fixes` at `c25ce1acb218cd61076e13c3f91b35456e13bea7`, merge base `e9c11ac43d801e9fa99508e93d4602000aa86f0e`. Verdict: request changes for two Moderate findings: the shared UTF-16 reader now truncates page labels at an embedded NUL, and `PdfPage.GetObject` searches all tracked wrappers per lookup, making page-object traversal quadratic. No implementation fixes or GitHub comments were made.
 
 ### Earlier focus (2026-10-03, audit low fixes)
 
@@ -48,24 +44,9 @@ Release 1 of `ai/plans/plan-pdfium-concurrency.md` is implemented on `feature/pd
 
 ## Completed
 
-### Latest task: verify PR #21 fixes (2026-10-03)
+### Latest task: disposed-wrapper leak in RemoveObject (2026-10-03, PR #22, merged)
 
-- Reviewed only `c25ce1a..aa7d162`, including `NativeText.cs`, `PdfPage.cs`, the new regression tests, and directly relevant page-object removal/disposal callers. Rechecked repository rules and the concurrency-plan gate/lifetime contracts. Local and GitHub heads match; the working tree was clean before verification.
-- `NativeText.ReadUtf16` removes only the final terminator; the independent valid-PDF `ABC\0DEF` page-label reproduction now passes. The added tests cover the helper and actual PDF labels.
-- The dictionary uses native handles for lookup, checks wrapper identity before removal, and retains the tracked values for invalidation during page disposal. Existing and extended tests cover identity, removal, rewrapping and disposal.
-- Reran the original scaling probe: 10,000 objects 1.61 ms and 20,000 3.15 ms (previously 144 ms and 584 ms), confirming linear scaling. Both selected external review probes pass; the known pre-existing disposed-wrapper probe remains excluded from this PR review.
-- Independently ran `dotnet test src/PdfiumWrapper.Tests/PdfiumWrapper.Tests.csproj --no-restore`: 356 passed, 0 failed/skipped, win-x64 (3 m 24 s). CI run `37159292919` matches `aa7d162`; its Linux log confirms 356 passed, and all four platform build/package jobs succeed. No independent macOS runtime run was performed.
-- Verdict: no blocking findings in the follow-up changes. Updated only this required state record; no implementation edits, PR comments, pushes or merge actions.
-
-### Latest task: PR #21 architecture review (2026-10-03)
-
-- Read the PR body/diff, `AGENTS.md`, `README.md`, current-state record, technical audit AUD-018 to AUD-024, and the relevant concurrency-plan contracts. Inspected native imports against local 8076 headers, changed wrapper ownership/cancellation paths, worker lifecycle/text-result cleanup, public-boundary tests, documentation and package configuration.
-- Independently ran `dotnet test src/PdfiumWrapper.Tests/PdfiumWrapper.Tests.csproj --no-restore`: 354/354 tests pass on win-x64. GitHub reports the Linux build/test job and all four platform build/package jobs successful.
-- Packed Processing and win-x64 runtime packages into the temporary review directory. Confirmed the Processing dependency is exactly `[2.0.0]` and both packages contain their declared `icon.png`.
-- Reproduced a page-label regression with a valid UTF-16 prefix `ABC\0DEF`: PDFium returns the whole value, but `NativeText.ReadUtf16` returns `ABC` (`NativeText.cs:36`). The previous `GetPageLabel` used the returned length minus its final terminator. Fix: remove only the trailing terminator, preserving embedded NULs; add a page-label regression.
-- Measured quadratic wrapper lookup (`PdfPage.cs:460`): traversing 10,000 tracked rectangle objects took 144 ms, and 20,000 took 584 ms; direct indexed native access took 0.58 ms and 1.22 ms respectively. Fix: index tracked wrappers by native handle while retaining disposal/removal ownership behavior, and remeasure traversal scaling.
-- A disposed-wrapper handle leak and metadata NUL truncation were reproduced but excluded because their root behavior predates this PR. A scratch-project restore initially failed on sandbox NuGet TLS; restoring from the existing package cache succeeded. Scratch xUnit tests and packed artifacts are outside the repository at `%TEMP%/PdfiumPr21Review_aecfe6ef3ef9413fab2f8d530734f04c/`.
-- Local review probes ran on Windows only; macOS runtime behavior was not independently verified. Only this required state file was edited in the repository.
+- `RemoveObject` passed a disposed wrapper's pointer to PDFium, took the object off the page and handed it to a wrapper whose `Dispose` does nothing: the object was never destroyed and a second live wrapper stayed registered. Fixed in `PdfPage.RemoveObject`; regression tests `RemoveObject_WithDisposedWrapper_Throws_AndLeaksNothing` and `RemoveObject_WithObjectNotOnThisPage_ReturnsFalse`. 358 tests pass on win-x64 and in Linux CI.
 
 ### Earlier task: audit low findings and package icon (2026-10-03, `feature/audit-low-fixes`)
 
@@ -176,7 +157,6 @@ Not committed. Linux run, qualification burst and soak still open.
 - Sweep run 2026-10-02: 1,000 requests (12,400 pages, PNG at 150 DPI), 16 deployment shapes across the three engines, all completed without failures. Report: `ai/tmp/throughput-comparison.md` (private; no figures for other engines belong in tracked files). PdfiumWrapper's own figures: one process 1.49 requests/s with one request thread and 2.21 with four (gate-bound, 1.5 cores); 4 processes 7.19, 8 processes 10.87, 16 processes 13.06 requests/s (19.6 cores, 1.9 GB). The deciding factor for throughput is running several processes, which supports replicas or the Release 2 process pool.
 - Correction: `presentation.pdf` has 37 pages, not the 30 its benchmark label says (the corpus is 62 pages, not 55). The label is kept so `benchmark.db` history still joins; `BenchmarkBase.CorpusPages()` now counts real pages, and the `ConcurrentCallersBenchmark` pages/sec table in `benchmark.md` was recomputed (speedups unchanged).
 - The comparison project's BenchmarkDotNet artifacts now go to `ai/tmp/comparison-artifacts`. Reason: a run from the repository root left other engines' CSV files in the shared artifacts folder and they were imported into `benchmark.db` by mistake; that run was deleted, the database vacuumed, and its bytes checked. **Only import from a folder that holds PdfiumWrapper's own CSV files.**
-
 
 ### Latest task: verify PR #15 review fixes at f3b15a1 (2026-10-02)
 
@@ -294,28 +274,9 @@ Key measurements (one machine: i7-13700F, 24 logical processors, win-x64):
 - Identified misleading performance guidance: forced blocking GC as a default batch strategy, managed-only `GC.GetTotalMemory` as a native-memory monitor, and collecting all raw page buffers for large workloads. A US Letter BGRA page at 300 DPI occupies about 32 MiB before additional allocations.
 - No library code, public docs, tests, or benchmarks were changed or executed for this static audit. Only this required state file was updated.
 
-### Previous task: Windows native build validation
-
-- Read `AGENTS.md`, `README.md`, `ai/current-state.md`, and `ai/plans/plan-native-build-script-windows.md`.
-- Validated the Windows native build script on the current machine only, per request; no VM was used.
-- Deleted existing `src/libs/win-x64/*.dll` outputs before validation so the script had to regenerate them.
-- Fixed `src/native/build-natives.cmd` after local validation exposed two current-machine issues:
-  - Added a PowerShell `Expand-Archive` fallback when `unzip` is not on PATH.
-  - Shortened the internal libjpeg-turbo batch subroutine label after `cmd.exe` failed to resolve the longer label on this machine.
-  - Improved NASM detection to find `%LOCALAPPDATA%\bin\NASM\nasm.exe` and pass it to CMake.
-- Ran `src\native\build-natives.cmd --clean`; it completed successfully and regenerated all five Windows x64 DLLs.
-- Verified every regenerated `src/libs/win-x64/*.dll` reports `8664 machine (x64)` with `dumpbin /headers`.
-- Verified `pdfium_png.dll` exports only the `pdfium_png_*` shim API and has no runtime dependency on `libpng16*.dll` or `zlib*.dll`.
-- Verified libjpeg-turbo built with NASM/SIMD on this machine; CMake reported `SIMD extensions: x86_64 (WITH_SIMD = 1)`.
-- Ran `$env:LIBPNG_VERSION='1.6.56'; src\native\build-natives.cmd --only pdfium_png`; it completed successfully.
-- Ran `dotnet test src\PdfiumWrapper.Tests\PdfiumWrapper.Tests.csproj`: 186 passed, 0 failed.
-- Deleted the replaced `src/native/build_win_x64.bat`.
-- Updated `docs/BUILDING-NATIVE-LIBS.md` and `AGENTS.md` to point at `src/native/build-natives.cmd`.
-- Marked the relevant Windows plan Phase 5 and cleanup items complete.
-
 ## In progress
 
-- No active PR #21 review work remains: both findings are verified fixed and CI is green. The excluded pre-existing disposed-wrapper leak has not been investigated further; the original probes remain under `%TEMP%/PdfiumPr21Review_aecfe6ef3ef9413fab2f8d530734f04c/`.
+- Nothing active.
 
 Historical:
 
@@ -329,9 +290,11 @@ Historical:
 
 ## Next recommended step
 
-- Owner can merge PR #21: the two review findings are verified fixed and exact-commit CI is green. Run the suite on macOS for independent runtime qualification.
+- Pool qualification run, then cut `release/2.0.0`. Optional: run the suite on osx-x64 (x64 .NET SDK under Rosetta, or a macOS Intel CI runner).
 
 Historical:
+
+- (Done 2026-10-03: full suite 397/397 on osx-arm64, including `NativeBoundaryTests.EveryImport_IsExportedByItsNativeLibrary`.) Run the full test suite once on macOS (osx-arm64 and osx-x64).
 
 - Commit the macOS dylibs and the macOS test fixes, then commit the upgrade on `feature/net10-upgrade`, open a PR and confirm CI on the .NET 10 SDK. Bump the package version (2.0.0 has not been released) if the TFM change should be called out.
 
@@ -350,15 +313,13 @@ Earlier list (items 1 and 2 still apply; item 3 is done):
 
 ## Blockers or open questions
 
-- PR #21 follow-up: both Moderate findings are resolved; no remaining review blocker in the fixes. Independent macOS runtime qualification remains outside this verification.
-
 - `PdfMetadata` is now read-only (its setters could never work). If writing metadata matters, it needs a PDF object writer outside PDFium.
 - Worker stderr is no longer reported as `WorkerStopped` events; consumers must use `PdfPoolEventKind.WorkerMessage`.
 - On Windows a worker joins the job object just after `Process.Start`; if the host dies in that instant only the 5 s stdin watchdog stops it.
 
 Historical:
 
-- Dropping `net8.0` means .NET 8 and 9 consumers can no longer use the package (both reach end of support on 2026-11-10). Multi-targeting `net8.0;net10.0` is the alternative if that matters.
+- Decided 2026-10-03: 2.0 targets .NET 10 only (no `net8.0` multi-targeting); .NET 8 and 9 consumers are cut off. The release checklist is in `ai/tmp/release-2.0-checklist.md`.
 
 - The local PR #18 fixes still have one Critical output-loss regression and one Moderate batch-memory issue. GitHub CI has not evaluated these uncommitted changes. The review itself is complete.
 
@@ -375,23 +336,16 @@ Historical:
 - (Resolved 2026-10-03, AUD-018: every import was checked against the 8076 headers and exports, and a test now checks the exports.)
 - Benchmarks on this machine: run a baseline worktree from the same volume and kind of directory as the repository. A worktree under `%TEMP%` made file opens about 60 µs slower.
 
-Earlier notes:Earlier notes:
+Earlier notes:
 
 - The starvation test bound (heartbeat p99 under 100 ms) and the callback-isolation bound (3x solo p95) are initial guesses to be tuned after the first run and recorded in `benchmark.md`.
 - Exact burst size/window, operation mix, target hardware/output storage, and durable-admission integration remain open. These refine acceptance targets and sizing, not the established native coordination requirement.
 - Worker count and achievable documents/pages per second require workload measurements; no performance guarantee was established.
 - The repository's existing threading guidance, including the supplied `AGENTS.md`, requires correction before implementing a concurrency design based on it.
-- Prior native-build validation notes:
-- VM validation was intentionally skipped by request.
-- No no-NASM rebuild was performed because the current machine has NASM installed at `%LOCALAPPDATA%\bin\NASM\nasm.exe`.
-- `dotnet test` passes but emits existing NuGet vulnerability warnings for `Magick.NET-Q16-AnyCPU` 14.9.1 and existing nullable/obsolete warnings.
-- Shell commands required escalation because the Windows sandbox shell failed with `windows sandbox: spawn setup refresh`.
 
 ## Recently changed files
 
-- PR #21 follow-up verification (2026-10-03): `ai/current-state.md` only; existing external review probes rerun against the updated assembly.
-
-- PR #21 review (2026-10-03): `ai/current-state.md` only. Implementation files were not changed; review probes and package artifacts are under `%TEMP%`.
+- RemoveObject leak fix (2026-10-03, PR #22): `src/PdfiumWrapper/PdfPage.cs`, `src/PdfiumWrapper.Tests/PdfPageEditingTests.cs`, `docs/API-REFERENCE.md`, `ai/current-state.md`.
 
 - Audit low fixes (2026-10-03): `icon.png`, `logos/PdfiumWrapperLogo.svg`, `src/PdfiumWrapper.runtime/PdfiumWrapper.runtime.csproj`; `src/PdfiumWrapper/`: new `NativeText.cs`, `PdfiumException.cs`; `PDFium*.cs`, `LibTiff.cs`, `LibTurboJpeg.cs`, `JpegDecoder.cs`, `PdfDocument.cs`, `PdfPage.cs`, `PdfPageObject.cs`, `PdfFormObject.cs`, `PdfTextObject.cs`, `PdfImageObject.cs`, `PdfPathObject.cs`, `PdfMetadata.cs`, `PdfBookmarks.cs`, `PdfAttachments.cs`, `PdfForm.cs`, `PdfMerger.cs`, `PdfHelpers.cs`, `PixelConverter.cs`, `PooledFileWriter.cs`; `src/PdfiumWrapper.Processing/` (AUD-024: `PdfProcessingPool*.cs`, `PdfWorkerHost.cs`, `Worker.cs`, new `WorkerJobObject.cs`, `PdfJobResult.cs`, csproj); `src/PdfiumWrapper.Tests.Host/WorkerFaults.cs`; `src/PdfiumWrapper.Tests/`: new `NativeBoundaryTests.cs`, `Processing/PoolHygieneTests.cs`, `Docs/encrypted.pdf`; updated load-failure assertions in five test files; `README.md`, `AGENTS.md`, `docs/API-REFERENCE.md`, `docs/BEST-PRACTICES.md`, `docs/EXAMPLES.md`, `docs/HIGH-THROUGHPUT-PROCESSING.md`, `ai/current-state.md`.
 
@@ -424,16 +378,3 @@ Earlier sessions:
 - `ai/plans/plan-pdfium-concurrency.md` (rewritten 2026-09-30)
 - `_native_build/pdfium-source-7869/` (ignored upstream source checkout)
 - `_native_build/pdfium-binaries-7869/` (ignored producer release checkout)
-
-Previous native-build session files (unchanged by this audit):
-
-- `ai/plans/plan-native-build-script-windows.md`
-- `AGENTS.md`
-- `docs/BUILDING-NATIVE-LIBS.md`
-- `src/native/build-natives.cmd`
-- `src/native/build_win_x64.bat` (deleted)
-- `src/libs/win-x64/pdfium.dll`
-- `src/libs/win-x64/pdfium_png.dll`
-- `src/libs/win-x64/tiff.dll`
-- `src/libs/win-x64/tiff_shim.dll`
-- `src/libs/win-x64/turbojpeg.dll`
