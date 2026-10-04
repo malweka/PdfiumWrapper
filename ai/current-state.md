@@ -2,7 +2,7 @@
 
 ## Current focus
 
-Release 2.0.0 preparation (2026-10-03); checklist in `ai/tmp/release-2.0-checklist.md`. Merged today: PR #23 (the core package depends on the four `PdfiumWrapper.runtime.<rid>` packages instead of `runtime.json`, which left portable apps without natives) and PR #24 (check box set/get through PDFium's form filler, real list-box multi-select, `PdfBookmark.PageIndex` is `int?`, short PDF dates parse). In review: the documentation pass on `docs/2.0-review` with `CHANGELOG.md` (notes since `9021729`, major items only). Next: owner runs the macOS tests and native build, then the pool qualification run, then `release/2.0.0`. 2.0 targets .NET 10 only (decided).
+Release 2.0.0 preparation (2026-10-03); checklist in `ai/tmp/release-2.0-checklist.md`. Merged today: PR #23 (the core package depends on the four `PdfiumWrapper.runtime.<rid>` packages instead of `runtime.json`, which left portable apps without natives) and PR #24 (check box set/get through PDFium's form filler, real list-box multi-select, `PdfBookmark.PageIndex` is `int?`, short PDF dates parse). In review: the documentation pass on `docs/2.0-review` with `CHANGELOG.md` (notes since `9021729`, major items only). macOS done (2026-10-03, on `main` at `a1f98de`): `build-natives.sh` for osx-arm64 and osx-x64 reproduced the ten dylibs from `8f14ef3` byte for byte, so the macOS natives already match the pinned versions; the full suite passed 397/397 on osx-arm64. osx-x64 has no test run (no x64 .NET SDK on the Mac). Next: the pool qualification run, then `release/2.0.0`. 2.0 targets .NET 10 only (decided).
 
 ### Earlier focus (2026-10-03, PR #22 merged)
 
@@ -290,9 +290,11 @@ Historical:
 
 ## Next recommended step
 
-- Run the full test suite once on macOS (osx-arm64 and osx-x64): CI only builds there, so `NativeBoundaryTests.EveryImport_IsExportedByItsNativeLibrary` has not checked the dylib exports yet.
+- Pool qualification run, then cut `release/2.0.0`. Optional: run the suite on osx-x64 (x64 .NET SDK under Rosetta, or a macOS Intel CI runner).
 
 Historical:
+
+- (Done 2026-10-03: full suite 397/397 on osx-arm64, including `NativeBoundaryTests.EveryImport_IsExportedByItsNativeLibrary`.) Run the full test suite once on macOS (osx-arm64 and osx-x64).
 
 - Commit the macOS dylibs and the macOS test fixes, then commit the upgrade on `feature/net10-upgrade`, open a PR and confirm CI on the .NET 10 SDK. Bump the package version (2.0.0 has not been released) if the TFM change should be called out.
 
