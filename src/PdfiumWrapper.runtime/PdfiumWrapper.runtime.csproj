@@ -23,7 +23,7 @@
     <Authors>Emmanuel Hameyie</Authors>
     <Copyright>Copyright © 2025 Emmanuel Hameyie</Copyright>
     <Title>PdfiumWrapper native binaries ($(NativeRid))</Title>
-    <Description>Native PDFium runtime binaries for $(NativeRid). Internal runtime package for PdfiumWrapper; reference the main PdfiumWrapper package instead of this one directly.</Description>
+    <Description>Native PDFium runtime binaries for $(NativeRid). Internal runtime package for PdfiumWrapper; reference the main PdfiumWrapper package instead of this one directly. Contains third-party software (PDFium, libtiff, libjpeg-turbo, libpng, zlib-ng and the components bundled in PDFium) under their own licenses; see THIRD-PARTY-NOTICES.txt in the package.</Description>
     <PackageTags>pdf;pdfium;native;runtime;$(NativeRid)</PackageTags>
     <RepositoryUrl>https://github.com/malweka/PdfiumWrapper</RepositoryUrl>
     <RepositoryType>git</RepositoryType>
@@ -34,6 +34,7 @@
 
   <ItemGroup>
     <None Include="../../icon.png" Pack="true" PackagePath="\" />
+    <None Include="../../THIRD-PARTY-NOTICES.txt" Pack="true" PackagePath="\" />
   </ItemGroup>
 
   <!-- All native files for this RID -> runtimes/<rid>/native/ -->

@@ -2,9 +2,14 @@ name: Release and Publish to NuGet
 
 on:
   workflow_dispatch:
+    inputs:
+      publish_processing:
+        description: 'Also pack and publish PdfiumWrapper.Processing (pinned to the core version of this run)'
+        type: boolean
+        default: false
 
 permissions:
-  contents: write   # required to create tags and releases
+  contents: read
 
 jobs:
   guard:
@@ -61,6 +66,9 @@ jobs:
     name: Pack main, Publish, and Release
     needs: [guard, pack-runtimes]
     runs-on: ubuntu-latest
+    permissions:
+      contents: write   # create the tag and the GitHub release
+      id-token: write   # OIDC token for nuget.org Trusted Publishing
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -120,6 +128,7 @@ jobs:
           done
 
       - name: Build and pack PdfiumWrapper.Processing (+ symbols)
+        if: ${{ inputs.publish_processing }}
         run: |
           dotnet build src/PdfiumWrapper.Processing/PdfiumWrapper.Processing.csproj \
             --configuration Release \
@@ -134,10 +143,19 @@ jobs:
             /p:FileVersion=${{ needs.guard.outputs.version }} \
             /p:AssemblyVersion=${{ needs.guard.outputs.version }}
 
-      - name: Push all packages to NuGet (main + processing + runtimes + symbols)
+      # Trusted Publishing: exchange the job's OIDC token for an API key valid for one hour.
+      # Needs the nuget.org policy for this repository and workflow file, and the repository
+      # variable NUGET_USER (the nuget.org profile name, not the email address).
+      - name: NuGet login (OIDC -> temporary API key)
+        uses: NuGet/login@v1
+        id: nuget_login
+        with:
+          user: ${{ vars.NUGET_USER }}
+
+      - name: Push packages to NuGet (main + runtimes + symbols, and processing if selected)
         run: |
           dotnet nuget push "artifacts/*.nupkg" \
-            --api-key ${{ secrets.NUGET_API_KEY }} \
+            --api-key ${{ steps.nuget_login.outputs.NUGET_API_KEY }} \
             --source https://api.nuget.org/v3/index.json \
             --skip-duplicate
 
