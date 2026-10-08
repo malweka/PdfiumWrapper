@@ -14,6 +14,8 @@ This guide covers efficient patterns for processing large volumes of PDF documen
   - [Worker Pool](#worker-pool)
   - [Pool Events and Lifecycle](#pool-events-and-lifecycle)
 - [Memory Management for Long-Running Processes](#memory-management-for-long-running-processes)
+  - [Memory on Linux](#memory-on-linux)
+  - [Setting the variables in a container](#setting-the-variables-in-a-container)
 - [Complete Examples](#complete-examples)
 
 ---
@@ -160,7 +162,7 @@ PdfJobResult<string[]> text = await pool.ExtractTextAsync("invoice.pdf");
 |---|---|---|
 | Rendering | One page at a time per process (the native gate). Extra callers overlap encoding and output only: about 1.25x over sequential on the mixed corpus. | One page at a time per worker, workers in parallel. 8 workers reached 4.5x one process on the 1,000-request PNG run (10.07 against 2.21 requests/s). |
 | A damaged PDF that aborts PDFium | Takes the process down. | Takes one worker down. It is replaced and the job is retried up to `MaxAttempts` (default 2) before it is reported as `WorkerCrashed`; a job that only shared the crashed worker runs again without using an attempt. Every other job proceeds. |
-| Memory | One process: about 120 to 140 MB plus one rendered page per caller in flight. | The same per worker, so 8 workers is about 1 GB. Idle workers above `MinWorkers` are stopped after `IdleTimeout` (60 s). |
+| Memory | One process: about 120 to 140 MB plus one rendered page per caller in flight. On Linux, see [Memory on Linux](#memory-on-linux). | The same per worker, so 8 workers is about 1 GB. Idle workers above `MinWorkers` are stopped after `IdleTimeout` (60 s). On Linux the pool tunes the workers' allocator; see [Memory on Linux](#memory-on-linux). |
 | First request | Pays native initialization once, a few milliseconds. | `PdfProcessingPool.CreateAsync` starts and warms `MinWorkers` before it returns; the constructor starts them in the background and the first jobs wait for them. A scale-up costs a few hundred milliseconds of process start. |
 | Errors | Exceptions. | A `PdfJobStatus` on every result (`Succeeded`, `Failed`, `TimedOut`, `Cancelled`, `WorkerCrashed`), with attempts, worker id and timings. `Failed` also covers "no worker could be started" (after `MaxConsecutiveStartFailures`) and "the pool's dispatcher stopped"; the error says which. Misuse and setup problems still throw (see above). |
 | Timeouts, retries, backpressure | Yours to write (see the patterns below). | `JobTimeout`, `MaxAttempts`, `QueueCapacity`. |
@@ -780,6 +782,79 @@ Most memory used while processing PDFs is native: PDFium's document and font dat
   The worker pool's `MaxWorkerMemoryBytes` bounds a whole worker process. This cap also protects in-process callers and bounds each render inside a worker, but a value set with `AppContext.SetData` in the host does not reach the workers; see [Pool Events and Lifecycle](#pool-events-and-lifecycle) for how to change it there.
 - Saving a PDF (`Save`, `SaveToStream`, `PdfMerger.Save`, `PdfMerger.ToBytes`) serializes the whole output into a pooled in-memory buffer and writes it to the file or stream afterwards. Peak memory includes the full output size.
 - Bound the number of concurrent callers: each one in flight holds a rendered page.
+
+### Memory on Linux
+
+On Linux with glibc (Debian, Ubuntu, RHEL and the default `mcr.microsoft.com/dotnet` images), a process that renders many pages keeps memory it no longer uses. When a page bitmap is freed, glibc's allocator keeps it inside the process for reuse instead of returning it to the system, and it keeps a separate pool of such memory per thread. Memory therefore grows to the largest mix of pages the process has rendered and stays there, even when the process is idle. It is not a leak: it levels off. But it is large. In the pool qualification on Ubuntu 24.04 an idle worker held 250 to 430 MB, against about 30 MB on Windows, where the same blocks go back to the system when freed.
+
+Two glibc environment variables change this. The trailing underscore in the second name is part of it:
+
+| Variable | Value | Effect |
+|---|---|---|
+| `MALLOC_ARENA_MAX` | `2` | At most two allocator pools instead of up to eight per CPU core. |
+| `MALLOC_MMAP_THRESHOLD_` | `131072` | Every buffer of 128 KiB or more (every page bitmap) is mapped on its own, so freeing it returns it to the system at once. |
+
+glibc reads them only when a process starts, so they have to be in the environment before your application runs. They have no effect on Windows or macOS, and none on Alpine (musl), whose allocator already returns memory.
+
+**The worker pool sets them for you.** On Linux every worker starts with `MALLOC_ARENA_MAX=2` and `MALLOC_MMAP_THRESHOLD_=131072`, and a worker that has had no job for one second hands its free memory back (`malloc_trim`). Nothing to configure. A value already in your application's environment, for example from the container image, is passed to the workers unchanged, and `PdfPoolOptions.WorkerEnvironment` overrides both:
+
+```csharp
+var options = new PdfPoolOptions();
+options.WorkerEnvironment["MALLOC_MMAP_THRESHOLD_"] = "1048576"; // 1 MiB instead of 128 KiB
+```
+
+**In-process (no pool), set them yourself.** PdfiumWrapper cannot change the allocator of a process that is already running. For a long-running Linux service that renders in-process, set both variables where the service starts. They also keep the pool's coordinator process small.
+
+### Setting the variables in a container
+
+They are ordinary environment variables, so set them like any other.
+
+In the image (`Dockerfile`), for every container started from it:
+
+```dockerfile
+FROM mcr.microsoft.com/dotnet/aspnet:10.0
+ENV MALLOC_ARENA_MAX=2 \
+    MALLOC_MMAP_THRESHOLD_=131072
+WORKDIR /app
+COPY --from=build /app/publish .
+ENTRYPOINT ["dotnet", "MyPdfService.dll"]
+```
+
+For a self-contained publish, use `mcr.microsoft.com/dotnet/runtime-deps:10.0` as the base and start the executable instead; the `ENV` line is the same.
+
+When starting a container (`docker run`), without changing the image:
+
+```bash
+docker run -e MALLOC_ARENA_MAX=2 -e MALLOC_MMAP_THRESHOLD_=131072 my-pdf-service
+```
+
+Docker Compose:
+
+```yaml
+services:
+  pdf-service:
+    image: my-pdf-service
+    environment:
+      MALLOC_ARENA_MAX: "2"
+      MALLOC_MMAP_THRESHOLD_: "131072"
+```
+
+Kubernetes (container spec):
+
+```yaml
+containers:
+  - name: pdf-service
+    image: my-pdf-service
+    env:
+      - name: MALLOC_ARENA_MAX
+        value: "2"
+      - name: MALLOC_MMAP_THRESHOLD_
+        value: "131072"
+```
+
+Outside containers, a systemd unit takes `Environment=MALLOC_ARENA_MAX=2 MALLOC_MMAP_THRESHOLD_=131072` in its `[Service]` section.
+
+To check, read a process's resident memory while it is idle: `grep VmRSS /proc/<pid>/status`, or `docker stats` for a container. On Linux, compare `VmRSS` (`Process.WorkingSet64`), not `Process.PrivateMemorySize64`: there the latter counts reserved address space, including 8 MB per thread stack, and is much larger than the memory actually in use.
 
 ### Monitor Memory Usage
 
