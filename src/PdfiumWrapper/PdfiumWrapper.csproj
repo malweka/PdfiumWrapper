@@ -76,10 +76,11 @@
 		<PdfiumPngLibName>libpdfium_png.so</PdfiumPngLibName>
 	</PropertyGroup>
 
-	<!-- Include README and icon in package -->
+	<!-- Include README, icon and the third-party notices for the natives in package -->
 	<ItemGroup>
 		<None Include="../../README.md" Pack="true" PackagePath="\" />
 		<None Include="../../icon.png" Pack="true" PackagePath="\" />
+		<None Include="../../THIRD-PARTY-NOTICES.txt" Pack="true" PackagePath="\" />
 	</ItemGroup>
 
 	<!--

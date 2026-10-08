@@ -207,6 +207,8 @@ See [CHANGELOG.md](CHANGELOG.md) for the full list.
 
 This project is licensed under the MIT License.
 
+The native libraries in the runtime packages contain third-party software (PDFium and the libraries it bundles, libtiff, libjpeg-turbo, libpng and zlib-ng) under their own permissive licenses. Their license texts are in [THIRD-PARTY-NOTICES.txt](THIRD-PARTY-NOTICES.txt), which is also included in the packages.
+
 ## Credits
 
 - [PDFium](https://pdfium.googlesource.com/pdfium/) — Google's open-source PDF rendering engine

@@ -736,6 +736,10 @@ The runtime packages exist only once the release workflow (`.github/workflows/re
 
 `icon.png` at the repository root (256 x 256, transparent background) is the package icon of the core, Processing and runtime packages (`<PackageIcon>icon.png</PackageIcon>` in each project). It is rendered from `logos/PdfiumWrapperLogo.svg` with Microsoft Edge in headless mode, because Inkscape drops the logo's `feDropShadow` filter. Re-render it the same way after changing the SVG.
 
+### Third-party notices
+
+`THIRD-PARTY-NOTICES.txt` at the repository root holds the license of every third-party component in the shipped natives: PDFium and the libraries the pdfium-binaries build bundles (its `LICENSE` and `licenses/` directory), libtiff, libjpeg-turbo (`LICENSE.md` and `README.ijg`), libpng and zlib-ng. It is packed into the core package and every runtime package. When a version in [Source Versions](#source-versions) changes, replace the matching section with the license file from the new release, and update the versions named in the file's header.
+
 ---
 
 ## Why the Shim Exists
