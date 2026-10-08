@@ -34,7 +34,7 @@ Measured and reported (JSON plus a Markdown summary, also written to `GITHUB_STE
 
 - Status counts, unexpected statuses, retries, output mismatches, timings p50/p95/p99, pool statistics and events.
 - Each worker's and the coordinator's working set, private bytes and handle count every 1,000 jobs and every 60 s under load (information only: a reading under load mostly reflects which documents the worker holds; the first local soak swung -40% to +78% between readings with no trend).
-- Idle readings decide growth: taken 2 s after the queue drains. Burst: after a warm-up (10% of the jobs, at most 500) and at the end. Soak: after every 4-minute full-load period and at the end; the two `MinWorkers` workers live through every cycle. Growth is first against last idle reading; over the limit means above 10% and above 8 MB (20 handles). Smoke runs report growth without judging it.
+- Idle readings decide growth: taken 2 s after the queue drains. Burst: after a warm-up (10% of the jobs, at most 500), every 2,500 jobs and at the end. Soak: after every 4-minute full-load period and at the end; the two `MinWorkers` workers live through every cycle. Growth is the second against the last idle reading, judged with at least three; over the limit means above 10% and above 8 MB (20 handles). The first reading is not the baseline: glibc keeps freed memory, so idle memory on Linux sits near the high-water mark, which is still rising at warm-up (first CI run: +17% to +43% from warm-up to the end of the burst, while the soak's long-lived worker went 377, 422, 426, 426, 427 MB). Smoke runs report growth without judging it.
 - End state: no worker process alive 5 s after `DisposeAsync`, no file left in the output root or the pool temp directory.
 
 Exit code: 0 pass; 1 a correctness or cleanup check failed; 2 only idle growth over the limit (investigate, per the plan: do not recycle workers to hide it).
@@ -47,8 +47,14 @@ Exit code: 0 pass; 1 a correctness or cleanup check failed; 2 only idle growth o
 
 - [x] Harness project, added to the solution.
 - [x] Local runs on win-x64 (2026-10-08). Smoke (`dotnet run`, then a self-contained publish): 1,100 jobs, all checks pass, 8 workers gone after dispose. Soak 7 min: correctness clean, but readings under load swung -40% to +78%, so growth moved to idle readings. Soak 12 min (self-contained): exit 0; idle private bytes 28-35 MB per worker after the first load period; the longest-lived worker went 28.6 -> 30.1 -> 32.1 MB over about 8,000 jobs (under the 8 MB floor), to watch in the 30-minute soak.
-- [ ] `qualification.yml`; PR; CI green.
-- [ ] Run the workflow: 10,000-job burst and 30-minute soak on win-x64 and linux-x64, smoke on osx-arm64.
+- [x] `qualification.yml`; PR #28 merged (`f6c8b4e`).
+- [x] First run, 2026-10-08 (run 37833914527, defaults). Correctness and cleanup clean everywhere: linux-x64 burst 10,500 and soak 10,199 jobs, win-x64 burst 10,500 and soak 6,853, osx-arm64 smoke 1,100; no unexpected status, no output mismatch, no output left by a failed job, no retry, every worker (8 + 32 + 8 + 26 + 8 started) gone 5 s after dispose, no file left. Self-contained publish works on all three. Verdicts: win-x64 soak PASS; both bursts and the linux-x64 soak "investigate". Not leaks:
+  - Linux idle memory sits at the glibc high-water mark: soak long-lived worker 377, 422, 426, 426, 427 MB working set (flat for the last 6,000 jobs); the bursts compared a 500-job warm-up reading with the end (+17% to +43%).
+  - win-x64 burst: only the coordinator, private 28.8 -> 37.8 MB while its managed heap went 7.8 -> 5.8 MB, after a 92 MB managed peak (stream inputs spooled in memory); GC keeps the committed pages. The soak coordinator stayed at 31-34 MB.
+  - win-x64 soak workers idle private 22, 23, 26, 21, 22 MB.
+  - osx-arm64: .NET reports private bytes and handle count as 0 on macOS; only working set is available there, and it stays high after jobs (smoke, not judged).
+  - Linux workers are 4-5x larger than Windows ones (idle 250-430 MB working set, peak 400-500 MB, against 30 MB idle and about 110 MB peak on Windows): for the sizing docs, not a defect. Composition not yet investigated.
+- [ ] Harness fix (branch `fix/qualification-growth-baseline`): growth from the second idle reading, at least three readings; idle readings every 2,500 jobs in the burst. Rerun the workflow for a clean record.
 - [ ] Review the reports. Any growth above 10% after warm-up: investigate before releasing.
 - [ ] Record the results in `plan-pdfium-concurrency.md` (tick the Phase 6 qualification item and the self-contained publish), `ai/tmp/release-2.0-checklist.md` item 6 and `ai/current-state.md`.
 - [ ] Release Processing per the release decision above. CHANGELOG: drop the "not published yet" note.

@@ -3,8 +3,11 @@ using System.Text;
 namespace PdfiumWrapper.Qualification;
 
 /// <summary>
-/// Growth of one process between its first and its last idle reading. The first idle reading
-/// comes after warm-up (burst) or after the first full-load period (soak).
+/// Growth of one process between its second and its last idle reading. The first idle reading is
+/// not the baseline: the allocator's high-water mark is still forming then (glibc keeps freed
+/// memory, so on Linux idle memory sits near the largest job mix seen so far), and in the first
+/// qualification run it rose 17-43% between warm-up and the end of a burst while every later
+/// reading of the soak stayed flat. A leak keeps rising from the second reading on.
 /// </summary>
 internal sealed record Growth(
     int Pid, string Role, int IdleReadings, int LoadReadings, bool Judged,
@@ -26,7 +29,7 @@ internal sealed record Growth(
 
     /// <summary>
     /// Judged when <paramref name="judge"/> is set (not for a smoke run, too short to be warm) and
-    /// the process has at least two idle readings.
+    /// the process has at least three idle readings.
     /// </summary>
     public static Growth Of(int pid, string role, IReadOnlyList<Sample> samples, bool judge)
     {
@@ -36,9 +39,9 @@ internal sealed record Growth(
         if (idle.Count == 0)
             return new Growth(pid, role, 0, load, false, 0, 0, 0, 0, 0, 0, 0, 0, 0, peak, []);
 
-        var first = idle[0];
+        var first = idle.Count >= 3 ? idle[1] : idle[0];
         var last = idle[^1];
-        return new Growth(pid, role, idle.Count, load, judge && idle.Count >= 2,
+        return new Growth(pid, role, idle.Count, load, judge && idle.Count >= 3,
             first.WorkingSet, last.WorkingSet, Ratio(first.WorkingSet, last.WorkingSet),
             first.PrivateBytes, last.PrivateBytes, Ratio(first.PrivateBytes, last.PrivateBytes),
             first.Handles, last.Handles, Ratio(first.Handles, last.Handles),
@@ -121,7 +124,7 @@ internal sealed record QualificationReport(
         sb.AppendLine();
         sb.AppendLine("Pool events: " + string.Join(", ", PoolEvents.OrderBy(k => k.Key).Select(k => $"{k.Key} {k.Value:N0}")));
         sb.AppendLine();
-        sb.AppendLine("### Growth between the first and last idle reading (limit 10% and 8 MB / 20 handles)");
+        sb.AppendLine("### Growth from the second to the last idle reading (limit 10% and 8 MB / 20 handles; at least 3 readings)");
         sb.AppendLine();
         sb.AppendLine("| Process | Idle / load readings | Peak MB | Working set MB | Private MB | Handles | Idle private MB, in order | Judged |");
         sb.AppendLine("|---|---|---|---|---|---|---|---|");
