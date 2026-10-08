@@ -58,14 +58,13 @@ await foreach (var r in pool.ConvertToTiffAsync(inputs, "out"))
 
 ## Linux
 
-On Linux the pool starts every worker with `MALLOC_ARENA_MAX=2` and `MALLOC_MMAP_THRESHOLD_=131072`, and a worker idle for a second hands its free memory back. Without this, glibc keeps the memory of every page a worker has rendered: idle workers held 250 to 430 MB in testing, against about 30 MB on Windows. Nothing to configure. Values set in your application's environment (for example `ENV` in your container image) are passed to the workers unchanged, and `PdfPoolOptions.WorkerEnvironment` overrides both. Setting the same two variables on the container also keeps your own process small:
+On Linux the pool starts every worker with `MALLOC_ARENA_MAX=2`, and a worker idle for a second hands its free memory back. Without this, glibc keeps the memory of every page a worker has rendered. In a 10,000-job burst, idle workers dropped from 316-400 MB to about 100 MB, at the same throughput. Nothing to configure. A value set in your application's environment (for example `ENV` in your container image) is passed to the workers unchanged, and `PdfPoolOptions.WorkerEnvironment` overrides both. Setting the variable on the container also keeps your own process small:
 
 ```dockerfile
-ENV MALLOC_ARENA_MAX=2 \
-    MALLOC_MMAP_THRESHOLD_=131072
+ENV MALLOC_ARENA_MAX=2
 ```
 
-See [Memory on Linux](https://github.com/malweka/PdfiumWrapper/blob/main/docs/HIGH-THROUGHPUT-PROCESSING.md#memory-on-linux) for Docker Compose, Kubernetes and systemd examples.
+See [Memory on Linux](https://github.com/malweka/PdfiumWrapper/blob/main/docs/HIGH-THROUGHPUT-PROCESSING.md#memory-on-linux) for the measurements, Docker Compose, Kubernetes and systemd examples, and `MALLOC_MMAP_THRESHOLD_`, which makes workers smaller still at about 9% lower throughput.
 
 ## Documentation
 

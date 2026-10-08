@@ -178,7 +178,7 @@ This library includes native binaries for:
 
 Native libraries bundled: **PDFium** chromium/8076 (PDF rendering), **libtiff** 4.7.2 + **tiff_shim** (TIFF export), **libjpeg-turbo** 3.2.0 (JPEG encoding/decoding), **pdfium_png** (PNG encoding/decoding, statically links libpng 1.6.59 + zlib-ng 2.3.3). See [Building Native Libraries](docs/BUILDING-NATIVE-LIBS.md) for compilation instructions.
 
-On Linux (glibc), a long-running process that renders many pages keeps freed page memory unless two environment variables are set before it starts: `MALLOC_ARENA_MAX=2` and `MALLOC_MMAP_THRESHOLD_=131072`. The worker pool sets them for its workers; for a service that renders in-process, set them on the service or its container image. See [Memory on Linux](docs/HIGH-THROUGHPUT-PROCESSING.md#memory-on-linux).
+On Linux (glibc), a long-running process that renders many pages keeps freed page memory unless `MALLOC_ARENA_MAX=2` is set before it starts. The worker pool sets it for its workers and trims idle workers; for a service that renders in-process, set it on the service or its container image. See [Memory on Linux](docs/HIGH-THROUGHPUT-PROCESSING.md#memory-on-linux).
 
 ## Thread Safety
 

@@ -6,14 +6,15 @@ namespace PdfiumWrapper.Tests.Processing;
 public class LinuxAllocatorTests
 {
     [Fact]
-    public void Linux_AddsBothDefaults()
+    public void Linux_CapsTheArenas()
     {
         var environment = new Dictionary<string, string?>();
 
         LinuxAllocator.AddWorkerDefaults(environment, isLinux: true);
 
         Assert.Equal("2", environment["MALLOC_ARENA_MAX"]);
-        Assert.Equal("131072", environment["MALLOC_MMAP_THRESHOLD_"]);
+        // Costs 9% throughput, so it is the application's choice.
+        Assert.False(environment.ContainsKey("MALLOC_MMAP_THRESHOLD_"));
     }
 
     [Fact]
@@ -25,7 +26,6 @@ public class LinuxAllocatorTests
         LinuxAllocator.AddWorkerDefaults(environment, isLinux: true);
 
         Assert.Equal("4", environment["MALLOC_ARENA_MAX"]);
-        Assert.Equal("131072", environment["MALLOC_MMAP_THRESHOLD_"]);
     }
 
     [Fact]
@@ -39,19 +39,27 @@ public class LinuxAllocatorTests
     }
 
     [Fact]
-    public void WorkerEnvironment_OverridesTheDefaults()
+    public void Launcher_AddsTheDefaultOnLinuxOnly()
     {
-        var options = new PdfPoolOptions { WorkerPath = "worker" };
-        options.WorkerEnvironment["MALLOC_MMAP_THRESHOLD_"] = "1048576";
-
-        var psi = WorkerLauncher.Create(options, Path.GetTempPath());
-
-        Assert.Equal("1048576", psi.Environment["MALLOC_MMAP_THRESHOLD_"]);
+        var psi = WorkerLauncher.Create(new PdfPoolOptions { WorkerPath = "worker" }, Path.GetTempPath());
 
         // Inherited from this process if set here, otherwise the Linux default; nothing elsewhere.
         string? inherited = Environment.GetEnvironmentVariable("MALLOC_ARENA_MAX");
         string? expected = inherited ?? (OperatingSystem.IsLinux() ? "2" : null);
         Assert.Equal(expected, psi.Environment.TryGetValue("MALLOC_ARENA_MAX", out var value) ? value : null);
+    }
+
+    [Fact]
+    public void WorkerEnvironment_OverridesTheDefaults()
+    {
+        var options = new PdfPoolOptions { WorkerPath = "worker" };
+        options.WorkerEnvironment["MALLOC_ARENA_MAX"] = "4";
+        options.WorkerEnvironment["MALLOC_MMAP_THRESHOLD_"] = "131072";
+
+        var psi = WorkerLauncher.Create(options, Path.GetTempPath());
+
+        Assert.Equal("4", psi.Environment["MALLOC_ARENA_MAX"]);
+        Assert.Equal("131072", psi.Environment["MALLOC_MMAP_THRESHOLD_"]);
     }
 
     [Fact]

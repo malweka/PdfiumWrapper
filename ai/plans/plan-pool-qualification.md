@@ -43,6 +43,19 @@ Exit code: 0 pass; 1 a correctness or cleanup check failed; 2 only idle growth o
 
 `.github/workflows/qualification.yml`, manual (`workflow_dispatch`): self-contained publish of the harness, then burst and soak on `ubuntu-latest` and `windows-latest`, and a 1,000-job smoke on `macos-latest` (osx-arm64). Reports are uploaded as artifacts. Locally: `dotnet run -c Release --project src/PdfiumWrapper.Qualification -- burst`.
 
+**Load tests run on a machine we control** (user decision, 2026-10-08): Windows natively, Linux in Docker on the dev machine. Do not dispatch `qualification.yml` for load or memory measurements; shared runners are slow (a 10,000-job burst takes 30-36 min there, 7 min locally) and give unrepeatable numbers. Linux recipe, comparing two commits on the same machine without touching the working tree:
+
+```bash
+git archive --format=tar -o before.tar <commit>; git archive --format=tar -o after.tar <commit>
+docker volume create pwq
+MSYS_NO_PATHCONV=1 docker run --rm -v pwq:/q -v "$PWD":/in:ro mcr.microsoft.com/dotnet/sdk:10.0 bash -c '
+  for v in before after; do mkdir -p /q/src-$v && tar -xf /in/$v.tar -C /q/src-$v
+    dotnet publish /q/src-$v/src/PdfiumWrapper.Qualification/PdfiumWrapper.Qualification.csproj       -c Release -r linux-x64 --self-contained true -o /q/$v; done'
+MSYS_NO_PATHCONV=1 docker run --rm -v pwq:/q mcr.microsoft.com/dotnet/sdk:10.0   /q/before/PdfiumWrapper.Qualification burst --jobs 10000 --work /q/work --report /q/burst-before.json
+```
+
+Run the builds one after another, never at the same time, and repeat each at least once to see the noise.
+
 ## Checklist
 
 - [x] Harness project, added to the solution.
@@ -55,6 +68,16 @@ Exit code: 0 pass; 1 a correctness or cleanup check failed; 2 only idle growth o
   - osx-arm64: .NET reports private bytes and handle count as 0 on macOS; only working set is available there, and it stays high after jobs (smoke, not judged).
   - Linux workers are 4-5x larger than Windows ones (idle 250-430 MB working set, peak 400-500 MB, against 30 MB idle and about 110 MB peak on Windows): for the sizing docs, not a defect. Composition not yet investigated.
 - [ ] Harness fix (branch `fix/qualification-growth-baseline`): growth from the second idle reading, at least three readings; idle readings every 2,500 jobs in the burst. Rerun the workflow for a clean record.
+- [x] Linux worker memory (branch `fix/linux-worker-memory`, PR #30), measured locally in Docker (sdk:10.0, 24 cores, 10,000-job burst, 8 workers, all 10,500 outputs correct in every run):
+
+  | Workers | Burst | p50 / p95 processing | Worker peak | Idle worker |
+  |---|---|---|---|---|
+  | glibc defaults (2 runs) | 6.9 min | 98 / 3,450 ms | 355-430 MB | 316-400 MB |
+  | `MALLOC_ARENA_MAX=2` + `malloc_trim` after 1 s idle (2 runs) | 6.9-7.0 min | 97-99 / 3,410-3,540 ms | 175-206 MB | 72-117 MB |
+  | also `MALLOC_MMAP_THRESHOLD_=131072` (2 runs) | 7.5 min | 108-113 / 3,690-3,710 ms | 107-121 MB | 64-69 MB |
+
+  Shipped: the second row (no throughput cost); the threshold is a documented opt-in. The arena-only runs still exit 2 on the coordinator (the harness process gets no variable; 125 -> 147 MB working set, high-water, same as before the fix). The CI run of the first version (37849740630, cancelled in the soak) agreed: idle workers 66-72 MB.
+- [ ] Harness growth rule: on Linux judge VmRSS (working set), not private bytes (address space incl. 8 MB thread stacks); judge the trend over the last readings (Windows soak private bytes 32, 39, 41, 41, 48, 47, 47 MB levels off but trips second-vs-last).
 - [ ] Review the reports. Any growth above 10% after warm-up: investigate before releasing.
 - [ ] Record the results in `plan-pdfium-concurrency.md` (tick the Phase 6 qualification item and the self-contained publish), `ai/tmp/release-2.0-checklist.md` item 6 and `ai/current-state.md`.
 - [ ] Release Processing per the release decision above. CHANGELOG: drop the "not published yet" note.

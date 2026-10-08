@@ -4,7 +4,7 @@ All notable changes to PdfiumWrapper are listed here. Versions follow [Semantic 
 
 ## 2.0.1 (unreleased)
 
-- **Smaller Linux workers.** On Linux the worker pool starts each worker with `MALLOC_ARENA_MAX=2` and `MALLOC_MMAP_THRESHOLD_=131072`, unless the application's environment already sets them, and a worker idle for a second returns its free memory (`malloc_trim`). Without this, glibc kept the memory of the largest pages a worker had rendered: 250 to 430 MB per idle worker in testing, against about 30 MB on Windows. `PdfPoolOptions.WorkerEnvironment` overrides the values. The docs explain how to set the same variables for in-process services and containers.
+- **Smaller Linux workers.** On Linux the worker pool starts each worker with `MALLOC_ARENA_MAX=2`, unless the application's environment already sets it, and a worker idle for a second returns its free memory (`malloc_trim`). Without this, glibc kept the memory of the largest pages a worker had rendered. In a 10,000-job burst, idle workers went from 316-400 MB to about 100 MB and peaks from about 400 MB to about 190 MB, at the same throughput. `PdfPoolOptions.WorkerEnvironment` overrides the value. The docs explain how to set it for in-process services and containers, and when to add `MALLOC_MMAP_THRESHOLD_=131072` (smaller still, about 9% slower).
 - **The runtime packages have a package readme.** It says to reference `PdfiumWrapper` instead, and lists the native libraries and their versions.
 
 ## 2.0.0 (2026-10-08)

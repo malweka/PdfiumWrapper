@@ -6,27 +6,27 @@ namespace PdfiumWrapper.Processing;
 /// Keeps Linux workers small. glibc's malloc keeps the memory of freed page buffers inside the
 /// process: after the first large page bitmap is freed it serves later ones from its own heaps
 /// (one per thread, up to 8 per core), which shrink only from the top. A worker then holds the
-/// largest job mix it has seen for the rest of its life. Measured in the pool qualification on
-/// Ubuntu 24.04: 250-430 MB per idle worker, against about 30 MB on Windows, where the same
-/// blocks go back to the system when freed.
+/// largest job mix it has seen for the rest of its life: 316-400 MB per idle worker in the pool
+/// qualification (10,000-job burst, Debian 12 in Docker), against about 30 MB on Windows, where the
+/// same blocks go back to the system when freed. With the defaults below: about 100 MB, at the same
+/// throughput.
 /// </summary>
 /// <remarks>
-/// Two parts: environment variables set when the pool starts a worker (glibc reads them only at
+/// Two parts: an environment variable set when the pool starts a worker (glibc reads it only at
 /// process start), and <see cref="TrimWhenIdle"/> in the worker, which hands free pages back once
-/// it has had no job for a moment. musl (Alpine) ignores the variables and has no malloc_trim; its
+/// it has had no job for a moment. musl (Alpine) ignores the variable and has no malloc_trim; its
 /// allocator already returns memory eagerly. See docs/HIGH-THROUGHPUT-PROCESSING.md, "Memory on Linux".
 /// </remarks>
 internal static class LinuxAllocator
 {
     /// <summary>
-    /// Two heaps instead of up to 8 per core, and buffers of 128 KiB or more always mapped on
-    /// their own, so freeing one returns it to the system (setting the threshold also stops glibc
-    /// from raising it after each large free).
+    /// Two heaps instead of up to 8 per core. <c>MALLOC_MMAP_THRESHOLD_=131072</c> on top took idle
+    /// workers to about 67 MB but cost 9% throughput (every page bitmap mapped and zeroed afresh),
+    /// so it is left to the application; the docs describe it.
     /// </summary>
     internal static readonly IReadOnlyList<KeyValuePair<string, string>> WorkerDefaults =
     [
         new("MALLOC_ARENA_MAX", "2"),
-        new("MALLOC_MMAP_THRESHOLD_", "131072"),
     ];
 
     /// <summary>A worker idle this long hands its free memory back.</summary>

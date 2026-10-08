@@ -785,36 +785,43 @@ Most memory used while processing PDFs is native: PDFium's document and font dat
 
 ### Memory on Linux
 
-On Linux with glibc (Debian, Ubuntu, RHEL and the default `mcr.microsoft.com/dotnet` images), a process that renders many pages keeps memory it no longer uses. When a page bitmap is freed, glibc's allocator keeps it inside the process for reuse instead of returning it to the system, and it keeps a separate pool of such memory per thread. Memory therefore grows to the largest mix of pages the process has rendered and stays there, even when the process is idle. It is not a leak: it levels off. But it is large. In the pool qualification on Ubuntu 24.04 an idle worker held 250 to 430 MB, against about 30 MB on Windows, where the same blocks go back to the system when freed.
+On Linux with glibc (Debian, Ubuntu, RHEL and the default `mcr.microsoft.com/dotnet` images), a process that renders many pages keeps memory it no longer uses. When a page bitmap is freed, glibc's allocator keeps it inside the process for reuse instead of returning it to the system, and it keeps a separate pool of such memory per thread. Memory therefore grows to the largest mix of pages the process has rendered and stays there, even when the process is idle. It is not a leak: it levels off. But it is large: in the pool qualification an idle worker held 316 to 400 MB, against about 30 MB on Windows, where the same blocks go back to the system when freed.
 
 Two glibc environment variables change this. The trailing underscore in the second name is part of it:
 
 | Variable | Value | Effect |
 |---|---|---|
 | `MALLOC_ARENA_MAX` | `2` | At most two allocator pools instead of up to eight per CPU core. |
-| `MALLOC_MMAP_THRESHOLD_` | `131072` | Every buffer of 128 KiB or more (every page bitmap) is mapped on its own, so freeing it returns it to the system at once. |
+| `MALLOC_MMAP_THRESHOLD_` | `131072` | Every buffer of 128 KiB or more (every page bitmap) is mapped on its own, so freeing it returns it to the system at once. Each page then gets fresh memory from the system, which costs time. |
 
 glibc reads them only when a process starts, so they have to be in the environment before your application runs. They have no effect on Windows or macOS, and none on Alpine (musl), whose allocator already returns memory.
 
-**The worker pool sets them for you.** On Linux every worker starts with `MALLOC_ARENA_MAX=2` and `MALLOC_MMAP_THRESHOLD_=131072`, and a worker that has had no job for one second hands its free memory back (`malloc_trim`). Nothing to configure. A value already in your application's environment, for example from the container image, is passed to the workers unchanged, and `PdfPoolOptions.WorkerEnvironment` overrides both:
+**The worker pool handles this for you.** On Linux every worker starts with `MALLOC_ARENA_MAX=2`, and a worker that has had no job for one second hands its free memory back (`malloc_trim`). Nothing to configure. Measured with the qualification harness (10,000-job burst, 8 workers, Debian 12 in Docker on a 24-core machine; every output checked):
+
+| Worker setting | Burst time | Median job | Worker peak | Idle worker |
+|---|---|---|---|---|
+| Before 2.0.1 (glibc defaults) | 6.9 min | 98 ms | 355-430 MB | 316-400 MB |
+| Default since 2.0.1: `MALLOC_ARENA_MAX=2` + idle trim | 6.9-7.0 min | 97-99 ms | 175-206 MB | 72-117 MB |
+| Also `MALLOC_MMAP_THRESHOLD_=131072` | 7.5 min | 108-113 ms | 107-121 MB | 64-69 MB |
+
+The threshold saves another 35-80 MB per worker but costs about 9% throughput, so the pool leaves it to you. Set it when memory is tighter than CPU time, for example a container with a low memory limit and many workers. A value in your application's environment, for example from the container image, is passed to the workers unchanged, and `PdfPoolOptions.WorkerEnvironment` overrides both:
 
 ```csharp
 var options = new PdfPoolOptions();
-options.WorkerEnvironment["MALLOC_MMAP_THRESHOLD_"] = "1048576"; // 1 MiB instead of 128 KiB
+options.WorkerEnvironment["MALLOC_MMAP_THRESHOLD_"] = "131072"; // smaller workers, about 9% slower
 ```
 
-**In-process (no pool), set them yourself.** PdfiumWrapper cannot change the allocator of a process that is already running. For a long-running Linux service that renders in-process, set both variables where the service starts. They also keep the pool's coordinator process small.
+**In-process (no pool), set them yourself.** PdfiumWrapper cannot change the allocator of a process that is already running, and does not trim it. For a long-running Linux service that renders in-process, set `MALLOC_ARENA_MAX=2` where the service starts. Without the pool's idle trim, freed pages are returned only with the threshold, so add `MALLOC_MMAP_THRESHOLD_=131072` if the service's memory stays high while idle. `MALLOC_ARENA_MAX=2` also keeps the pool's coordinator process small.
 
 ### Setting the variables in a container
 
-They are ordinary environment variables, so set them like any other.
+They are ordinary environment variables, so set them like any other. The examples set `MALLOC_ARENA_MAX`; add `MALLOC_MMAP_THRESHOLD_=131072` the same way to trade throughput for memory as described above. Workers inherit both.
 
 In the image (`Dockerfile`), for every container started from it:
 
 ```dockerfile
 FROM mcr.microsoft.com/dotnet/aspnet:10.0
-ENV MALLOC_ARENA_MAX=2 \
-    MALLOC_MMAP_THRESHOLD_=131072
+ENV MALLOC_ARENA_MAX=2
 WORKDIR /app
 COPY --from=build /app/publish .
 ENTRYPOINT ["dotnet", "MyPdfService.dll"]
@@ -825,7 +832,7 @@ For a self-contained publish, use `mcr.microsoft.com/dotnet/runtime-deps:10.0` a
 When starting a container (`docker run`), without changing the image:
 
 ```bash
-docker run -e MALLOC_ARENA_MAX=2 -e MALLOC_MMAP_THRESHOLD_=131072 my-pdf-service
+docker run -e MALLOC_ARENA_MAX=2 my-pdf-service
 ```
 
 Docker Compose:
@@ -836,7 +843,6 @@ services:
     image: my-pdf-service
     environment:
       MALLOC_ARENA_MAX: "2"
-      MALLOC_MMAP_THRESHOLD_: "131072"
 ```
 
 Kubernetes (container spec):
@@ -848,11 +854,9 @@ containers:
     env:
       - name: MALLOC_ARENA_MAX
         value: "2"
-      - name: MALLOC_MMAP_THRESHOLD_
-        value: "131072"
 ```
 
-Outside containers, a systemd unit takes `Environment=MALLOC_ARENA_MAX=2 MALLOC_MMAP_THRESHOLD_=131072` in its `[Service]` section.
+Outside containers, a systemd unit takes `Environment=MALLOC_ARENA_MAX=2` in its `[Service]` section.
 
 To check, read a process's resident memory while it is idle: `grep VmRSS /proc/<pid>/status`, or `docker stats` for a container. On Linux, compare `VmRSS` (`Process.WorkingSet64`), not `Process.PrivateMemorySize64`: there the latter counts reserved address space, including 8 MB per thread stack, and is much larger than the memory actually in use.
 
