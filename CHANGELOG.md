@@ -2,7 +2,13 @@
 
 All notable changes to PdfiumWrapper are listed here. Versions follow [Semantic Versioning](https://semver.org/).
 
-## 2.0.0 (unreleased)
+## 2.0.1 (unreleased)
+
+- **The runtime packages have a package readme.** It says to reference `PdfiumWrapper` instead, and lists the native libraries and their versions.
+
+## 2.0.0 (2026-10-08)
+
+`PdfiumWrapper.Processing` is not published at 2.0.0 yet; the core and the four runtime packages are.
 
 2.0 makes the library safe to use from many threads, adds an optional worker pool for high volumes, and hardens the native boundary against hostile input. It is a breaking release.
 
