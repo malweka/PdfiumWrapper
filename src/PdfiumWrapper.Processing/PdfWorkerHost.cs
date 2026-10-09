@@ -147,6 +147,14 @@ public static class PdfWorkerHost
             var running = new ConcurrentDictionary<long, Task>();
             var cancelledBeforeStart = new HashSet<long>();
 
+            // Linux: hand free heap pages back once no job has run for a moment, not between
+            // back-to-back jobs (a trim takes milliseconds).
+            using var idleTrim = new Timer(_ =>
+            {
+                if (running.IsEmpty)
+                    LinuxAllocator.TrimWhenIdle();
+            });
+
             foreach (var frame in inbox.GetConsumingEnumerable())
             {
                 // Once the coordinator is gone, nothing more is started: no result could reach it.
@@ -210,8 +218,14 @@ public static class PdfWorkerHost
                     finally
                     {
                         running.TryRemove(job.Id, out _);
-                        if (running.IsEmpty && PdfiumDiagnostics.Enabled)
-                            PdfiumDiagnostics.Reset(); // keeps the event buffer small between bursts
+                        if (running.IsEmpty)
+                        {
+                            if (PdfiumDiagnostics.Enabled)
+                                PdfiumDiagnostics.Reset(); // keeps the event buffer small between bursts
+                            if (OperatingSystem.IsLinux())
+                                idleTrim.Change(LinuxAllocator.IdleTrimDelay, Timeout.InfiniteTimeSpan);
+                        }
+
                         slotFree.Release();
                     }
                 });

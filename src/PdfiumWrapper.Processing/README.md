@@ -56,6 +56,16 @@ await foreach (var r in pool.ConvertToTiffAsync(inputs, "out"))
     Console.WriteLine($"{r.Input}: {r.Status}");
 ```
 
+## Linux
+
+On Linux the pool starts every worker with `MALLOC_ARENA_MAX=2`, and a worker idle for a second hands its free memory back. Without this, glibc keeps the memory of every page a worker has rendered. In a 10,000-job burst, idle workers dropped from 316-400 MB to about 100 MB, at the same throughput. Nothing to configure. A value set in your application's environment (for example `ENV` in your container image) is passed to the workers unchanged, and `PdfPoolOptions.WorkerEnvironment` overrides both. Setting the variable on the container also keeps your own process small:
+
+```dockerfile
+ENV MALLOC_ARENA_MAX=2
+```
+
+See [Memory on Linux](https://github.com/malweka/PdfiumWrapper/blob/main/docs/HIGH-THROUGHPUT-PROCESSING.md#memory-on-linux) for the measurements, Docker Compose, Kubernetes and systemd examples, and `MALLOC_MMAP_THRESHOLD_`, which makes workers smaller still at about 9% lower throughput.
+
 ## Documentation
 
 - [High-Throughput Processing](https://github.com/malweka/PdfiumWrapper/blob/main/docs/HIGH-THROUGHPUT-PROCESSING.md) covers when to use the pool and how to size it, events, worker lifetime and batch behaviour.

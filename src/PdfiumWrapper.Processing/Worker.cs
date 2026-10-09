@@ -367,6 +367,7 @@ internal static class WorkerLauncher
         psi.Environment[PdfWorkerHost.EnvironmentVariable] = "1";
         psi.Environment[PdfWorkerHost.SlotsVariable] = options.JobsPerWorker.ToString(System.Globalization.CultureInfo.InvariantCulture);
         psi.Environment[PdfWorkerHost.TempDirectoryVariable] = tempDirectory;
+        LinuxAllocator.AddWorkerDefaults(psi.Environment, OperatingSystem.IsLinux());
         foreach (var pair in options.WorkerEnvironment)
             psi.Environment[pair.Key] = pair.Value;
 

@@ -178,6 +178,8 @@ This library includes native binaries for:
 
 Native libraries bundled: **PDFium** chromium/8076 (PDF rendering), **libtiff** 4.7.2 + **tiff_shim** (TIFF export), **libjpeg-turbo** 3.2.0 (JPEG encoding/decoding), **pdfium_png** (PNG encoding/decoding, statically links libpng 1.6.59 + zlib-ng 2.3.3). See [Building Native Libraries](docs/BUILDING-NATIVE-LIBS.md) for compilation instructions.
 
+On Linux (glibc), a long-running process that renders many pages keeps freed page memory unless `MALLOC_ARENA_MAX=2` is set before it starts. The worker pool sets it for its workers and trims idle workers; for a service that renders in-process, set it on the service or its container image. See [Memory on Linux](docs/HIGH-THROUGHPUT-PROCESSING.md#memory-on-linux).
+
 ## Thread Safety
 
 PDFium allows one native call per process at a time, across all documents. PdfiumWrapper 2.0 enforces this itself: every operation enters one process-wide gate (`PdfiumRuntime`), so you do not need your own lock around the library.
