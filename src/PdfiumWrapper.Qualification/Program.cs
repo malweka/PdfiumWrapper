@@ -13,7 +13,7 @@ const string usage = """
     PdfiumWrapper.Processing qualification (see ai/plans/plan-pool-qualification.md)
 
       burst  [--jobs 10000] [--batch 500]   submit as fast as backpressure allows, then a batch
-      soak   [--minutes 30]                 cycles of 4 min full load, an idle reading, 90 s at one job
+      soak   [--minutes 30]                 cycles of 2 min full load, an idle reading, 90 s at one job
       smoke  [--jobs 1000] [--batch 100]    a short burst
 
       common: [--min 2] [--max 8] [--seed 1] [--work <dir>] [--report <file.json>]
@@ -57,14 +57,15 @@ Directory.CreateDirectory(poolTemp);
 
 // Full load: the pool is kept saturated with this many jobs in flight (its queue holds 256, so
 // submissions also wait on backpressure). Burst: the pool is read idle after a warm-up and then
-// every 2,500 jobs (the queue drains for each reading). Soak: cycles of 240 s at full load, an
+// every 1,000 jobs (the queue drains for each reading). Soak: cycles of 120 s at full load, an
 // idle reading once the queue drains, then 90 s at one job, longer than the 60 s idle timeout, so
-// the pool shrinks to MinWorkers every cycle. Growth is judged on the idle readings only.
+// the pool shrinks to MinWorkers every cycle. Growth is judged on the idle readings only, and
+// needs enough of them to tell a plateau from a rise (see Growth).
 const int fullLoad = 512;
-var loadPeriod = TimeSpan.FromSeconds(240);
+var loadPeriod = TimeSpan.FromSeconds(120);
 var tricklePeriod = TimeSpan.FromSeconds(90);
 int warmup = Math.Min(500, jobs / 10);
-const int idleEvery = 2_500;
+const int idleEvery = 1_000;
 
 Console.WriteLine($"Qualification {mode} on {RuntimeInformation.RuntimeIdentifier}, work directory {work}");
 var (good, encrypted, corrupt) = Corpus.Load(work);
@@ -125,15 +126,15 @@ await pool.DisposeAsync();
 double seconds = clock.Elapsed.TotalSeconds;
 
 // Every worker must be gone shortly after DisposeAsync.
-var seen = sampler.SeenWorkers;
 var deadline = Stopwatch.StartNew();
 int alive;
-while ((alive = seen.Count(IsAlive)) > 0 && deadline.Elapsed < TimeSpan.FromSeconds(5))
+while ((alive = sampler.AliveWorkers()) > 0 && deadline.Elapsed < TimeSpan.FromSeconds(5))
     await Task.Delay(100);
 
 var samples = sampler.Samples;
 var growth = samples.GroupBy(s => s.Pid)
-    .Select(g => Growth.Of(g.Key, g.Key == Environment.ProcessId ? "coordinator" : "worker", g.ToList(), judge: mode != "smoke"))
+    .Select(g => Growth.Of(g.Key, g.Key == Environment.ProcessId ? "coordinator" : "worker", g.ToList(),
+        judge: mode != "smoke", privateBytes: OperatingSystem.IsWindows()))
     .ToList();
 
 var report = new QualificationReport(
@@ -162,7 +163,7 @@ var report = new QualificationReport(
     QualificationReport.Percentile(runner.ProcessingMs, 0.99),
     statistics,
     sampler.EventCounts.ToDictionary(k => k.Key.ToString(), k => k.Value),
-    seen.Count,
+    sampler.SeenWorkers,
     alive,
     Directory.EnumerateFiles(outputRoot, "*", SearchOption.AllDirectories).Count(),
     Directory.EnumerateFiles(poolTemp, "*", SearchOption.AllDirectories).Count(),
@@ -175,8 +176,6 @@ Directory.CreateDirectory(Path.GetDirectoryName(reportPath)!);
 File.WriteAllText(reportPath, JsonSerializer.Serialize(report, new JsonSerializerOptions { WriteIndented = true }));
 string markdown = report.ToMarkdown();
 File.WriteAllText(Path.ChangeExtension(reportPath, ".md"), markdown);
-if (Environment.GetEnvironmentVariable("GITHUB_STEP_SUMMARY") is { Length: > 0 } summary)
-    File.AppendAllText(summary, markdown + Environment.NewLine);
 
 Console.WriteLine();
 Console.WriteLine(markdown);
@@ -191,16 +190,3 @@ async Task IdleReadingAsync()
 }
 
 static TimeSpan Min(TimeSpan a, TimeSpan b) => a < b ? a : b;
-
-static bool IsAlive(int pid)
-{
-    try
-    {
-        using var process = Process.GetProcessById(pid);
-        return !process.HasExited;
-    }
-    catch (Exception)
-    {
-        return false;
-    }
-}

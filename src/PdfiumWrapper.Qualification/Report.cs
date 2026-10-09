@@ -3,18 +3,21 @@ using System.Text;
 namespace PdfiumWrapper.Qualification;
 
 /// <summary>
-/// Growth of one process between its second and its last idle reading. The first idle reading is
-/// not the baseline: the allocator's high-water mark is still forming then (glibc keeps freed
-/// memory, so on Linux idle memory sits near the largest job mix seen so far), and in the first
-/// qualification run it rose 17-43% between warm-up and the end of a burst while every later
-/// reading of the soak stayed flat. A leak keeps rising from the second reading on.
+/// Whether a process's idle memory and handles still rise in the second half of the run. A leak
+/// rises with every job; an allocator's high-water mark (glibc keeps freed memory, the Windows heap
+/// and the GC keep committed pages) rises in steps early on and then levels off. Measured on the
+/// idle readings after the first (warm-up), with readings that no job separates counted once: the
+/// end of the run (median of the last three, so one high reading does not decide) against the
+/// highest reading of the first half. A plateau passes; a leak of 0.5 KB per job fails a
+/// 38,000-job soak. Memory is private bytes on Windows (committed memory) and the working set
+/// elsewhere: on Linux private bytes is address space, 8 MB per thread stack included, and on
+/// macOS .NET reports it as 0.
 /// </summary>
 internal sealed record Growth(
-    int Pid, string Role, int IdleReadings, int LoadReadings, bool Judged,
-    long BaselineWorkingSet, long FinalWorkingSet, double WorkingSetGrowth,
-    long BaselinePrivateBytes, long FinalPrivateBytes, double PrivateBytesGrowth,
-    int BaselineHandles, int FinalHandles, double HandleGrowth,
-    long PeakWorkingSet, IReadOnlyList<long> IdlePrivateBytes)
+    int Pid, string Role, string Metric, int IdleReadings, int LoadReadings, bool Judged,
+    long HighWater, long Final, double MemoryGrowth,
+    int HandleHighWater, int FinalHandles, double HandleGrowth,
+    long PeakWorkingSet, IReadOnlyList<long> IdleMemory)
 {
     public const double Limit = 0.10;
 
@@ -22,30 +25,50 @@ internal sealed record Growth(
     public const long MinBytes = 8L * 1024 * 1024;
     public const int MinHandles = 20;
 
+    /// <summary>Readings after the warm-up needed to judge: three in each half.</summary>
+    public const int MinReadings = 6;
+
     public bool Exceeds => Judged && (
-        (WorkingSetGrowth > Limit && FinalWorkingSet - BaselineWorkingSet > MinBytes) ||
-        (PrivateBytesGrowth > Limit && FinalPrivateBytes - BaselinePrivateBytes > MinBytes) ||
-        (HandleGrowth > Limit && FinalHandles - BaselineHandles > MinHandles));
+        (MemoryGrowth > Limit && Final - HighWater > MinBytes) ||
+        (HandleGrowth > Limit && FinalHandles - HandleHighWater > MinHandles));
 
-    /// <summary>
-    /// Judged when <paramref name="judge"/> is set (not for a smoke run, too short to be warm) and
-    /// the process has at least three idle readings.
-    /// </summary>
-    public static Growth Of(int pid, string role, IReadOnlyList<Sample> samples, bool judge)
+    /// <summary>Judged when <paramref name="judge"/> is set (not for a smoke run) and there are enough readings.</summary>
+    public static Growth Of(int pid, string role, IReadOnlyList<Sample> samples, bool judge, bool privateBytes)
     {
-        var idle = samples.Where(s => s.Idle).ToList();
-        int load = samples.Count - idle.Count;
+        int load = samples.Count(s => !s.Idle);
         long peak = samples.Count == 0 ? 0 : samples.Max(s => s.WorkingSet);
-        if (idle.Count == 0)
-            return new Growth(pid, role, 0, load, false, 0, 0, 0, 0, 0, 0, 0, 0, 0, peak, []);
+        string metric = privateBytes ? "private" : "working set";
+        Func<Sample, long> memory = privateBytes ? s => s.PrivateBytes : s => s.WorkingSet;
 
-        var first = idle.Count >= 3 ? idle[1] : idle[0];
-        var last = idle[^1];
-        return new Growth(pid, role, idle.Count, load, judge && idle.Count >= 3,
-            first.WorkingSet, last.WorkingSet, Ratio(first.WorkingSet, last.WorkingSet),
-            first.PrivateBytes, last.PrivateBytes, Ratio(first.PrivateBytes, last.PrivateBytes),
-            first.Handles, last.Handles, Ratio(first.Handles, last.Handles),
-            peak, idle.Select(s => s.PrivateBytes).ToArray());
+        var idle = new List<Sample>();
+        foreach (var s in samples.Where(s => s.Idle))
+        {
+            if (idle.Count > 0 && idle[^1].JobsCompleted == s.JobsCompleted)
+                idle[^1] = s;
+            else
+                idle.Add(s);
+        }
+
+        var window = idle.Skip(1).ToList();
+        if (window.Count < 2)
+            return new Growth(pid, role, metric, idle.Count, load, false, 0, 0, 0, 0, 0, 0, peak, idle.Select(memory).ToArray());
+
+        var firstHalf = window.Take(window.Count / 2).ToList();
+        var end = window.TakeLast(Math.Min(3, window.Count - firstHalf.Count)).ToList();
+        long highWater = firstHalf.Max(memory);
+        long final = Median(end.Select(memory));
+        int handleHighWater = firstHalf.Max(s => s.Handles);
+        int finalHandles = (int)Median(end.Select(s => (long)s.Handles));
+        return new Growth(pid, role, metric, idle.Count, load, judge && window.Count >= MinReadings,
+            highWater, final, Ratio(highWater, final),
+            handleHighWater, finalHandles, Ratio(handleHighWater, finalHandles),
+            peak, idle.Select(memory).ToArray());
+    }
+
+    private static long Median(IEnumerable<long> values)
+    {
+        var sorted = values.Order().ToArray();
+        return sorted[sorted.Length / 2];
     }
 
     private static double Ratio(long baseline, long final) => baseline <= 0 ? 0 : (double)final / baseline - 1;
@@ -124,15 +147,18 @@ internal sealed record QualificationReport(
         sb.AppendLine();
         sb.AppendLine("Pool events: " + string.Join(", ", PoolEvents.OrderBy(k => k.Key).Select(k => $"{k.Key} {k.Value:N0}")));
         sb.AppendLine();
-        sb.AppendLine("### Growth from the second to the last idle reading (limit 10% and 8 MB / 20 handles; at least 3 readings)");
+        sb.AppendLine($"### Growth in the second half of the run (limit 10% and 8 MB / 20 handles; at least {PdfiumWrapper.Qualification.Growth.MinReadings} idle readings after the first)");
         sb.AppendLine();
-        sb.AppendLine("| Process | Idle / load readings | Peak MB | Working set MB | Private MB | Handles | Idle private MB, in order | Judged |");
+        sb.AppendLine("End of the run (median of the last three idle readings) against the highest idle reading of the first half. Memory is private bytes on Windows and the working set elsewhere.");
+        sb.AppendLine();
+        sb.AppendLine("| Process | Idle / load readings | Peak working set MB | Memory | First-half high → end MB | Handles | Idle memory MB, in order | Judged |");
         sb.AppendLine("|---|---|---|---|---|---|---|---|");
         foreach (var g in Growth.OrderByDescending(g => g.IdleReadings).ThenByDescending(g => g.LoadReadings))
         {
-            sb.AppendLine($"| {g.Role} {g.Pid} | {g.IdleReadings} / {g.LoadReadings} | {Mb(g.PeakWorkingSet)} | {Mb(g.BaselineWorkingSet)} → {Mb(g.FinalWorkingSet)} ({g.WorkingSetGrowth:+0.0%;-0.0%}) " +
-                $"| {Mb(g.BaselinePrivateBytes)} → {Mb(g.FinalPrivateBytes)} ({g.PrivateBytesGrowth:+0.0%;-0.0%}) " +
-                $"| {g.BaselineHandles} → {g.FinalHandles} ({g.HandleGrowth:+0.0%;-0.0%}) | {string.Join(", ", g.IdlePrivateBytes.Select(Mb))} | {(g.Judged ? g.Exceeds ? "**over limit**" : "ok" : "not judged")} |");
+            string judged = g.Judged ? g.Exceeds ? "**over limit**" : "ok" : "not judged";
+            sb.AppendLine($"| {g.Role} {g.Pid} | {g.IdleReadings} / {g.LoadReadings} | {Mb(g.PeakWorkingSet)} | {g.Metric} " +
+                $"| {Mb(g.HighWater)} → {Mb(g.Final)} ({g.MemoryGrowth:+0.0%;-0.0%}) " +
+                $"| {g.HandleHighWater} → {g.FinalHandles} ({g.HandleGrowth:+0.0%;-0.0%}) | {string.Join(", ", g.IdleMemory.Select(Mb))} | {judged} |");
         }
 
         if (Problems.Count > 0)
