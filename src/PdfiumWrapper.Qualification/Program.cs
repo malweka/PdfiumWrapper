@@ -56,14 +56,15 @@ Directory.CreateDirectory(outputRoot);
 Directory.CreateDirectory(poolTemp);
 
 // Full load: the pool is kept saturated with this many jobs in flight (its queue holds 256, so
-// submissions also wait on backpressure). Burst: the first jobs are a warm-up, then the pool is read
-// idle (baseline), the rest run, and it is read idle again. Soak: cycles of 240 s at full load, an
+// submissions also wait on backpressure). Burst: the pool is read idle after a warm-up and then
+// every 2,500 jobs (the queue drains for each reading). Soak: cycles of 240 s at full load, an
 // idle reading once the queue drains, then 90 s at one job, longer than the 60 s idle timeout, so
 // the pool shrinks to MinWorkers every cycle. Growth is judged on the idle readings only.
 const int fullLoad = 512;
 var loadPeriod = TimeSpan.FromSeconds(240);
 var tricklePeriod = TimeSpan.FromSeconds(90);
 int warmup = Math.Min(500, jobs / 10);
+const int idleEvery = 2_500;
 
 Console.WriteLine($"Qualification {mode} on {RuntimeInformation.RuntimeIdentifier}, work directory {work}");
 var (good, encrypted, corrupt) = Corpus.Load(work);
@@ -106,6 +107,13 @@ else
 {
     await runner.RunAsync(submitted => submitted < warmup, () => fullLoad);
     await IdleReadingAsync();
+    for (long checkpoint = idleEvery; checkpoint < jobs; checkpoint += idleEvery)
+    {
+        long until = checkpoint;
+        await runner.RunAsync(submitted => submitted < until, () => fullLoad);
+        await IdleReadingAsync();
+    }
+
     await runner.RunAsync(submitted => submitted < jobs, () => fullLoad);
     if (batch > 0)
         await runner.RunBatchAsync(batch);
