@@ -69,6 +69,38 @@ MSYS_NO_PATHCONV=1 docker run --rm -v pwq:/q mcr.microsoft.com/dotnet/sdk:10.0 \
 
 Run builds one after another, never at the same time, and run each at least twice to see the noise (under 2% here).
 
+## Results (2026-10-08, final code = PR #29 + PR #30)
+
+**Verdict: qualified.** Every run returned every job with the expected status and output identical to the in-process call, left nothing behind, and every worker was gone 5 s after dispose. Memory levels off on both platforms; nothing leaks. The remaining exit-2 verdicts come from the harness's growth rule (open item below), not from the pool.
+
+All runs: MinWorkers 2, MaxWorkers 8, seed 1, self-contained publish, one machine (24 cores; Linux in Docker, `mcr.microsoft.com/dotnet/sdk:10.0`, Debian 12).
+
+| Run | Jobs | Time | Processing p50 / p95 / p99 | Correct, clean | Exit |
+|---|---|---|---|---|---|
+| win-x64 burst | 10,500 | 7.6 min | 130 / 3,550 / 4,327 ms | yes | 2 (rule: private 29 -> 38 MB, levelling) |
+| win-x64 soak, 30 min | 36,365 | 30.4 min | 117 / 3,457 / 4,225 ms | yes | 2 (rule: 32, 39, 41, 41, 48, 47, 47 MB) |
+| linux-x64 burst, before the fix (2 runs) | 10,500 | 6.9 min | 98 / 3,450 / 4,280 ms | yes | 2 (real high-water growth) |
+| linux-x64 burst, final (2 runs) | 10,500 | 6.9-7.0 min | 97-99 / 3,410-3,540 / 4,300-4,400 ms | yes | 2 (coordinator only) |
+| linux-x64 soak, final, 30 min | 38,063 | 30.4 min | 95 / 3,407 / 4,311 ms | yes, 38 workers started, 0 left | 2 (coordinator only) |
+| osx-arm64 smoke (GitHub, first run) | 1,100 | | | yes | not judged |
+
+Memory per worker process, working set (Linux: VmRSS):
+
+| | Peak | Idle | Longest-lived worker, idle readings over the soak |
+|---|---|---|---|
+| Windows | 103-129 MB | 56-79 MB (private 24-48 MB) | 69 -> 79 MB, levelled off |
+| Linux before the fix | 355-465 MB | 316-427 MB | 377, 422, 426, 426, 427 MB (GitHub soak) |
+| Linux final (`MALLOC_ARENA_MAX=2` + idle trim) | 175-206 MB | 94-117 MB | 103 -> 106 MB over 7 readings and 38,063 jobs |
+| Linux with `MALLOC_MMAP_THRESHOLD_=131072` too (opt-in) | 107-121 MB | 64-69 MB | not soaked |
+
+Coordinator (the harness process, no allocator variable): 126-150 MB on Linux, 70-86 MB on Windows, at its high-water mark from the first readings on.
+
+Other findings:
+
+- The Linux fix costs no throughput; the mmap threshold costs about 9% (7.5 min, p50 108-113 ms), so it is an opt-in in the docs.
+- GitHub runners were 4-5x slower than this machine (Linux burst 29-36 min, p50 processing 315-528 ms) and their timings varied; their correctness results agreed with the local runs.
+- On macOS .NET reports private bytes and handle count as 0; only working set is available.
+
 ## Checklist
 
 - [x] Harness project, added to the solution.
@@ -80,7 +112,7 @@ Run builds one after another, never at the same time, and run each at least twic
   - win-x64 soak workers idle private 22, 23, 26, 21, 22 MB.
   - osx-arm64: .NET reports private bytes and handle count as 0 on macOS; only working set is available there, and it stays high after jobs (smoke, not judged).
   - Linux workers are 4-5x larger than Windows ones (idle 250-430 MB working set, peak 400-500 MB, against 30 MB idle and about 110 MB peak on Windows): for the sizing docs, not a defect. Composition not yet investigated.
-- [ ] Harness fix (branch `fix/qualification-growth-baseline`): growth from the second idle reading, at least three readings; idle readings every 2,500 jobs in the burst. Rerun the workflow for a clean record.
+- [x] Harness fix (PR #29): growth from the second idle reading, at least three readings; idle readings every 2,500 jobs in the burst. Rerun the workflow for a clean record.
 - [x] Linux worker memory (branch `fix/linux-worker-memory`, PR #30), measured locally in Docker (sdk:10.0, 24 cores, 10,000-job burst, 8 workers, all 10,500 outputs correct in every run):
 
   | Workers | Burst | p50 / p95 processing | Worker peak | Idle worker |
@@ -91,6 +123,6 @@ Run builds one after another, never at the same time, and run each at least twic
 
   Shipped: the second row (no throughput cost); the threshold is a documented opt-in. The arena-only runs still exit 2 on the coordinator (the harness process gets no variable; 125 -> 147 MB working set, high-water, same as before the fix). The CI run of the first version (37849740630, cancelled in the soak) agreed: idle workers 66-72 MB.
 - [ ] Harness growth rule: on Linux judge VmRSS (working set), not private bytes (address space incl. 8 MB thread stacks); judge the trend over the last readings (Windows soak private bytes 32, 39, 41, 41, 48, 47, 47 MB levels off but trips second-vs-last).
-- [ ] Review the reports. Any growth above 10% after warm-up: investigate before releasing.
-- [ ] Record the results in `plan-pdfium-concurrency.md` (tick the Phase 6 qualification item and the self-contained publish), `ai/tmp/release-2.0-checklist.md` item 6 and `ai/current-state.md`.
+- [x] Review the reports. Linux growth investigated (glibc retention, fixed in PR #30); Windows and the coordinator level off. See Results.
+- [x] Record the results in `plan-pdfium-concurrency.md` (tick the Phase 6 qualification item and the self-contained publish), `ai/tmp/release-2.0-checklist.md` item 6 and `ai/current-state.md`.
 - [ ] Release Processing per the release decision above. CHANGELOG: drop the "not published yet" note.

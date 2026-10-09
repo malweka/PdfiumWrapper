@@ -804,6 +804,8 @@ glibc reads them only when a process starts, so they have to be in the environme
 | Default since 2.0.1: `MALLOC_ARENA_MAX=2` + idle trim | 6.9-7.0 min | 97-99 ms | 175-206 MB | 72-117 MB |
 | Also `MALLOC_MMAP_THRESHOLD_=131072` | 7.5 min | 108-113 ms | 107-121 MB | 64-69 MB |
 
+In a 30-minute soak with the default (38,063 jobs), the longest-lived worker stayed at 103-106 MB whenever idle.
+
 The threshold saves another 35-80 MB per worker but costs about 9% throughput, so the pool leaves it to you. Set it when memory is tighter than CPU time, for example a container with a low memory limit and many workers. A value in your application's environment, for example from the container image, is passed to the workers unchanged, and `PdfPoolOptions.WorkerEnvironment` overrides both:
 
 ```csharp
