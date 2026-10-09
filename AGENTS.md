@@ -90,7 +90,7 @@ Before ending a session, always update `/ai/current-state.md` with:
 
 PdfiumWrapper is a .NET 10 library wrapping Google's PDFium for PDF manipulation and native libtiff for TIFF export. It targets high-throughput document processing services handling thousands of files.
 
-**Version:** 2.0.0 (the raw `PDFium.*` imports are `internal`; all native work goes through `PdfiumRuntime`)
+**Version:** 2.0.1 (the raw `PDFium.*` imports are `internal`; all native work goes through `PdfiumRuntime`)
 **Target framework:** `net10.0` with `AllowUnsafeBlocks=true`
 **Dependencies:** Native PDFium, libtiff + tiff_shim (TIFF), libjpeg-turbo (JPEG), pdfium_png (PNG; statically links libpng + zlib-ng)
 
@@ -321,7 +321,7 @@ The `.csproj` auto-detects the platform RID and copies `src/libs/{rid}/` to the 
 
 - Natives ship in four `PdfiumWrapper.runtime.<rid>` packages (`src/PdfiumWrapper.runtime`, packed once per RID from the committed `src/libs/<rid>/`). The main package depends on all four at exactly its own version: a portable consumer build gets every platform under `runtimes/<rid>/native`, a RID-specific build or publish copies only its own. There is no `runtime.json`.
 - Those references apply only with `PackRuntimeDependencies=true`, which the release workflow (`.github/workflows/release.yml`) sets after packing the runtime packages, and it checks the packed nuspec lists all four. Packing the main project any other way warns that the package has no natives; such a package is for inspection only.
-- `PdfiumWrapper.Processing` depends on exactly the core version it was built with (`[2.0.0]`, `PinCoreDependencyVersion` target), because it uses core internals. Its package readme is `src/PdfiumWrapper.Processing/README.md`; the core package uses the root `README.md`.
+- `PdfiumWrapper.Processing` depends on exactly the core version it was built with (`[2.0.1]`, `PinCoreDependencyVersion` target), because it uses core internals. Its package readme is `src/PdfiumWrapper.Processing/README.md`; the core package uses the root `README.md`.
 - `icon.png` (256x256, transparent) is rendered from `logos/PdfiumWrapperLogo.svg` with Edge headless (Inkscape drops `feDropShadow`) and packed into the core, Processing and runtime packages. Release notes live in `CHANGELOG.md`.
 
 ## When Making Changes
