@@ -41,26 +41,39 @@ Exit code: 0 pass; 1 a correctness or cleanup check failed; 2 only idle growth o
 
 ## Where it runs
 
-`.github/workflows/qualification.yml`, manual (`workflow_dispatch`): self-contained publish of the harness, then burst and soak on `ubuntu-latest` and `windows-latest`, and a 1,000-job smoke on `macos-latest` (osx-arm64). Reports are uploaded as artifacts. Locally: `dotnet run -c Release --project src/PdfiumWrapper.Qualification -- burst`.
+On a machine we control, never on GitHub Actions (user decision, 2026-10-08; `qualification.yml` was removed). Shared runners are slow (a 10,000-job Linux burst took 29-36 min there, 7 min locally) and give numbers that do not repeat. Windows runs natively; Linux runs in Docker on the same machine.
 
-**Load tests run on a machine we control** (user decision, 2026-10-08): Windows natively, Linux in Docker on the dev machine. Do not dispatch `qualification.yml` for load or memory measurements; shared runners are slow (a 10,000-job burst takes 30-36 min there, 7 min locally) and give unrepeatable numbers. Linux recipe, comparing two commits on the same machine without touching the working tree:
+Windows, self-contained:
 
-```bash
-git archive --format=tar -o before.tar <commit>; git archive --format=tar -o after.tar <commit>
-docker volume create pwq
-MSYS_NO_PATHCONV=1 docker run --rm -v pwq:/q -v "$PWD":/in:ro mcr.microsoft.com/dotnet/sdk:10.0 bash -c '
-  for v in before after; do mkdir -p /q/src-$v && tar -xf /in/$v.tar -C /q/src-$v
-    dotnet publish /q/src-$v/src/PdfiumWrapper.Qualification/PdfiumWrapper.Qualification.csproj       -c Release -r linux-x64 --self-contained true -o /q/$v; done'
-MSYS_NO_PATHCONV=1 docker run --rm -v pwq:/q mcr.microsoft.com/dotnet/sdk:10.0   /q/before/PdfiumWrapper.Qualification burst --jobs 10000 --work /q/work --report /q/burst-before.json
+```powershell
+dotnet publish src/PdfiumWrapper.Qualification -c Release -r win-x64 --self-contained -o <dir>
+<dir>/PdfiumWrapper.Qualification.exe burst --jobs 10000 --work <work> --report <work>/burst.json
+<dir>/PdfiumWrapper.Qualification.exe soak --minutes 30 --work <work> --report <work>/soak.json
 ```
 
-Run the builds one after another, never at the same time, and repeat each at least once to see the noise.
+Linux, comparing two commits without touching the working tree (Git Bash; `MSYS_NO_PATHCONV=1` keeps the container paths intact):
+
+```bash
+git archive --format=tar -o before.tar <commit>
+git archive --format=tar -o after.tar <commit>
+docker volume create pwq
+MSYS_NO_PATHCONV=1 docker run --rm -v pwq:/q -v "$PWD":/in:ro mcr.microsoft.com/dotnet/sdk:10.0 bash -c '
+  for v in before after; do
+    mkdir -p /q/src-$v && tar -xf /in/$v.tar -C /q/src-$v
+    dotnet publish /q/src-$v/src/PdfiumWrapper.Qualification/PdfiumWrapper.Qualification.csproj \
+      -c Release -r linux-x64 --self-contained true -o /q/$v
+  done'
+MSYS_NO_PATHCONV=1 docker run --rm -v pwq:/q mcr.microsoft.com/dotnet/sdk:10.0 \
+  /q/before/PdfiumWrapper.Qualification burst --jobs 10000 --work /q/work --report /q/burst-before.json
+```
+
+Run builds one after another, never at the same time, and run each at least twice to see the noise (under 2% here).
 
 ## Checklist
 
 - [x] Harness project, added to the solution.
 - [x] Local runs on win-x64 (2026-10-08). Smoke (`dotnet run`, then a self-contained publish): 1,100 jobs, all checks pass, 8 workers gone after dispose. Soak 7 min: correctness clean, but readings under load swung -40% to +78%, so growth moved to idle readings. Soak 12 min (self-contained): exit 0; idle private bytes 28-35 MB per worker after the first load period; the longest-lived worker went 28.6 -> 30.1 -> 32.1 MB over about 8,000 jobs (under the 8 MB floor), to watch in the 30-minute soak.
-- [x] `qualification.yml`; PR #28 merged (`f6c8b4e`).
+- [x] `qualification.yml`; PR #28 merged (`f6c8b4e`). Removed on 2026-10-08: load tests run locally.
 - [x] First run, 2026-10-08 (run 37833914527, defaults). Correctness and cleanup clean everywhere: linux-x64 burst 10,500 and soak 10,199 jobs, win-x64 burst 10,500 and soak 6,853, osx-arm64 smoke 1,100; no unexpected status, no output mismatch, no output left by a failed job, no retry, every worker (8 + 32 + 8 + 26 + 8 started) gone 5 s after dispose, no file left. Self-contained publish works on all three. Verdicts: win-x64 soak PASS; both bursts and the linux-x64 soak "investigate". Not leaks:
   - Linux idle memory sits at the glibc high-water mark: soak long-lived worker 377, 422, 426, 426, 427 MB working set (flat for the last 6,000 jobs); the bursts compared a 500-job warm-up reading with the end (+17% to +43%).
   - win-x64 burst: only the coordinator, private 28.8 -> 37.8 MB while its managed heap went 7.8 -> 5.8 MB, after a 92 MB managed peak (stream inputs spooled in memory); GC keeps the committed pages. The soak coordinator stayed at 31-34 MB.

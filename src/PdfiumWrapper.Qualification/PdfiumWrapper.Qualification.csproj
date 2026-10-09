@@ -2,8 +2,8 @@
   <!--
     Qualification harness for PdfiumWrapper.Processing: a 10,000-job burst and a 30-minute soak
     against a pool whose workers are copies of this executable. Not packed, not a test project:
-    run it by hand or through .github/workflows/qualification.yml. See
-    ai/plans/plan-pool-qualification.md. Program.cs lists the modes and options (an XML comment
+    run it by hand on a machine we control (Windows natively, Linux in Docker), not on
+    shared CI runners. See ai/plans/plan-pool-qualification.md. Program.cs lists the modes and options (an XML comment
     cannot hold the double-dash command line).
   -->
   <PropertyGroup>
