@@ -23,7 +23,8 @@ internal sealed class Sampler : IDisposable
     private static readonly TimeSpan s_timeInterval = TimeSpan.FromSeconds(60);
 
     private readonly ConcurrentDictionary<int, byte> _live = new();
-    private readonly ConcurrentDictionary<int, byte> _seen = new();
+    // Start time of each worker, so a PID that Windows hands to another process is not taken for it.
+    private readonly ConcurrentDictionary<int, DateTime> _seen = new();
     private readonly ConcurrentDictionary<PdfPoolEventKind, long> _events = new();
     private readonly ConcurrentQueue<string> _workerEvents = new();
     private readonly List<Sample> _samples = [];
@@ -39,11 +40,25 @@ internal sealed class Sampler : IDisposable
         _timer = new Timer(_ => Take(idle: false), null, s_timeInterval, s_timeInterval);
     }
 
-    public IReadOnlyCollection<int> SeenWorkers => _seen.Keys.ToArray();
+    public int SeenWorkers => _seen.Count;
+
+    /// <summary>Workers seen during the run that are still running.</summary>
+    public int AliveWorkers()
+    {
+        int alive = 0;
+        foreach (int pid in _seen.Keys)
+        {
+            using var process = Open(pid);
+            if (process is { HasExited: false })
+                alive++;
+        }
+
+        return alive;
+    }
 
     public IReadOnlyDictionary<PdfPoolEventKind, long> EventCounts => _events;
 
-    /// <summary>Worker start, stop, crash, retirement and scaling events, in order, at most 500.</summary>
+    /// <summary>Worker start, stop, crash, retirement and scaling events, time-outs and retries, in order, at most 500.</summary>
     public IReadOnlyCollection<string> WorkerEvents => _workerEvents;
 
     public List<Sample> Samples
@@ -65,7 +80,8 @@ internal sealed class Sampler : IDisposable
                 break;
         }
 
-        if (e.Kind is not (PdfPoolEventKind.JobDispatched or PdfPoolEventKind.JobCompleted or PdfPoolEventKind.WorkerMessage)
+        if (e.Kind is not (PdfPoolEventKind.JobDispatched or PdfPoolEventKind.JobCompleted or PdfPoolEventKind.JobFailed
+                or PdfPoolEventKind.JobCancelled or PdfPoolEventKind.QueueFull or PdfPoolEventKind.WorkerMessage)
             && _workerEvents.Count < 500)
             _workerEvents.Enqueue($"{_clock.Elapsed.TotalSeconds,8:F1}s {e}");
     }
@@ -75,7 +91,8 @@ internal sealed class Sampler : IDisposable
     {
         if (pid <= 0)
             return;
-        _seen.TryAdd(pid, 0);
+        if (!_seen.ContainsKey(pid))
+            _seen.TryAdd(pid, StartTime(pid));
         _live.TryAdd(pid, 0);
     }
 
@@ -96,8 +113,8 @@ internal sealed class Sampler : IDisposable
             {
                 try
                 {
-                    using var process = Process.GetProcessById(pid);
-                    if (process.HasExited)
+                    using var process = Open(pid);
+                    if (process is null || process.HasExited)
                     {
                         _live.TryRemove(pid, out _);
                         continue;
@@ -121,4 +138,38 @@ internal sealed class Sampler : IDisposable
     }
 
     public void Dispose() => _timer.Dispose();
+
+    /// <summary>The worker with this PID, or null when it has exited, even if another process now has the PID.</summary>
+    private Process? Open(int pid)
+    {
+        if (!_seen.TryGetValue(pid, out var started) || started == default)
+            return null;
+        try
+        {
+            var process = Process.GetProcessById(pid);
+            // Within a second: on Linux the start time is derived from the boot time and can shift slightly.
+            if ((process.StartTime - started).Duration() < TimeSpan.FromSeconds(1))
+                return process;
+            process.Dispose();
+        }
+        catch (Exception)
+        {
+            // Gone, or not ours to read.
+        }
+
+        return null;
+    }
+
+    private static DateTime StartTime(int pid)
+    {
+        try
+        {
+            using var process = Process.GetProcessById(pid);
+            return process.StartTime;
+        }
+        catch (Exception)
+        {
+            return default;
+        }
+    }
 }
