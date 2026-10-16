@@ -284,7 +284,7 @@ Key measurements (one machine: i7-13700F, 24 logical processors, win-x64):
 
 ## In progress
 
-- Nothing active.
+- Nothing active. Planned, not started: linux-musl-x64 (Alpine) support, `ai/plans/plan-linux-musl-x64.md` (2026-10-16). Today every Linux native is a glibc build and the resolver maps Alpine to `linux-x64`, so the library cannot run on Alpine images.
 
 Historical:
 
@@ -297,6 +297,8 @@ Historical:
 - Nothing active. Verification is complete; the stride overflow edge case awaits correction. The four original review reproductions are resolved.
 
 ## Next recommended step
+
+- If Alpine support is wanted: start `plan-linux-musl-x64.md` Phase 1 (build the musl natives in an `alpine:3.20` container, commit `src/libs/linux-musl-x64/`), then the resolver and packaging changes. Ships as 2.1.0 (fifth runtime package).
 
 - Pool qualification run, then cut `release/2.0.0`. Optional: run the suite on osx-x64 (x64 .NET SDK under Rosetta, or a macOS Intel CI runner).
 
@@ -353,6 +355,7 @@ Earlier notes:
 
 ## Recently changed files
 
+- musl plan (2026-10-16): new `ai/plans/plan-linux-musl-x64.md`, `ai/current-state.md`.
 - RemoveObject leak fix (2026-10-03, PR #22): `src/PdfiumWrapper/PdfPage.cs`, `src/PdfiumWrapper.Tests/PdfPageEditingTests.cs`, `docs/API-REFERENCE.md`, `ai/current-state.md`.
 
 - Audit low fixes (2026-10-03): `icon.png`, `logos/PdfiumWrapperLogo.svg`, `src/PdfiumWrapper.runtime/PdfiumWrapper.runtime.csproj`; `src/PdfiumWrapper/`: new `NativeText.cs`, `PdfiumException.cs`; `PDFium*.cs`, `LibTiff.cs`, `LibTurboJpeg.cs`, `JpegDecoder.cs`, `PdfDocument.cs`, `PdfPage.cs`, `PdfPageObject.cs`, `PdfFormObject.cs`, `PdfTextObject.cs`, `PdfImageObject.cs`, `PdfPathObject.cs`, `PdfMetadata.cs`, `PdfBookmarks.cs`, `PdfAttachments.cs`, `PdfForm.cs`, `PdfMerger.cs`, `PdfHelpers.cs`, `PixelConverter.cs`, `PooledFileWriter.cs`; `src/PdfiumWrapper.Processing/` (AUD-024: `PdfProcessingPool*.cs`, `PdfWorkerHost.cs`, `Worker.cs`, new `WorkerJobObject.cs`, `PdfJobResult.cs`, csproj); `src/PdfiumWrapper.Tests.Host/WorkerFaults.cs`; `src/PdfiumWrapper.Tests/`: new `NativeBoundaryTests.cs`, `Processing/PoolHygieneTests.cs`, `Docs/encrypted.pdf`; updated load-failure assertions in five test files; `README.md`, `AGENTS.md`, `docs/API-REFERENCE.md`, `docs/BEST-PRACTICES.md`, `docs/EXAMPLES.md`, `docs/HIGH-THROUGHPUT-PROCESSING.md`, `ai/current-state.md`.
