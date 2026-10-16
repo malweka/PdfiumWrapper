@@ -27,15 +27,18 @@ Workload (deterministic, seeded):
 Modes:
 
 - `burst`: N jobs (default 10,000) submitted as fast as backpressure allows (pool `QueueCapacity` 256, harness keeps 512 in flight), then a 500-document batch through the batch API.
-- `soak`: runs for M minutes (default 30) in cycles of 4 minutes at full load, an idle reading, and 90 s at one job at a time, so the pool scales up and back down to `MinWorkers` (idle timeout 60 s) every cycle.
+- `soak`: runs for M minutes (default 30) in cycles of 2 minutes at full load, an idle reading, and 90 s at one job at a time, so the pool scales up and back down to `MinWorkers` (idle timeout 60 s) every cycle.
 - Both: `MinWorkers = 2`, `MaxWorkers = 8`.
 
-Measured and reported (JSON plus a Markdown summary, also written to `GITHUB_STEP_SUMMARY`):
+Measured and reported (JSON plus a Markdown summary):
 
 - Status counts, unexpected statuses, retries, output mismatches, timings p50/p95/p99, pool statistics and events.
 - Each worker's and the coordinator's working set, private bytes and handle count every 1,000 jobs and every 60 s under load (information only: a reading under load mostly reflects which documents the worker holds; the first local soak swung -40% to +78% between readings with no trend).
-- Idle readings decide growth: taken 2 s after the queue drains. Burst: after a warm-up (10% of the jobs, at most 500), every 2,500 jobs and at the end. Soak: after every 4-minute full-load period and at the end; the two `MinWorkers` workers live through every cycle. Growth is the second against the last idle reading, judged with at least three; over the limit means above 10% and above 8 MB (20 handles). The first reading is not the baseline: glibc keeps freed memory, so idle memory on Linux sits near the high-water mark, which is still rising at warm-up (first CI run: +17% to +43% from warm-up to the end of the burst, while the soak's long-lived worker went 377, 422, 426, 426, 427 MB). Smoke runs report growth without judging it.
-- End state: no worker process alive 5 s after `DisposeAsync`, no file left in the output root or the pool temp directory.
+- Idle readings decide growth: taken 2 s after the queue drains (a Linux worker trims its heap after 1 s idle). Burst: after a warm-up (10% of the jobs, at most 500), every 1,000 jobs and at the end. Soak: after every 2-minute full-load period and at the end; the two `MinWorkers` workers live through every cycle. Readings with no job between them count once.
+- Growth rule (since 2026-10-08): the end of the run (median of the last three idle readings) against the highest idle reading of the first half, on the readings after the first (warm-up); judged with at least six. Over the limit: above 10% and above 8 MB (20 handles). A plateau passes; a leak of 0.5 KB per job fails a 38,000-job soak. Memory is private bytes on Windows (committed memory) and the working set elsewhere: on Linux `PrivateMemorySize64` is address space (8 MB per thread stack included) and on macOS .NET reports it as 0. Smoke runs report growth without judging it.
+  - Why not the first or second reading against the last: allocators keep a high-water mark that rises in steps early on (glibc on Linux; the heap and the GC on Windows), so those comparisons flagged plateaus. With readings every 2,500 jobs or every 5.5 minutes, the longest-lived process had only 4-5 readings after warm-up, too few to tell a plateau from a slow rise (Windows soak worker: 39, 41, 41, 48, 47 MB).
+- End state: no worker process alive 5 s after `DisposeAsync`, no file left in the output root or the pool temp directory. A worker is matched by PID and start time (within 1 s): Windows hands a freed PID to other processes, and the first 60-minute soak counted a search indexer that had taken a worker's PID.
+- Worker events in the report: starts, stops, crashes, retirements, scaling, time-outs and retries (at most 500). Failed jobs and `QueueFull` are counted only: they filled the list within 18 s.
 
 Exit code: 0 pass; 1 a correctness or cleanup check failed; 2 only idle growth over the limit (investigate, per the plan: do not recycle workers to hide it).
 
@@ -71,7 +74,7 @@ Run builds one after another, never at the same time, and run each at least twic
 
 ## Results (2026-10-08, final code = PR #29 + PR #30)
 
-**Verdict: qualified.** Every run returned every job with the expected status and output identical to the in-process call, left nothing behind, and every worker was gone 5 s after dispose. Memory levels off on both platforms; nothing leaks. The remaining exit-2 verdicts come from the harness's growth rule (open item below), not from the pool.
+**Verdict: qualified.** Every run returned every job with the expected status and output identical to the in-process call, left nothing behind, and every worker was gone 5 s after dispose. Memory levels off on both platforms; nothing leaks. The exit-2 verdicts below came from the old growth rule; the current rule passes the soaks (see "Growth rule check").
 
 All runs: MinWorkers 2, MaxWorkers 8, seed 1, self-contained publish, one machine (24 cores; Linux in Docker, `mcr.microsoft.com/dotnet/sdk:10.0`, Debian 12).
 
@@ -101,6 +104,24 @@ Other findings:
 - GitHub runners were 4-5x slower than this machine (Linux burst 29-36 min, p50 processing 315-528 ms) and their timings varied; their correctness results agreed with the local runs.
 - On macOS .NET reports private bytes and handle count as 0; only working set is available.
 
+### Growth rule check (2026-10-08, branch `fix/harness-growth-rule`)
+
+The current rule on three soaks. The two Linux soaks ran one after the other in Docker while the Windows soak ran natively, so the machine was shared and the job counts are not comparable with the table above. Correctness and cleanup clean in all three.
+
+| Run | Jobs | Process | Idle memory, in order (MB) | First-half high -> end | Verdict | Old rule |
+|---|---|---|---|---|---|---|
+| win-x64 soak, 60 min | 36,836 | longest-lived worker, private | 26, 30, 32, 33, 39, 40, 42, 44, 41, 45, 45, 45, 45, 44, 44 | 44 -> 44 MB (+1.6%) | ok | over (30 -> 44 MB) |
+| | | coordinator, private | 32, 33, 37, 38, 37, 37, 37, 35, 37, 37, 38, 37, 38, 38, 38 | 38 -> 38 MB (+0.5%) | ok | ok |
+| linux-x64 soak, 30 min | 24,794 | longest-lived worker, working set | 102, 105, 104, 104, 103, 106, 106, 106 | 105 -> 106 MB (+0.4%) | ok | ok |
+| | | coordinator, working set | 126, 131, 135, 138, 144, 147, 147, 152 | 138 -> 147 MB (+6.3%) | ok | over (131 -> 152 MB) |
+| linux-x64 soak, 30 min, `MALLOC_ARENA_MAX=2` on the container | 28,161 | longest-lived worker, working set | 103, 106, 102, 102, 103, 103, 104, 104 | 106 -> 104 MB (-1.5%) | ok | ok |
+| | | coordinator, working set | 123, 124, 126, 127, 126, 126, 127, 127 | 127 -> 127 MB (+0.4%) | ok | ok |
+
+- The Windows worker climbs until about 21,600 jobs and then holds at 41-45 MB for the last 15,000: a plateau, now passed.
+- The Linux coordinator's rise is glibc arena retention: with `MALLOC_ARENA_MAX=2` on the container it is flat at 123-127 MB. The harness process gets no allocator setting by default (only workers do), so this is the case the docs cover with `ENV MALLOC_ARENA_MAX=2`. It passes the rule (under 10%), but it was still rising at the end: a longer soak without the variable would trip it.
+- A 30-minute soak gives 8 idle readings, enough to judge the two `MinWorkers` workers and the coordinator; workers started by scaling live 1-3 cycles and are reported, not judged.
+- The 60-minute Windows run first failed its cleanup check (1 of 92 workers "alive" after dispose): PID 11952 belonged to `SearchProtocolHost`, started during the run. Fixed by matching the start time; the smoke runs on both platforms report 0 alive.
+
 ## Checklist
 
 - [x] Harness project, added to the solution.
@@ -122,7 +143,7 @@ Other findings:
   | also `MALLOC_MMAP_THRESHOLD_=131072` (2 runs) | 7.5 min | 108-113 / 3,690-3,710 ms | 107-121 MB | 64-69 MB |
 
   Shipped: the second row (no throughput cost); the threshold is a documented opt-in. The arena-only runs still exit 2 on the coordinator (the harness process gets no variable; 125 -> 147 MB working set, high-water, same as before the fix). The CI run of the first version (37849740630, cancelled in the soak) agreed: idle workers 66-72 MB.
-- [ ] Harness growth rule: on Linux judge VmRSS (working set), not private bytes (address space incl. 8 MB thread stacks); judge the trend over the last readings (Windows soak private bytes 32, 39, 41, 41, 48, 47, 47 MB levels off but trips second-vs-last).
+- [x] Harness growth rule (branch `fix/harness-growth-rule`): working set on Linux and macOS, private bytes on Windows; end median against the first half's high; idle readings every 1,000 jobs (burst) and every 2-minute load period (soak); workers matched by PID and start time. Checked on a 60-minute Windows soak and two 30-minute Linux soaks: all pass, see "Growth rule check".
 - [x] Review the reports. Linux growth investigated (glibc retention, fixed in PR #30); Windows and the coordinator level off. See Results.
 - [x] Record the results in `plan-pdfium-concurrency.md` (tick the Phase 6 qualification item and the self-contained publish), `ai/tmp/release-2.0-checklist.md` item 6 and `ai/current-state.md`.
 - [ ] Release Processing per the release decision above. CHANGELOG: drop the "not published yet" note.
