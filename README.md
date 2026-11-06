@@ -40,13 +40,13 @@ See [High-Throughput Processing](docs/HIGH-THROUGHPUT-PROCESSING.md#worker-pool)
 ## Requirements
 
 - .NET 10.0 or later (2.0 targets `net10.0` only)
-- Windows x64, Linux x64, or macOS x64/ARM64
+- Windows x64, Linux x64 (glibc, or musl such as Alpine), or macOS x64/ARM64
 - On Windows, the Visual C++ 2015-2022 x64 runtime (`tiff.dll` and `pdfium_png.dll` link against it; it is present on most machines)
 
-The native libraries (PDFium, libtiff + tiff_shim, libjpeg-turbo, pdfium_png) ship in four runtime packages, `PdfiumWrapper.runtime.win-x64`, `linux-x64`, `osx-x64` and `osx-arm64`. `PdfiumWrapper` depends on all four, so `dotnet add package PdfiumWrapper` is all you need:
+The native libraries (PDFium, libtiff + tiff_shim, libjpeg-turbo, pdfium_png) ship in five runtime packages, `PdfiumWrapper.runtime.win-x64`, `linux-x64`, `linux-musl-x64`, `osx-x64` and `osx-arm64`. `PdfiumWrapper` depends on all five, so `dotnet add package PdfiumWrapper` is all you need:
 
 - **Portable build** (no `RuntimeIdentifier`): the output gets every platform under `runtimes/<rid>/native`, and the matching one is loaded at run time.
-- **RID-specific build or publish** (for example `dotnet publish -r linux-x64`): only that platform's binaries are copied, which gives a smaller output.
+- **RID-specific build or publish** (for example `dotnet publish -r linux-x64`, or `-r linux-musl-x64` for Alpine): only that platform's binaries are copied, which gives a smaller output.
 
 ## Quick Start
 
@@ -174,9 +174,9 @@ This library includes native binaries for:
 
 - Windows (x64)
 - macOS (x64 and ARM64)
-- Linux (x64)
+- Linux (x64), glibc and musl (Alpine, `mcr.microsoft.com/dotnet/runtime:10.0-alpine` and the like, with no extra packages)
 
-Native libraries bundled: **PDFium** chromium/8076 (PDF rendering), **libtiff** 4.7.2 + **tiff_shim** (TIFF export), **libjpeg-turbo** 3.2.0 (JPEG encoding/decoding), **pdfium_png** (PNG encoding/decoding, statically links libpng 1.6.59 + zlib-ng 2.3.3). See [Building Native Libraries](docs/BUILDING-NATIVE-LIBS.md) for compilation instructions.
+Native libraries bundled: **PDFium** chromium/8138 (PDF rendering), **libtiff** 4.7.2 + **tiff_shim** (TIFF export), **libjpeg-turbo** 3.2.1 (JPEG encoding/decoding), **pdfium_png** (PNG encoding/decoding, statically links libpng 1.6.59 + zlib-ng 2.3.3). See [Building Native Libraries](docs/BUILDING-NATIVE-LIBS.md) for compilation instructions.
 
 On Linux (glibc), a long-running process that renders many pages keeps freed page memory unless `MALLOC_ARENA_MAX=2` is set before it starts. The worker pool sets it for its workers and trims idle workers; for a service that renders in-process, set it on the service or its container image. See [Memory on Linux](docs/HIGH-THROUGHPUT-PROCESSING.md#memory-on-linux).
 

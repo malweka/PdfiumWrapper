@@ -806,6 +806,14 @@ glibc reads them only when a process starts, so they have to be in the environme
 
 In a 30-minute soak with the default (38,063 jobs), the longest-lived worker stayed at 103-106 MB whenever idle.
 
+**On Alpine (musl), none of this is needed.** musl's allocator returns freed pages by itself, the variables are ignored, and the pool skips its idle trim (musl has no `malloc_trim`). The same burst on Alpine 3.24 (`sdk:10.0-alpine`, self-contained `-r linux-musl-x64`, 2.1.0; all 10,500 outputs correct):
+
+| Platform | Burst time | Median job | Worker peak | Idle worker |
+|---|---|---|---|---|
+| Alpine (musl), no settings | 8.7 min | 133 ms | 102-113 MB | 60-69 MB |
+
+Workers are as small as glibc with the threshold, without setting anything, but the burst takes about 25% longer than glibc's default: musl's allocator is slower under many threads. Choose Alpine for memory, Debian or Ubuntu for throughput.
+
 The threshold saves another 35-80 MB per worker but costs about 9% throughput, so the pool leaves it to you. Set it when memory is tighter than CPU time, for example a container with a low memory limit and many workers. A value in your application's environment, for example from the container image, is passed to the workers unchanged, and `PdfPoolOptions.WorkerEnvironment` overrides both:
 
 ```csharp
@@ -830,6 +838,15 @@ ENTRYPOINT ["dotnet", "MyPdfService.dll"]
 ```
 
 For a self-contained publish, use `mcr.microsoft.com/dotnet/runtime-deps:10.0` as the base and start the executable instead; the `ENV` line is the same.
+
+On Alpine, leave the variables out; musl ignores them, so they are harmless if an image sets them anyway:
+
+```dockerfile
+FROM mcr.microsoft.com/dotnet/aspnet:10.0-alpine
+WORKDIR /app
+COPY --from=build /app/publish .
+ENTRYPOINT ["dotnet", "MyPdfService.dll"]
+```
 
 When starting a container (`docker run`), without changing the image:
 

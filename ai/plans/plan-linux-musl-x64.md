@@ -1,6 +1,6 @@
 # Plan: linux-musl-x64 support (Alpine containers)
 
-Created 2026-10-16. Adds a fifth native platform so the library runs on Alpine-based images (`mcr.microsoft.com/dotnet/runtime:10.0-alpine` and friends). In progress since 2026-11-06 on `feature/linux-musl-x64`.
+Created 2026-10-16. Adds a fifth native platform so the library runs on Alpine-based images (`mcr.microsoft.com/dotnet/runtime:10.0-alpine` and friends). In progress since 2026-11-06 on `feature/linux-musl-x64`: Phases 1-4 done on win-x64 and Linux; macOS natives and the release remain.
 
 ## Context
 
@@ -120,12 +120,18 @@ Qualification (`src/PdfiumWrapper.Qualification`, see `plan-pool-qualification.m
 
 ## Phase 4: Docs and release notes
 
-- [ ] `README.md`: "four runtime packages" becomes five; list `linux-musl-x64`; mention Alpine in the platform list and the `dotnet publish -r linux-musl-x64` example.
-- [ ] `docs/TROUBLESHOOTING.md`: drop `linux-musl-x64` from the "gets no natives" example (leave `linux-arm64`). In "Linux missing dependencies", split the Alpine line: `apk add fontconfig freetype` plus a font package, and say what is already in the .NET Alpine images (`libgcc`, `zlib`). Add the loader error text a glibc binary produces on musl ("Error relocating ... symbol not found" or "Dynamic loading not supported") as a symptom pointing at a package version before 2.1.0.
-- [ ] `docs/HIGH-THROUGHPUT-PROCESSING.md` (Memory on Linux): add the Alpine numbers from the qualification run and a container example on `runtime:10.0-alpine` (no `ENV MALLOC_ARENA_MAX` needed; keep it harmless if present).
-- [ ] `AGENTS.md`: "four runtime packages" to five in Packaging and Changelog notes; `build-natives.sh --target linux-musl-x64` in the build commands; the resolver's musl detection under the P/Invoke layer notes; test count and platforms in "When Making Changes".
-- [ ] `CHANGELOG.md` 2.1.0 entry: new `PdfiumWrapper.runtime.linux-musl-x64` package, Alpine support, the resolver change, and that older versions fail at first native call on Alpine rather than at restore.
+- [x] `README.md`: "four runtime packages" becomes five; list `linux-musl-x64`; mention Alpine in the platform list and the `dotnet publish -r linux-musl-x64` example.
+- [x] `docs/TROUBLESHOOTING.md`: drop `linux-musl-x64` from the "gets no natives" example (leave `linux-arm64`). In "Linux missing dependencies", split the Alpine line: `apk add fontconfig freetype` plus a font package, and say what is already in the .NET Alpine images (`libgcc`, `zlib`). Add the loader error text a glibc binary produces on musl ("Error relocating ... symbol not found" or "Dynamic loading not supported") as a symptom pointing at a package version before 2.1.0.
+- [x] `docs/HIGH-THROUGHPUT-PROCESSING.md` (Memory on Linux): add the Alpine numbers from the qualification run and a container example on `runtime:10.0-alpine` (no `ENV MALLOC_ARENA_MAX` needed; keep it harmless if present).
+- [x] `AGENTS.md`: "four runtime packages" to five in Packaging and Changelog notes; `build-natives.sh --target linux-musl-x64` in the build commands; the resolver's musl detection under the P/Invoke layer notes; test count and platforms in "When Making Changes".
+- [x] `CHANGELOG.md` 2.1.0 entry: new `PdfiumWrapper.runtime.linux-musl-x64` package, Alpine support, the resolver change, and that older versions fail at first native call on Alpine rather than at restore.
 - [ ] Bump `Version` to 2.1.0 in `PdfiumWrapper.csproj`, `PdfiumWrapper.runtime.csproj` and the Processing pin (`PinCoreDependencyVersion`, `[2.1.0]`), then release from `release/2.1.0` with `publish_processing` ticked, since Processing pins the exact core version.
+
+### Phase 4 as built (2026-11-06)
+
+- Docs: `README.md` (five runtime packages, musl in the requirements and platform list, `-r linux-musl-x64`, the new versions), `docs/TROUBLESHOOTING.md` (`linux-musl-x64` dropped from "gets no natives"; the pre-2.1.0 Alpine failure with the real loader message; the "Linux missing dependencies" entry rewritten: the natives need only the C library, a font package only for non-embedded fonts; the old `apk add fontconfig freetype` advice was not needed), `docs/HIGH-THROUGHPUT-PROCESSING.md` (Alpine numbers and an Alpine `Dockerfile`), `AGENTS.md`, `CHANGELOG.md` (2.1.0, unreleased).
+- `Version` is 2.1.0 in `PdfiumWrapper.csproj`, `PdfiumWrapper.runtime.csproj` and `PdfiumWrapper.Processing.csproj`; Processing's pin follows the core version (`PinCoreDependencyVersion`). The solution builds with no warning.
+- **Not done: the release.** It waits for the osx-arm64 and osx-x64 natives at PDFium 8138 / libjpeg-turbo 3.2.1 (owner, on a Mac), a green PR run including the new Alpine job, and the owner's go-ahead. Then: merge, create `release/2.1.0` from `main`, run `release.yml` with `publish_processing` ticked, and date the CHANGELOG entry.
 
 ## Risks and open questions
 
