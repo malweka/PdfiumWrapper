@@ -32,10 +32,10 @@ setlocal enabledelayedexpansion
 
 REM ---- Library versions (override from caller env if set) ----
 if not defined LIBTIFF_VERSION       set LIBTIFF_VERSION=4.7.2
-if not defined LIBJPEG_TURBO_VERSION set LIBJPEG_TURBO_VERSION=3.2.0
+if not defined LIBJPEG_TURBO_VERSION set LIBJPEG_TURBO_VERSION=3.2.1
 if not defined ZLIB_NG_VERSION       set ZLIB_NG_VERSION=2.3.3
 if not defined LIBPNG_VERSION        set LIBPNG_VERSION=1.6.59
-if not defined PDFIUM_VERSION        set PDFIUM_VERSION=8076
+if not defined PDFIUM_VERSION        set PDFIUM_VERSION=8138
 
 REM ---- Source URLs ----
 set LIBTIFF_URL=https://download.osgeo.org/libtiff/tiff-%LIBTIFF_VERSION%.zip

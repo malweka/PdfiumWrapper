@@ -11,10 +11,10 @@ set -euo pipefail
 
 # Library versions (override via env or CLI flag)
 : "${LIBTIFF_VERSION:=4.7.2}"
-: "${LIBJPEG_TURBO_VERSION:=3.2.0}"
+: "${LIBJPEG_TURBO_VERSION:=3.2.1}"
 : "${ZLIB_NG_VERSION:=2.3.3}"
 : "${LIBPNG_VERSION:=1.6.59}"
-: "${PDFIUM_VERSION:=8076}"
+: "${PDFIUM_VERSION:=8138}"
 
 # Source URLs (templated; rarely overridden)
 LIBTIFF_URL="https://download.osgeo.org/libtiff/tiff-${LIBTIFF_VERSION}.zip"
@@ -40,7 +40,7 @@ Usage: build-natives.sh [--target <rid>] [--only <lib>[,<lib>...]] [--clean] [--
                         [--libtiff-version X] [--libjpeg-turbo-version X]
                         [--zlib-ng-version X] [--libpng-version X] [--pdfium-version Y]
 
-  --target      osx-arm64 | osx-x64 | linux-x64 | host (default: host)
+  --target      osx-arm64 | osx-x64 | linux-x64 | linux-musl-x64 | host (default: host)
   --only        pdfium,libtiff,tiff_shim,libjpeg_turbo,pdfium_png (default: all)
   --clean       wipe _native_build before starting
   --no-pdfium   skip pdfium download step
@@ -152,7 +152,14 @@ detect_host_rid() {
     case "${kernel}:${machine}" in
         Darwin:arm64) printf 'osx-arm64' ;;
         Darwin:x86_64) printf 'osx-x64' ;;
-        Linux:x86_64|Linux:amd64) printf 'linux-x64' ;;
+        Linux:x86_64|Linux:amd64)
+            # musl (Alpine) has its own loader; glibc binaries do not load there.
+            if compgen -G '/lib/ld-musl-*.so.1' >/dev/null; then
+                printf 'linux-musl-x64'
+            else
+                printf 'linux-x64'
+            fi
+            ;;
         *) die "unsupported host platform: ${kernel} ${machine}" ;;
     esac
 }
@@ -163,7 +170,7 @@ normalize_target() {
     fi
 
     case "${TARGET}" in
-        osx-arm64|osx-x64|linux-x64) ;;
+        osx-arm64|osx-x64|linux-x64|linux-musl-x64) ;;
         *) die "unsupported target: ${TARGET}" ;;
     esac
 }
@@ -279,18 +286,64 @@ ensure_libtiff_source() {
         "${BUILD_DIR}/tiff-${LIBTIFF_VERSION}.zip"
 }
 
+# The image each Linux target is built in. musl has no symbol versioning, so a build on an older
+# Alpine loads on newer ones; pin the tag, never alpine:latest.
+linux_image_for_rid() {
+    local rid="$1"
+
+    case "${rid}" in
+        linux-x64) printf 'ubuntu:22.04' ;;
+        linux-musl-x64) printf 'alpine:3.20' ;;
+        *) die "not a Linux target: ${rid}" ;;
+    esac
+}
+
+# The lines that install a build container's packages: apt on Ubuntu, apk on Alpine.
+linux_install_packages() {
+    local rid="$1"
+    local debian_packages="$2"
+    local alpine_packages="$3"
+
+    case "${rid}" in
+        linux-x64)
+            printf 'export DEBIAN_FRONTEND=noninteractive\napt-get update\napt-get install -y %s\n' "${debian_packages}"
+            ;;
+        linux-musl-x64)
+            printf 'apk add --no-cache %s\n' "${alpine_packages}"
+            ;;
+        *) die "not a Linux target: ${rid}" ;;
+    esac
+}
+
 docker_run_linux_build() {
-    local script="$1"
+    local rid="$1"
+    local script="$2"
+    local image
 
     require_command docker
+    image="$(linux_image_for_rid "${rid}")"
 
-    docker run --rm --platform linux/amd64 \
-        -v "${ROOT_DIR}:/src" \
-        -w /src \
-        -e "HOST_UID=$(id -u)" \
-        -e "HOST_GID=$(id -g)" \
-        ubuntu:22.04 \
-        bash -lc "${script}"
+    # MSYS_NO_PATHCONV: under Git Bash on Windows, MSYS would rewrite /src and the paths inside the
+    # script into Windows paths. It has no effect anywhere else.
+    if [[ "${rid}" == linux-musl-* ]]; then
+        # Alpine has no bash: install it, then run the same script as on Ubuntu.
+        MSYS_NO_PATHCONV=1 docker run --rm --platform linux/amd64 \
+            -v "${ROOT_DIR}:/src" \
+            -w /src \
+            -e "HOST_UID=$(id -u)" \
+            -e "HOST_GID=$(id -g)" \
+            -e "BUILD_SCRIPT=${script}" \
+            "${image}" \
+            sh -c 'apk add --no-cache bash >/dev/null && exec bash -c "${BUILD_SCRIPT}"'
+    else
+        MSYS_NO_PATHCONV=1 docker run --rm --platform linux/amd64 \
+            -v "${ROOT_DIR}:/src" \
+            -w /src \
+            -e "HOST_UID=$(id -u)" \
+            -e "HOST_GID=$(id -g)" \
+            "${image}" \
+            bash -lc "${script}"
+    fi
 }
 
 selected_libs() {
@@ -337,6 +390,7 @@ pdfium_archive_url() {
         osx-arm64) archive_rid="mac-arm64" ;;
         osx-x64) archive_rid="mac-x64" ;;
         linux-x64) archive_rid="linux-x64" ;;
+        linux-musl-x64) archive_rid="linux-musl-x64" ;;
         *) die "unsupported PDFium target: ${rid}" ;;
     esac
 
@@ -493,27 +547,54 @@ build_libtiff_macos() {
 }
 
 build_libtiff_linux() {
+    local rid="$1"
     local source_dir
     local build_dir
     local out_dir
     local source_lib
     local destination_lib
+    local zlib_src
+    local zlib_build
+    local zlib_install
+    local zlib_step=""
+    local zlib_flags=""
     local docker_script
 
     PHASE="libtiff"
 
     source_dir="/src/_native_build/tiff-${LIBTIFF_VERSION}"
-    build_dir="${source_dir}/build-linux-x64"
-    out_dir="/src/src/libs/linux-x64"
+    build_dir="${source_dir}/build-${rid}"
+    out_dir="/src/src/libs/${rid}"
     source_lib="${build_dir}/libtiff/libtiff.so"
     destination_lib="${out_dir}/libtiff.so"
 
+    # On musl, zlib is linked statically, so the package needs no zlib at run time. It is the same
+    # zlib-ng static build the pdfium_png step makes; --exclude-libs keeps its symbols out of
+    # libtiff's exports. The glibc build links the system libz.so.1, as it always has.
+    if [[ "${rid}" == linux-musl-* ]]; then
+        zlib_src="/src/_native_build/zlib-ng-${ZLIB_NG_VERSION}"
+        zlib_build="${zlib_src}/build-${rid}"
+        zlib_install="/src/_native_build/zlib-ng-install-${rid}"
+        zlib_step="
+cmake -S '${zlib_src}' -B '${zlib_build}' \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DBUILD_SHARED_LIBS=OFF \
+    -DZLIB_COMPAT=ON \
+    -DZLIB_ENABLE_TESTS=OFF \
+    -DCMAKE_POSITION_INDEPENDENT_CODE=ON
+cmake --build '${zlib_build}' --config Release
+cmake --install '${zlib_build}' --prefix '${zlib_install}'
+test -f '${zlib_install}/lib/libz.a'"
+        # One line, empty on glibc: it is placed on the cmake line itself, where an empty value
+        # cannot break the command's line continuations.
+        zlib_flags="-DZLIB_INCLUDE_DIR='${zlib_install}/include' -DZLIB_LIBRARY='${zlib_install}/lib/libz.a' '-DCMAKE_SHARED_LINKER_FLAGS=-Wl,--exclude-libs,ALL'"
+    fi
+
     docker_script="
 set -euo pipefail
-export DEBIAN_FRONTEND=noninteractive
-apt-get update
-apt-get install -y build-essential cmake zlib1g-dev libjpeg-dev curl unzip patchelf
-cmake -S '${source_dir}' -B '${build_dir}' \
+$(linux_install_packages "${rid}" "build-essential cmake zlib1g-dev libjpeg-dev curl unzip patchelf" "build-base cmake patchelf")
+${zlib_step}
+cmake -S '${source_dir}' -B '${build_dir}' ${zlib_flags} \
     -DCMAKE_BUILD_TYPE=Release \
     -DBUILD_SHARED_LIBS=ON \
     -Dtiff-tools=OFF \
@@ -531,22 +612,25 @@ test -f '${source_lib}'
 mkdir -p '${out_dir}'
 cp -f '${source_lib}' '${destination_lib}'
 patchelf --set-soname libtiff.so '${destination_lib}'
-chown -R \"\${HOST_UID}:\${HOST_GID}\" /src/_native_build /src/src/libs/linux-x64
+chown -R \"\${HOST_UID}:\${HOST_GID}\" /src/_native_build '${out_dir}'
 "
 
-    log "Building libtiff ${LIBTIFF_VERSION} for linux-x64 in Docker"
-    docker_run_linux_build "${docker_script}"
-    log "Installed ${ROOT_DIR}/src/libs/linux-x64/libtiff.so"
+    log "Building libtiff ${LIBTIFF_VERSION} for ${rid} in Docker"
+    docker_run_linux_build "${rid}" "${docker_script}"
+    log "Installed ${ROOT_DIR}/src/libs/${rid}/libtiff.so"
 }
 
 build_libtiff() {
     local rid="$1"
 
     ensure_libtiff_source
+    if [[ "${rid}" == linux-musl-* ]]; then
+        ensure_zlib_ng_source
+    fi
 
     case "${rid}" in
         osx-*) build_libtiff_macos "${rid}" ;;
-        linux-x64) build_libtiff_linux ;;
+        linux-*) build_libtiff_linux "${rid}" ;;
         *) die "unsupported libtiff target: ${rid}" ;;
     esac
 }
@@ -605,6 +689,7 @@ build_tiff_shim_macos() {
 }
 
 build_tiff_shim_linux() {
+    local rid="$1"
     local source_dir
     local build_dir
     local out_dir
@@ -615,16 +700,14 @@ build_tiff_shim_linux() {
     PHASE="tiff_shim"
 
     source_dir="/src/_native_build/tiff-${LIBTIFF_VERSION}"
-    build_dir="${source_dir}/build-linux-x64"
-    out_dir="/src/src/libs/linux-x64"
+    build_dir="${source_dir}/build-${rid}"
+    out_dir="/src/src/libs/${rid}"
     libtiff_path="${out_dir}/libtiff.so"
     destination_lib="${out_dir}/libtiff_shim.so"
 
     docker_script="
 set -euo pipefail
-export DEBIAN_FRONTEND=noninteractive
-apt-get update
-apt-get install -y build-essential zlib1g-dev libjpeg-dev patchelf
+$(linux_install_packages "${rid}" "build-essential zlib1g-dev libjpeg-dev patchelf" "build-base patchelf")
 test -f '${libtiff_path}'
 test -f '${build_dir}/libtiff/tiffconf.h'
 cc -shared -fPIC -o '${destination_lib}' /src/src/native/tiff_shim.c \
@@ -634,12 +717,12 @@ cc -shared -fPIC -o '${destination_lib}' /src/src/native/tiff_shim.c \
     -ltiff
 patchelf --replace-needed libtiff.so.6 libtiff.so '${destination_lib}'
 patchelf --set-rpath '\$ORIGIN' '${destination_lib}'
-chown -R \"\${HOST_UID}:\${HOST_GID}\" /src/_native_build /src/src/libs/linux-x64
+chown -R \"\${HOST_UID}:\${HOST_GID}\" /src/_native_build '${out_dir}'
 "
 
-    log "Building tiff_shim for linux-x64 in Docker"
-    docker_run_linux_build "${docker_script}"
-    log "Installed ${ROOT_DIR}/src/libs/linux-x64/libtiff_shim.so"
+    log "Building tiff_shim for ${rid} in Docker"
+    docker_run_linux_build "${rid}" "${docker_script}"
+    log "Installed ${ROOT_DIR}/src/libs/${rid}/libtiff_shim.so"
 }
 
 build_tiff_shim() {
@@ -649,7 +732,7 @@ build_tiff_shim() {
 
     case "${rid}" in
         osx-*) build_tiff_shim_macos "${rid}" ;;
-        linux-x64) build_tiff_shim_linux ;;
+        linux-*) build_tiff_shim_linux "${rid}" ;;
         *) die "unsupported tiff_shim target: ${rid}" ;;
     esac
 }
@@ -728,6 +811,7 @@ build_libjpeg_turbo_macos() {
 }
 
 build_libjpeg_turbo_linux() {
+    local rid="$1"
     local source_dir
     local build_dir
     local out_dir
@@ -738,16 +822,14 @@ build_libjpeg_turbo_linux() {
     PHASE="libjpeg_turbo"
 
     source_dir="/src/_native_build/libjpeg-turbo-${LIBJPEG_TURBO_VERSION}"
-    build_dir="${source_dir}/build-linux-x64"
-    out_dir="/src/src/libs/linux-x64"
+    build_dir="${source_dir}/build-${rid}"
+    out_dir="/src/src/libs/${rid}"
     source_lib="${build_dir}/libturbojpeg.so"
     destination_lib="${out_dir}/libturbojpeg.so"
 
     docker_script="
 set -euo pipefail
-export DEBIAN_FRONTEND=noninteractive
-apt-get update
-apt-get install -y build-essential cmake nasm patchelf
+$(linux_install_packages "${rid}" "build-essential cmake nasm patchelf" "build-base cmake nasm patchelf")
 cmake -S '${source_dir}' -B '${build_dir}' \
     -DCMAKE_BUILD_TYPE=Release \
     -DBUILD_SHARED_LIBS=ON \
@@ -759,12 +841,12 @@ test -f '${source_lib}'
 mkdir -p '${out_dir}'
 cp -f '${source_lib}' '${destination_lib}'
 patchelf --set-soname libturbojpeg.so '${destination_lib}'
-chown -R \"\${HOST_UID}:\${HOST_GID}\" /src/_native_build /src/src/libs/linux-x64
+chown -R \"\${HOST_UID}:\${HOST_GID}\" /src/_native_build '${out_dir}'
 "
 
-    log "Building libjpeg-turbo ${LIBJPEG_TURBO_VERSION} for linux-x64 in Docker"
-    docker_run_linux_build "${docker_script}"
-    log "Installed ${ROOT_DIR}/src/libs/linux-x64/libturbojpeg.so"
+    log "Building libjpeg-turbo ${LIBJPEG_TURBO_VERSION} for ${rid} in Docker"
+    docker_run_linux_build "${rid}" "${docker_script}"
+    log "Installed ${ROOT_DIR}/src/libs/${rid}/libturbojpeg.so"
 }
 
 build_libjpeg_turbo() {
@@ -774,7 +856,7 @@ build_libjpeg_turbo() {
 
     case "${rid}" in
         osx-*) build_libjpeg_turbo_macos "${rid}" ;;
-        linux-x64) build_libjpeg_turbo_linux ;;
+        linux-*) build_libjpeg_turbo_linux "${rid}" ;;
         *) die "unsupported libjpeg-turbo target: ${rid}" ;;
     esac
 }
@@ -859,6 +941,7 @@ build_pdfium_png_macos() {
 }
 
 build_pdfium_png_linux() {
+    local rid="$1"
     local zlib_src
     local zlib_build
     local zlib_install
@@ -871,18 +954,16 @@ build_pdfium_png_linux() {
     PHASE="pdfium_png"
 
     zlib_src="/src/_native_build/zlib-ng-${ZLIB_NG_VERSION}"
-    zlib_build="${zlib_src}/build-linux-x64"
-    zlib_install="/src/_native_build/zlib-ng-install-linux-x64"
+    zlib_build="${zlib_src}/build-${rid}"
+    zlib_install="/src/_native_build/zlib-ng-install-${rid}"
     png_src="/src/_native_build/libpng-${LIBPNG_VERSION}"
-    png_build="${png_src}/build-linux-x64-static"
-    out_dir="/src/src/libs/linux-x64"
+    png_build="${png_src}/build-${rid}-static"
+    out_dir="/src/src/libs/${rid}"
     destination_lib="${out_dir}/libpdfium_png.so"
 
     docker_script="
 set -euo pipefail
-export DEBIAN_FRONTEND=noninteractive
-apt-get update
-apt-get install -y build-essential cmake
+$(linux_install_packages "${rid}" "build-essential cmake" "build-base cmake")
 cmake -S '${zlib_src}' -B '${zlib_build}' \
     -DCMAKE_BUILD_TYPE=Release \
     -DBUILD_SHARED_LIBS=OFF \
@@ -910,12 +991,12 @@ gcc -shared -O2 -fPIC -fvisibility=hidden -o '${destination_lib}' \
     '${png_build}/libpng16.a' \
     '${zlib_install}/lib/libz.a' \
     -lm
-chown -R \"\${HOST_UID}:\${HOST_GID}\" /src/_native_build /src/src/libs/linux-x64
+chown -R \"\${HOST_UID}:\${HOST_GID}\" /src/_native_build '${out_dir}'
 "
 
-    log "Building pdfium_png shim for linux-x64 in Docker"
-    docker_run_linux_build "${docker_script}"
-    log "Installed ${ROOT_DIR}/src/libs/linux-x64/libpdfium_png.so"
+    log "Building pdfium_png shim for ${rid} in Docker"
+    docker_run_linux_build "${rid}" "${docker_script}"
+    log "Installed ${ROOT_DIR}/src/libs/${rid}/libpdfium_png.so"
 }
 
 build_pdfium_png() {
@@ -926,7 +1007,7 @@ build_pdfium_png() {
 
     case "${rid}" in
         osx-*) build_pdfium_png_macos "${rid}" ;;
-        linux-x64) build_pdfium_png_linux ;;
+        linux-*) build_pdfium_png_linux "${rid}" ;;
         *) die "unsupported pdfium_png target: ${rid}" ;;
     esac
 }

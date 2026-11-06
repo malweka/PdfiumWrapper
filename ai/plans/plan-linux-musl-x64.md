@@ -1,6 +1,6 @@
 # Plan: linux-musl-x64 support (Alpine containers)
 
-Created 2026-10-16. Adds a fifth native platform so the library runs on Alpine-based images (`mcr.microsoft.com/dotnet/runtime:10.0-alpine` and friends). Not started.
+Created 2026-10-16. Adds a fifth native platform so the library runs on Alpine-based images (`mcr.microsoft.com/dotnet/runtime:10.0-alpine` and friends). In progress since 2026-11-06 on `feature/linux-musl-x64`.
 
 ## Context
 
@@ -35,17 +35,29 @@ What the shipped `linux-x64` natives link against (from their `NEEDED` entries),
 
 `src/native/build-natives.sh`:
 
-- [ ] Accept `linux-musl-x64` in `normalize_target` and in the per-library `case` tables (`libtiff_name`, `tiff_shim_name`, `turbojpeg_name`, `pdfium_png_name` all match `linux-*` already; check each `case` that lists `linux-x64` explicitly: `build_libtiff`, `build_tiff_shim`, `build_libjpeg_turbo`, `build_pdfium_png`).
-- [ ] `pdfium_archive_url`: map `linux-musl-x64` to the archive name `linux-musl-x64` (`pdfium-linux-musl-x64.tgz`). Same `PDFIUM_VERSION` (8076) as the glibc build so the two Linux packages carry the same PDFium.
-- [ ] `docker_run_linux_build`: take the image as a parameter (`ubuntu:22.04` for `linux-x64`, `alpine:3.20` for `linux-musl-x64`). Alpine has no `bash` by default: run the script with `sh -e` or `apk add bash` first. `set -o pipefail` works in Alpine's `ash`; `set -euo pipefail` as a whole does too, but keep the scripts POSIX-clean where easy.
-- [ ] Parameterise `out_dir` and `build_dir` by RID in the four Linux build functions (`/src/src/libs/${rid}`, `build-${rid}`), and the `chown` at the end of every container step.
-- [ ] Alpine package lines: `apk add --no-cache build-base cmake nasm patchelf zlib-dev curl unzip` (patchelf is in Alpine's main repo). `cc` is gcc, as on Ubuntu. No `DEBIAN_FRONTEND`.
-- [ ] `libtiff` on musl: build zlib-ng static first (the same cmake invocation `build_pdfium_png_linux` uses, installed to `/src/_native_build/zlib-ng-install-linux-musl-x64`), then pass `-DZLIB_INCLUDE_DIR` and `-DZLIB_LIBRARY=<install>/lib/libz.a` to libtiff's cmake. Keep every other codec off as in the glibc build. Confirm the result has no `libz.so.1` in `NEEDED`.
-- [ ] `tiff_shim`, `libjpeg-turbo`, `pdfium_png`: same commands as the glibc build with the Alpine package line. The `patchelf --replace-needed libtiff.so.6 libtiff.so` and `--set-rpath '$ORIGIN'` steps stay.
-- [ ] Run `bash src/native/build-natives.sh --target linux-musl-x64 --clean` on the dev machine (Docker, `--platform linux/amd64`). Commit the five files under `src/libs/linux-musl-x64/`.
-- [ ] Verify each binary from inside an Alpine container (`docker run --rm -v "$PWD:/src" alpine:3.20 sh -c 'apk add --no-cache binutils file && file /src/src/libs/linux-musl-x64/*.so && for f in /src/src/libs/linux-musl-x64/*.so; do echo "== $f"; readelf -d "$f" | grep NEEDED; done'`). Expected: interpreter `/lib/ld-musl-x86_64.so.1` where present, no `libc.so.6`, no `libz.so.1`, no `GLIBC_` symbol versions (`readelf -V`).
-- [ ] `docs/BUILDING-NATIVE-LIBS.md`: add `linux-musl-x64` to the target list, the image table, the PDFium archive table and the per-library manual command sections (one Alpine variant per section, or a note on what differs: image, `apk` line, static zlib for libtiff). Update the "four image libraries, five binaries" and `src/libs/{rid}` wording.
-- [ ] `THIRD-PARTY-NOTICES.txt`: unchanged (same components, same licences), confirm nothing in the musl PDFium archive adds a notice.
+- [x] Accept `linux-musl-x64` in `normalize_target` and in the per-library `case` tables (`libtiff_name`, `tiff_shim_name`, `turbojpeg_name`, `pdfium_png_name` all match `linux-*` already; check each `case` that lists `linux-x64` explicitly: `build_libtiff`, `build_tiff_shim`, `build_libjpeg_turbo`, `build_pdfium_png`).
+- [x] `pdfium_archive_url`: map `linux-musl-x64` to the archive name `linux-musl-x64` (`pdfium-linux-musl-x64.tgz`). Same `PDFIUM_VERSION` (8076) as the glibc build so the two Linux packages carry the same PDFium.
+- [x] `docker_run_linux_build`: take the image as a parameter (`ubuntu:22.04` for `linux-x64`, `alpine:3.20` for `linux-musl-x64`). Alpine has no `bash` by default: run the script with `sh -e` or `apk add bash` first. `set -o pipefail` works in Alpine's `ash`; `set -euo pipefail` as a whole does too, but keep the scripts POSIX-clean where easy.
+- [x] Parameterise `out_dir` and `build_dir` by RID in the four Linux build functions (`/src/src/libs/${rid}`, `build-${rid}`), and the `chown` at the end of every container step.
+- [x] Alpine package lines: `apk add --no-cache build-base cmake nasm patchelf zlib-dev curl unzip` (patchelf is in Alpine's main repo). `cc` is gcc, as on Ubuntu. No `DEBIAN_FRONTEND`.
+- [x] `libtiff` on musl: build zlib-ng static first (the same cmake invocation `build_pdfium_png_linux` uses, installed to `/src/_native_build/zlib-ng-install-linux-musl-x64`), then pass `-DZLIB_INCLUDE_DIR` and `-DZLIB_LIBRARY=<install>/lib/libz.a` to libtiff's cmake. Keep every other codec off as in the glibc build. Confirm the result has no `libz.so.1` in `NEEDED`.
+- [x] `tiff_shim`, `libjpeg-turbo`, `pdfium_png`: same commands as the glibc build with the Alpine package line. The `patchelf --replace-needed libtiff.so.6 libtiff.so` and `--set-rpath '$ORIGIN'` steps stay.
+- [x] Run `bash src/native/build-natives.sh --target linux-musl-x64 --clean` on the dev machine (Docker, `--platform linux/amd64`). Commit the five files under `src/libs/linux-musl-x64/`.
+- [x] Verify each binary from inside an Alpine container (`docker run --rm -v "$PWD:/src" alpine:3.20 sh -c 'apk add --no-cache binutils file && file /src/src/libs/linux-musl-x64/*.so && for f in /src/src/libs/linux-musl-x64/*.so; do echo "== $f"; readelf -d "$f" | grep NEEDED; done'`). Expected: interpreter `/lib/ld-musl-x86_64.so.1` where present, no `libc.so.6`, no `libz.so.1`, no `GLIBC_` symbol versions (`readelf -V`).
+- [x] `docs/BUILDING-NATIVE-LIBS.md`: add `linux-musl-x64` to the target list, the image table, the PDFium archive table and the per-library manual command sections (one Alpine variant per section, or a note on what differs: image, `apk` line, static zlib for libtiff). Update the "four image libraries, five binaries" and `src/libs/{rid}` wording.
+- [x] `THIRD-PARTY-NOTICES.txt`: unchanged (same components, same licences), confirm nothing in the musl PDFium archive adds a notice.
+
+### Phase 1 as built (2026-11-06)
+
+- **Versions upgraded with it (owner's decision, 2026-11-06).** PDFium chromium/8076 -> 8138 and libjpeg-turbo 3.2.0 -> 3.2.1 in both build scripts; libtiff 4.7.2, libpng 1.6.59 and zlib-ng 2.3.3 were already the latest. All five platforms must carry the same versions, so win-x64 and linux-x64 were rebuilt too; **osx-arm64 and osx-x64 still carry 8076 / 3.2.0 and must be rebuilt on a Mac before 2.1.0**. PDFium's public headers between 8076 and 8138 differ only by one new experimental function (`FPDF_StructElement_GetRawType`) and a removed `PDF_USE_XFA` define (XFA builds only): no struct layout the imports depend on changed.
+- **Windows host.** The Linux targets were built from Git Bash on Windows. Two fixes made that work: `.gitattributes` (`*.sh text eol=lf`; with `core.autocrlf=true` the checkout had CRLF scripts, which carried `\r` into the container scripts) and `MSYS_NO_PATHCONV=1` on every `docker run` (MSYS rewrote `-w /src` into a Windows path).
+- **Alpine runs bash.** The container installs `bash` and runs the same script as on Ubuntu (`BUILD_SCRIPT` in the environment), rather than keeping two script dialects.
+- **Package lines.** The libtiff step does not install `zlib-dev` on Alpine, so libtiff cannot pick up a shared zlib by accident; `curl` and `unzip` are not needed in the container (sources are downloaded on the host).
+- **libtiff on musl** links the static zlib-ng with `-Wl,--exclude-libs,ALL`, so it exports no zlib symbols (checked: 0).
+- **Built without `--clean`**: it wipes all of `_native_build`, and every musl and new-version directory was new anyway.
+- **Result.** No library needs `libc.so.6` or `libz.so.1`, none has a `GLIBC_` symbol version. `libpdfium.so` needs `libc.so`, which the musl loader maps to itself; the other four need `libc.musl-x86_64.so.1`; `libtiff_shim.so` finds `libtiff.so` through `$ORIGIN`. The rebuilt linux-x64 binaries have the same `NEEDED`, `SONAME` and `RUNPATH` as before.
+- **Size.** The musl `libpdfium.so` is 17.8 MB against 8.3 MB for glibc: bblanchon's musl archive keeps its debug info. Left as shipped upstream; `strip --strip-debug` would halve it if the package size matters.
+- **Notices.** Not unchanged after all: PDFium 8138 bundles dragonbox (Apache-2.0 with LLVM exceptions, and Boost), HarfBuzz and Highway, and the musl archive carries musl libc's licence in place of LLVM libc's. All five added to `THIRD-PARTY-NOTICES.txt`, with the new versions and the musl libtiff's static zlib-ng.
 
 ## Phase 2: Load the right natives at run time
 
