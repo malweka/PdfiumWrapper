@@ -95,6 +95,25 @@ public class NativeBoundaryTests
 
     #endregion
 
+    #region Native library resolution
+
+    [Fact]
+    public void Resolver_ChoosesTheRidWhoseNativesTheBuildCopied()
+    {
+        // The build copies the host's natives to runtimes/<rid>/native. If the resolver names another
+        // RID, as it did on Alpine before linux-musl-x64 (it chose the glibc linux-x64 natives), it
+        // finds nothing there and every native call fails at first use.
+        string rid = NativeLibraryResolver.GetRuntimeIdentifier();
+        string pdfium = OperatingSystem.IsWindows() ? "pdfium.dll"
+            : OperatingSystem.IsMacOS() ? "libpdfium.dylib"
+            : "libpdfium.so";
+        string path = Path.Combine(AppContext.BaseDirectory, "runtimes", rid, "native", pdfium);
+
+        Assert.True(File.Exists(path), $"The resolver chose {rid}, but {path} does not exist.");
+    }
+
+    #endregion
+
     #region Document identifier (AUD-019)
 
     [Fact]

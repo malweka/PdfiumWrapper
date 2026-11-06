@@ -92,17 +92,47 @@ internal static class NativeLibraryResolver
         return (null, null);
     }
 
-    private static string GetRuntimeIdentifier()
+    private static readonly Lazy<string> s_runtimeIdentifier = new(ComputeRuntimeIdentifier);
+
+    /// <summary>
+    /// The RID whose natives this process loads: <c>libs/{rid}</c> and <c>runtimes/{rid}/native</c>.
+    /// On Linux it is <c>linux-musl-{arch}</c> on a musl libc (Alpine), whose loader cannot load the
+    /// glibc builds, and <c>linux-{arch}</c> otherwise.
+    /// </summary>
+    internal static string GetRuntimeIdentifier() => s_runtimeIdentifier.Value;
+
+    private static string ComputeRuntimeIdentifier()
     {
         string arch = RuntimeInformation.ProcessArchitecture.ToString().ToLowerInvariant();
 
         if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
             return $"win-{arch}";
         if (RuntimeInformation.IsOSPlatform(OSPlatform.Linux))
-            return $"linux-{arch}";
+            return IsMusl() ? $"linux-musl-{arch}" : $"linux-{arch}";
         if (RuntimeInformation.IsOSPlatform(OSPlatform.OSX))
             return $"osx-{arch}";
 
         throw new PlatformNotSupportedException("Unsupported platform");
+    }
+
+    /// <summary>
+    /// True on a musl libc. The runtime's own RID says so on Alpine (<c>linux-musl-x64</c>); the musl
+    /// loader, <c>/lib/ld-musl-{arch}.so.1</c>, is checked too, so a host whose runtime reports a
+    /// non-portable RID still resolves. <c>/etc/os-release</c> is not read: other distributions use
+    /// musl without being Alpine.
+    /// </summary>
+    private static bool IsMusl()
+    {
+        if (RuntimeInformation.RuntimeIdentifier.Contains("musl", StringComparison.OrdinalIgnoreCase))
+            return true;
+
+        try
+        {
+            return Directory.Exists("/lib") && Directory.EnumerateFiles("/lib", "ld-musl-*.so.1").Any();
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            return false;
+        }
     }
 }

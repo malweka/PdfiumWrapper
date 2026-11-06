@@ -67,6 +67,16 @@
 		<PdfiumPngLibName>libpdfium_png.dylib</PdfiumPngLibName>
 	</PropertyGroup>
 
+	<!-- Building on a musl host (Alpine): the SDK's own RID says so. CI and the release workflow always pass NativeRid. -->
+	<PropertyGroup Condition="'$(NativeRid)' == '' And $([MSBuild]::IsOSPlatform('Linux')) And $(NETCoreSdkRuntimeIdentifier.Contains('musl'))">
+		<NativeRid>linux-musl-x64</NativeRid>
+		<NativeLibName>libpdfium.so</NativeLibName>
+		<TiffLibName>libtiff.so</TiffLibName>
+		<TiffShimLibName>libtiff_shim.so</TiffShimLibName>
+		<TurboJpegLibName>libturbojpeg.so</TurboJpegLibName>
+		<PdfiumPngLibName>libpdfium_png.so</PdfiumPngLibName>
+	</PropertyGroup>
+
 	<PropertyGroup Condition="'$(NativeRid)' == '' And $([MSBuild]::IsOSPlatform('Linux'))">
 		<NativeRid>linux-x64</NativeRid>
 		<NativeLibName>libpdfium.so</NativeLibName>
@@ -84,7 +94,7 @@
 	</ItemGroup>
 
 	<!--
-		Native binaries ship in the four PdfiumWrapper.runtime.<rid> packages, which this package
+		Native binaries ship in the five PdfiumWrapper.runtime.<rid> packages, which this package
 		depends on at exactly its own version. Each puts its files under runtimes/<rid>/native, so a
 		portable build (no RuntimeIdentifier) gets every platform and the host picks the right one,
 		and a RID-specific publish copies only its own. A runtime.json mapping was used before, but
@@ -97,6 +107,7 @@
 	<ItemGroup Condition="'$(PackRuntimeDependencies)' == 'true'">
 		<PackageReference Include="PdfiumWrapper.runtime.win-x64" Version="[$(Version)]" />
 		<PackageReference Include="PdfiumWrapper.runtime.linux-x64" Version="[$(Version)]" />
+		<PackageReference Include="PdfiumWrapper.runtime.linux-musl-x64" Version="[$(Version)]" />
 		<PackageReference Include="PdfiumWrapper.runtime.osx-x64" Version="[$(Version)]" />
 		<PackageReference Include="PdfiumWrapper.runtime.osx-arm64" Version="[$(Version)]" />
 	</ItemGroup>

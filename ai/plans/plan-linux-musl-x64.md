@@ -63,23 +63,32 @@ What the shipped `linux-x64` natives link against (from their `NEEDED` entries),
 
 `src/PdfiumWrapper/NativeLibraryResolver.cs`:
 
-- [ ] `GetRuntimeIdentifier()`: on Linux return `linux-musl-{arch}` when `IsMusl()` is true. `IsMusl()`: `RuntimeInformation.RuntimeIdentifier.Contains("musl", OrdinalIgnoreCase)` or a `/lib/ld-musl-*.so.1` file exists. Compute once (static readonly).
-- [ ] Keep the `GetLibraryNames` Linux table as is (same file names on musl).
-- [ ] Keep the system fallback (`NativeLibrary.TryLoad(platformName)`) as is.
-- [ ] Unit test in `src/PdfiumWrapper.Tests`: the RID the resolver computes equals the RID of the natives in the test output (`runtimes/<rid>/native/libpdfium.so` exists for it). This runs on every platform and would have caught the glibc-on-Alpine case. If `GetRuntimeIdentifier` stays private, expose it through an `InternalsVisibleTo` already in place for the test project, or test through `NativeBoundaryTests`.
+- [x] `GetRuntimeIdentifier()`: on Linux return `linux-musl-{arch}` when `IsMusl()` is true. `IsMusl()`: `RuntimeInformation.RuntimeIdentifier.Contains("musl", OrdinalIgnoreCase)` or a `/lib/ld-musl-*.so.1` file exists. Compute once (static readonly).
+- [x] Keep the `GetLibraryNames` Linux table as is (same file names on musl).
+- [x] Keep the system fallback (`NativeLibrary.TryLoad(platformName)`) as is.
+- [x] Unit test in `src/PdfiumWrapper.Tests`: the RID the resolver computes equals the RID of the natives in the test output (`runtimes/<rid>/native/libpdfium.so` exists for it). This runs on every platform and would have caught the glibc-on-Alpine case. If `GetRuntimeIdentifier` stays private, expose it through an `InternalsVisibleTo` already in place for the test project, or test through `NativeBoundaryTests`.
 
 `src/PdfiumWrapper/PdfiumWrapper.csproj`:
 
-- [ ] Split the Linux fallback `PropertyGroup`: `NativeRid=linux-musl-x64` when `$(NETCoreSdkRuntimeIdentifier)` contains `musl`, else `linux-x64`. Library names are the same.
-- [ ] Add `<PackageReference Include="PdfiumWrapper.runtime.linux-musl-x64" Version="[$(Version)]" />` to the `PackRuntimeDependencies` group. Update the comment above it ("four" to "five").
+- [x] Split the Linux fallback `PropertyGroup`: `NativeRid=linux-musl-x64` when `$(NETCoreSdkRuntimeIdentifier)` contains `musl`, else `linux-x64`. Library names are the same.
+- [x] Add `<PackageReference Include="PdfiumWrapper.runtime.linux-musl-x64" Version="[$(Version)]" />` to the `PackRuntimeDependencies` group. Update the comment above it ("four" to "five").
 
 `src/PdfiumWrapper.runtime/PdfiumWrapper.runtime.csproj` and `README.md`:
 
-- [ ] No project change: it packs `../libs/$(NativeRid)/**`. Update the header comment and the package README ("one package per platform" list, "all four").
+- [x] No project change: it packs `../libs/$(NativeRid)/**`. Update the header comment and the package README ("one package per platform" list, "all four").
 
 Worker pool (`src/PdfiumWrapper.Processing`):
 
-- [ ] No code change expected. `LinuxAllocator` adds `MALLOC_ARENA_MAX=2` to musl workers too, which is harmless; leave it rather than branch on libc. Confirm `TrimWhenIdle` sets `s_trimUnavailable` after the first `DllNotFoundException` on Alpine and never throws into the idle timer (it is caught today; add nothing unless the Alpine test run says otherwise).
+- [x] No code change expected. `LinuxAllocator` adds `MALLOC_ARENA_MAX=2` to musl workers too, which is harmless; leave it rather than branch on libc. Confirm `TrimWhenIdle` sets `s_trimUnavailable` after the first `DllNotFoundException` on Alpine and never throws into the idle timer (it is caught today; add nothing unless the Alpine test run says otherwise).
+
+### Phase 2 as built (2026-11-06)
+
+- `NativeLibraryResolver.GetRuntimeIdentifier()` is `internal`, computed once (`Lazy<string>`). `IsMusl()` reads the runtime's RID, then probes `/lib/ld-musl-*.so.1`, and treats an I/O or access error as glibc.
+- Test: `NativeBoundaryTests.Resolver_ChoosesTheRidWhoseNativesTheBuildCopied` (the computed RID has `runtimes/<rid>/native/<pdfium>` in the test output).
+- The csproj musl fallback uses `$(NETCoreSdkRuntimeIdentifier.Contains('musl'))`; on the Alpine SDK image it set `NativeRid=linux-musl-x64` with no argument.
+- The runtime package README also lists the new versions (PDFium 8138, libjpeg-turbo 3.2.1) and the musl libtiff's static zlib-ng.
+- Worker pool: no change. `LinuxAllocator.TrimWhenIdle` imports `malloc_trim` from `libc.so.6`, which musl does not have: the first call throws `DllNotFoundException`, which is caught and turns trimming off.
+- **Results: 404/404 on win-x64, on linux-x64 (`sdk:10.0`) and on Alpine 3.24 (`sdk:10.0-alpine`, RID `linux-musl-x64`).** The Alpine run needed no font package: no test depends on system fonts. The pool tests (which start `PdfiumWrapper.Tests.Host` workers) passed there too.
 
 ## Phase 3: CI and release
 
