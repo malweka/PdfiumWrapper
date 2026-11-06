@@ -452,7 +452,27 @@ download_pdfium() {
     if [[ "${rid}" == osx-* ]]; then
         codesign_macos_library "${destination_lib}"
     fi
+    if [[ "${rid}" == linux-musl-* ]]; then
+        strip_pdfium_debug_info "${rid}" "${lib_name}"
+    fi
     log "Installed ${destination_lib}"
+}
+
+# bblanchon's musl archive keeps PDFium's DWARF debug info (17.8 MB at 8138, against 8.3 MB for the
+# glibc build, which has none). Strip it in the build image; the symbol table stays, as in the glibc
+# build, so stack traces still name PDFium's functions.
+strip_pdfium_debug_info() {
+    local rid="$1"
+    local lib_name="$2"
+    local path="/src/src/libs/${rid}/${lib_name}"
+
+    log "Stripping debug info from ${lib_name} in Docker"
+    docker_run_linux_build "${rid}" "
+set -euo pipefail
+$(linux_install_packages "${rid}" "binutils" "binutils")
+strip --strip-debug '${path}'
+chown \"\${HOST_UID}:\${HOST_GID}\" '${path}'
+"
 }
 
 fix_macos_libtiff_install_names() {

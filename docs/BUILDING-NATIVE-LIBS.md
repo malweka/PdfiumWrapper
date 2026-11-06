@@ -97,7 +97,7 @@ The glibc binaries do not load on a musl libc, so `linux-musl-x64` has its own b
 |---|---|---|
 | Image | `ubuntu:22.04` | `alpine:3.20` (pinned: musl has no symbol versioning, so a build on an older Alpine loads on newer ones) |
 | Packages | `apt-get install -y build-essential cmake nasm patchelf ...` | `apk add --no-cache build-base cmake nasm patchelf` (and `bash`, which Alpine lacks, to run the step) |
-| PDFium archive | `pdfium-linux-x64.tgz` | `pdfium-linux-musl-x64.tgz` |
+| PDFium archive | `pdfium-linux-x64.tgz` | `pdfium-linux-musl-x64.tgz`, then `strip --strip-debug` in the build image: the musl archive keeps PDFium's debug info (17.8 MB against 10.1 MB stripped); the symbol table stays, as in the glibc build |
 | zlib in libtiff | the system `libz.so.1` | zlib-ng 2.3.3 linked statically (the same static build as pdfium_png), with `-Wl,--exclude-libs,ALL` so its symbols are not exported |
 | Build directories | `build-linux-x64` | `build-linux-musl-x64` |
 | Output | `src/libs/linux-x64/` | `src/libs/linux-musl-x64/` |

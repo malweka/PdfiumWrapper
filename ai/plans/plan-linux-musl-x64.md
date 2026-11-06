@@ -56,7 +56,7 @@ What the shipped `linux-x64` natives link against (from their `NEEDED` entries),
 - **libtiff on musl** links the static zlib-ng with `-Wl,--exclude-libs,ALL`, so it exports no zlib symbols (checked: 0).
 - **Built without `--clean`**: it wipes all of `_native_build`, and every musl and new-version directory was new anyway.
 - **Result.** No library needs `libc.so.6` or `libz.so.1`, none has a `GLIBC_` symbol version. `libpdfium.so` needs `libc.so`, which the musl loader maps to itself; the other four need `libc.musl-x86_64.so.1`; `libtiff_shim.so` finds `libtiff.so` through `$ORIGIN`. The rebuilt linux-x64 binaries have the same `NEEDED`, `SONAME` and `RUNPATH` as before.
-- **Size.** The musl `libpdfium.so` is 17.8 MB against 8.3 MB for glibc: bblanchon's musl archive keeps its debug info. Left as shipped upstream; `strip --strip-debug` would halve it if the package size matters.
+- **Size.** The musl `libpdfium.so` was 17.8 MB against 8.3 MB for glibc: bblanchon's musl archive keeps its DWARF debug info (8 `.debug_*` sections; the glibc one has none). At the owner's decision (2026-11-06) `download_pdfium` strips it for musl targets (`strip_pdfium_debug_info`, `strip --strip-debug` in the build image), keeping the symbol table as the glibc build does: 10.1 MB.
 - **Notices.** Not unchanged after all: PDFium 8138 bundles dragonbox (Apache-2.0 with LLVM exceptions, and Boost), HarfBuzz and Highway, and the musl archive carries musl libc's licence in place of LLVM libc's. All five added to `THIRD-PARTY-NOTICES.txt`, with the new versions and the musl libtiff's static zlib-ng.
 
 ## Phase 2: Load the right natives at run time
@@ -96,7 +96,7 @@ Worker pool (`src/PdfiumWrapper.Processing`):
 
 - [x] Add `{ rid: 'linux-musl-x64', libname: 'libpdfium.so' }` to the pack matrix.
 - [x] Add a test job that runs the suite on Alpine: `runs-on: ubuntu-latest` with `container: mcr.microsoft.com/dotnet/sdk:10.0-alpine`. The container needs `apk add --no-cache bash git` for the checkout action and any shell steps, plus a font package (`font-dejavu` or `ttf-dejavu`) so text rendering tests that rely on substitutes behave; measure first which tests need it. The pool tests start `PdfiumWrapper.Tests.Host` as a worker; it is a framework-dependent build, so no musl apphost concern. Expect the same 358 tests to pass; a test that is glibc-specific gets a `[SkippableFact]` or a platform guard, not a skip of the job.
-- [ ] Decide whether the Alpine job is required for merge (recommended: yes, it is the only automated check of the musl natives).
+- [x] Decide whether the Alpine job is required for merge (recommended: yes, it is the only automated check of the musl natives). Owner: yes (2026-11-06). Added to the `main-protection` ruleset as a required status check, `Build and Run Tests (Alpine, linux-musl-x64)`, beside `Build and Run Tests`.
 
 `.github/workflows/release.yml`:
 
@@ -111,7 +111,7 @@ Qualification (`src/PdfiumWrapper.Qualification`, see `plan-pool-qualification.m
 ### Phase 3 as built (2026-11-06)
 
 - `pr-build.yml`: new job `build-and-test-alpine` in `mcr.microsoft.com/dotnet/sdk:10.0-alpine` (`apk add bash git`, then restore, build and test `PdfiumWrapper.Tests` in Release). No font package: the local Alpine run passed 404/404 without one. `linux-musl-x64` added to the pack matrix. **Not run on GitHub yet**: it first runs when a PR from this branch is opened.
-- **Open, owner's decision:** make `build-and-test-alpine` a required check in the branch protection of `main` (recommended: it is the only automated check of the musl natives).
+- **Required check:** `Build and Run Tests (Alpine, linux-musl-x64)` is required on `main` by the `main-protection` ruleset since 2026-11-06 (owner's decision). A PR whose branch lacks the job cannot merge: PR #33 (the plan alone) is superseded by this branch, which contains it.
 - `release.yml`: `linux-musl-x64` in the `pack-runtimes` matrix and in the nuspec check. The push step's `artifacts/*.nupkg` picks up the fifth package; the nuget.org Trusted Publishing policy (`PdfiumWrapper*`, new packages allowed) covers the new id.
 - Packaging rehearsed locally at `2.1.0-local.1`: the five runtime packages pack, and the main package's nuspec depends on all five at `[2.1.0-local.1]`. A fresh net10.0 app restoring only those packages rendered a 10-page PDF to PNG, JPEG and TIFF and extracted text on bare Alpine images, both portable on `runtime:10.0-alpine` (five RIDs in `runtimes/`, musl chosen) and self-contained `-r linux-musl-x64` on `runtime-deps:10.0-alpine` (only the musl natives copied), with identical output. The same app with 2.0.1 fails on Alpine with `DllNotFoundException` (`ld-linux-x86-64.so.2` needed by the linux-x64 `libpdfium.so`).
 - Qualification on Alpine 3.24, self-contained `-r linux-musl-x64` publish of the harness (apphost on musl), built from `git archive HEAD` in `sdk:10.0-alpine`, run in the same image on the dev machine (24 cores):
