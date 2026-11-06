@@ -28,6 +28,29 @@ jobs:
       - name: Run unit tests
         run: dotnet test src/PdfiumWrapper.sln --configuration Release --no-build --verbosity normal
 
+  # The only automated check of the linux-musl-x64 natives: the whole suite on Alpine. The SDK's
+  # own RID (linux-musl-x64) makes the build copy the musl natives, and the resolver load them.
+  build-and-test-alpine:
+    name: Build and Run Tests (Alpine, linux-musl-x64)
+    runs-on: ubuntu-latest
+    container: mcr.microsoft.com/dotnet/sdk:10.0-alpine
+
+    steps:
+      - name: Install git and bash
+        run: apk add --no-cache bash git
+
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Restore dependencies
+        run: dotnet restore src/PdfiumWrapper.Tests/PdfiumWrapper.Tests.csproj
+
+      - name: Build tests
+        run: dotnet build src/PdfiumWrapper.Tests/PdfiumWrapper.Tests.csproj --configuration Release --no-restore
+
+      - name: Run unit tests
+        run: dotnet test src/PdfiumWrapper.Tests/PdfiumWrapper.Tests.csproj --configuration Release --no-build --verbosity normal
+
   multi-platform-build:
     name: Multi-Platform Build
     needs: build-and-test
@@ -39,6 +62,7 @@ jobs:
           - { rid: 'osx-arm64', libname: 'libpdfium.dylib' }
           - { rid: 'osx-x64', libname: 'libpdfium.dylib' }
           - { rid: 'linux-x64', libname: 'libpdfium.so' }
+          - { rid: 'linux-musl-x64', libname: 'libpdfium.so' }
 
     steps:
       - name: Checkout code

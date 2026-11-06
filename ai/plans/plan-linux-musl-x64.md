@@ -94,19 +94,29 @@ Worker pool (`src/PdfiumWrapper.Processing`):
 
 `.github/workflows/pr-build.yml`:
 
-- [ ] Add `{ rid: 'linux-musl-x64', libname: 'libpdfium.so' }` to the pack matrix.
-- [ ] Add a test job that runs the suite on Alpine: `runs-on: ubuntu-latest` with `container: mcr.microsoft.com/dotnet/sdk:10.0-alpine`. The container needs `apk add --no-cache bash git` for the checkout action and any shell steps, plus a font package (`font-dejavu` or `ttf-dejavu`) so text rendering tests that rely on substitutes behave; measure first which tests need it. The pool tests start `PdfiumWrapper.Tests.Host` as a worker; it is a framework-dependent build, so no musl apphost concern. Expect the same 358 tests to pass; a test that is glibc-specific gets a `[SkippableFact]` or a platform guard, not a skip of the job.
+- [x] Add `{ rid: 'linux-musl-x64', libname: 'libpdfium.so' }` to the pack matrix.
+- [x] Add a test job that runs the suite on Alpine: `runs-on: ubuntu-latest` with `container: mcr.microsoft.com/dotnet/sdk:10.0-alpine`. The container needs `apk add --no-cache bash git` for the checkout action and any shell steps, plus a font package (`font-dejavu` or `ttf-dejavu`) so text rendering tests that rely on substitutes behave; measure first which tests need it. The pool tests start `PdfiumWrapper.Tests.Host` as a worker; it is a framework-dependent build, so no musl apphost concern. Expect the same 358 tests to pass; a test that is glibc-specific gets a `[SkippableFact]` or a platform guard, not a skip of the job.
 - [ ] Decide whether the Alpine job is required for merge (recommended: yes, it is the only automated check of the musl natives).
 
 `.github/workflows/release.yml`:
 
-- [ ] Add `linux-musl-x64` to the `pack-runtimes` matrix and to the `for RID in ...` nuspec check (`five` in the comment and the error text).
-- [ ] The push step globs `nupkg-runtime-*`; confirm it picks up the fifth package without a change.
+- [x] Add `linux-musl-x64` to the `pack-runtimes` matrix and to the `for RID in ...` nuspec check (`five` in the comment and the error text).
+- [x] The push step globs `nupkg-runtime-*`; confirm it picks up the fifth package without a change.
 
 Qualification (`src/PdfiumWrapper.Qualification`, see `plan-pool-qualification.md`):
 
-- [ ] Run `smoke` and a `burst` in `mcr.microsoft.com/dotnet/sdk:10.0-alpine` on the dev machine (same Docker setup as the linux-x64 runs). Record idle and peak worker memory: musl's allocator returns memory on its own, so the glibc numbers (94-117 MB idle with the fix) are not the baseline; whatever Alpine shows becomes the documented figure. A 30-minute soak is optional unless the burst shows growth.
-- [ ] Also run with a self-contained `-r linux-musl-x64` publish of the harness, which exercises the RID-specific copy path (only the musl natives in the output, apphost on musl).
+- [x] Run `smoke` and a `burst` in `mcr.microsoft.com/dotnet/sdk:10.0-alpine` on the dev machine (same Docker setup as the linux-x64 runs). Record idle and peak worker memory: musl's allocator returns memory on its own, so the glibc numbers (94-117 MB idle with the fix) are not the baseline; whatever Alpine shows becomes the documented figure. A 30-minute soak is optional unless the burst shows growth.
+- [x] Also run with a self-contained `-r linux-musl-x64` publish of the harness, which exercises the RID-specific copy path (only the musl natives in the output, apphost on musl).
+
+### Phase 3 as built (2026-11-06)
+
+- `pr-build.yml`: new job `build-and-test-alpine` in `mcr.microsoft.com/dotnet/sdk:10.0-alpine` (`apk add bash git`, then restore, build and test `PdfiumWrapper.Tests` in Release). No font package: the local Alpine run passed 404/404 without one. `linux-musl-x64` added to the pack matrix. **Not run on GitHub yet**: it first runs when a PR from this branch is opened.
+- **Open, owner's decision:** make `build-and-test-alpine` a required check in the branch protection of `main` (recommended: it is the only automated check of the musl natives).
+- `release.yml`: `linux-musl-x64` in the `pack-runtimes` matrix and in the nuspec check. The push step's `artifacts/*.nupkg` picks up the fifth package; the nuget.org Trusted Publishing policy (`PdfiumWrapper*`, new packages allowed) covers the new id.
+- Packaging rehearsed locally at `2.1.0-local.1`: the five runtime packages pack, and the main package's nuspec depends on all five at `[2.1.0-local.1]`. A fresh net10.0 app restoring only those packages rendered a 10-page PDF to PNG, JPEG and TIFF and extracted text on bare Alpine images, both portable on `runtime:10.0-alpine` (five RIDs in `runtimes/`, musl chosen) and self-contained `-r linux-musl-x64` on `runtime-deps:10.0-alpine` (only the musl natives copied), with identical output. The same app with 2.0.1 fails on Alpine with `DllNotFoundException` (`ld-linux-x86-64.so.2` needed by the linux-x64 `libpdfium.so`).
+- Qualification on Alpine 3.24, self-contained `-r linux-musl-x64` publish of the harness (apphost on musl), built from `git archive HEAD` in `sdk:10.0-alpine`, run in the same image on the dev machine (24 cores):
+  - smoke: 1,100 jobs, PASS, 8 workers gone after dispose.
+  - burst: 10,500 jobs in 8.7 min, PASS. 0 unexpected, 0 mismatches, 0 retries, 0 output left by failed jobs, 0 of 8 workers alive after dispose, 0 files left. Job processing p50/p95/p99 133 / 4,067 / 4,994 ms (glibc: 97-99 / 3,410-3,540 / 4,300-4,400). Workers: peak 102-113 MB, idle 60-69 MB, flat (end against first-half high -7.5% to +0.4%); coordinator idle 81-90 MB. No soak: the burst shows no growth.
 
 ## Phase 4: Docs and release notes
 
