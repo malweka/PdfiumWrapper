@@ -1,6 +1,6 @@
 # Plan: linux-musl-x64 support (Alpine containers)
 
-Created 2026-10-16. Adds a fifth native platform so the library runs on Alpine-based images (`mcr.microsoft.com/dotnet/runtime:10.0-alpine` and friends). In progress since 2026-11-06 on `feature/linux-musl-x64`: Phases 1-4 done on win-x64 and Linux; macOS natives and the release remain.
+Created 2026-10-16. Adds a fifth native platform so the library runs on Alpine-based images (`mcr.microsoft.com/dotnet/runtime:10.0-alpine` and friends). In progress since 2026-11-06 on `feature/linux-musl-x64`: Phases 1-4 done; all five platforms carry PDFium 8138 / libjpeg-turbo 3.2.1. The release remains.
 
 ## Context
 
@@ -49,7 +49,7 @@ What the shipped `linux-x64` natives link against (from their `NEEDED` entries),
 
 ### Phase 1 as built (2026-11-06)
 
-- **Versions upgraded with it (owner's decision, 2026-11-06).** PDFium chromium/8076 -> 8138 and libjpeg-turbo 3.2.0 -> 3.2.1 in both build scripts; libtiff 4.7.2, libpng 1.6.59 and zlib-ng 2.3.3 were already the latest. All five platforms must carry the same versions, so win-x64 and linux-x64 were rebuilt too; **osx-arm64 and osx-x64 still carry 8076 / 3.2.0 and must be rebuilt on a Mac before 2.1.0**. PDFium's public headers between 8076 and 8138 differ only by one new experimental function (`FPDF_StructElement_GetRawType`) and a removed `PDF_USE_XFA` define (XFA builds only): no struct layout the imports depend on changed.
+- **Versions upgraded with it (owner's decision, 2026-11-06).** PDFium chromium/8076 -> 8138 and libjpeg-turbo 3.2.0 -> 3.2.1 in both build scripts; libtiff 4.7.2, libpng 1.6.59 and zlib-ng 2.3.3 were already the latest. All five platforms must carry the same versions, so win-x64 and linux-x64 were rebuilt too; osx-arm64 and osx-x64 were rebuilt on a Mac by the owner (commit `0431c6b`: only `libpdfium` and `libturbojpeg` changed; 404/404 on osx-arm64, osx-x64 smoke-tested under Rosetta). PDFium's public headers between 8076 and 8138 differ only by one new experimental function (`FPDF_StructElement_GetRawType`) and a removed `PDF_USE_XFA` define (XFA builds only): no struct layout the imports depend on changed.
 - **Windows host.** The Linux targets were built from Git Bash on Windows. Two fixes made that work: `.gitattributes` (`*.sh text eol=lf`; with `core.autocrlf=true` the checkout had CRLF scripts, which carried `\r` into the container scripts) and `MSYS_NO_PATHCONV=1` on every `docker run` (MSYS rewrote `-w /src` into a Windows path).
 - **Alpine runs bash.** The container installs `bash` and runs the same script as on Ubuntu (`BUILD_SCRIPT` in the environment), rather than keeping two script dialects.
 - **Package lines.** The libtiff step does not install `zlib-dev` on Alpine, so libtiff cannot pick up a shared zlib by accident; `curl` and `unzip` are not needed in the container (sources are downloaded on the host).
@@ -131,7 +131,7 @@ Qualification (`src/PdfiumWrapper.Qualification`, see `plan-pool-qualification.m
 
 - Docs: `README.md` (five runtime packages, musl in the requirements and platform list, `-r linux-musl-x64`, the new versions), `docs/TROUBLESHOOTING.md` (`linux-musl-x64` dropped from "gets no natives"; the pre-2.1.0 Alpine failure with the real loader message; the "Linux missing dependencies" entry rewritten: the natives need only the C library, a font package only for non-embedded fonts; the old `apk add fontconfig freetype` advice was not needed), `docs/HIGH-THROUGHPUT-PROCESSING.md` (Alpine numbers and an Alpine `Dockerfile`), `AGENTS.md`, `CHANGELOG.md` (2.1.0, unreleased).
 - `Version` is 2.1.0 in `PdfiumWrapper.csproj`, `PdfiumWrapper.runtime.csproj` and `PdfiumWrapper.Processing.csproj`; Processing's pin follows the core version (`PinCoreDependencyVersion`). The solution builds with no warning.
-- **Not done: the release.** It waits for the osx-arm64 and osx-x64 natives at PDFium 8138 / libjpeg-turbo 3.2.1 (owner, on a Mac), a green PR run including the new Alpine job, and the owner's go-ahead. Then: merge, create `release/2.1.0` from `main`, run `release.yml` with `publish_processing` ticked, and date the CHANGELOG entry.
+- **Not done: the release.** The macOS natives are in (`0431c6b`). It waits for a green PR run including the new Alpine job, and the owner's go-ahead. Then: merge, create `release/2.1.0` from `main`, run `release.yml` with `publish_processing` ticked, and date the CHANGELOG entry.
 
 ## Risks and open questions
 
