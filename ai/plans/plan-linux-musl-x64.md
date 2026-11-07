@@ -1,6 +1,6 @@
 # Plan: linux-musl-x64 support (Alpine containers)
 
-Created 2026-10-16. Adds a fifth native platform so the library runs on Alpine-based images (`mcr.microsoft.com/dotnet/runtime:10.0-alpine` and friends). In progress since 2026-11-06 on `feature/linux-musl-x64`: Phases 1-4 done; all five platforms carry PDFium 8138 / libjpeg-turbo 3.2.1. The release remains.
+Created 2026-10-16. Adds a fifth native platform so the library runs on Alpine-based images (`mcr.microsoft.com/dotnet/runtime:10.0-alpine` and friends). Implemented 2026-11-06 on `feature/linux-musl-x64`, merged as PR #34: Phases 1-4 done; all five platforms carry PDFium 8138 / libjpeg-turbo 3.2.1. Released as 2.1.0 from `release/2.1.0`.
 
 ## Context
 
@@ -131,7 +131,7 @@ Qualification (`src/PdfiumWrapper.Qualification`, see `plan-pool-qualification.m
 
 - Docs: `README.md` (five runtime packages, musl in the requirements and platform list, `-r linux-musl-x64`, the new versions), `docs/TROUBLESHOOTING.md` (`linux-musl-x64` dropped from "gets no natives"; the pre-2.1.0 Alpine failure with the real loader message; the "Linux missing dependencies" entry rewritten: the natives need only the C library, a font package only for non-embedded fonts; the old `apk add fontconfig freetype` advice was not needed), `docs/HIGH-THROUGHPUT-PROCESSING.md` (Alpine numbers and an Alpine `Dockerfile`), `AGENTS.md`, `CHANGELOG.md` (2.1.0, unreleased).
 - `Version` is 2.1.0 in `PdfiumWrapper.csproj`, `PdfiumWrapper.runtime.csproj` and `PdfiumWrapper.Processing.csproj`; Processing's pin follows the core version (`PinCoreDependencyVersion`). The solution builds with no warning.
-- **Not done: the release.** The macOS natives are in (`0431c6b`). It waits for a green PR run including the new Alpine job, and the owner's go-ahead. Then: merge, create `release/2.1.0` from `main`, run `release.yml` with `publish_processing` ticked, and date the CHANGELOG entry.
+- **Release.** The macOS natives are in (`0431c6b`). PR #34 went green on its first run, the Alpine job included, and was merged. The CHANGELOG entry is dated 2026-11-06; 2.1.0 is released from `release/2.1.0` with `publish_processing` ticked.
 
 ## Risks and open questions
 
