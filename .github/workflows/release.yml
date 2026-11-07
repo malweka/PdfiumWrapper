@@ -38,7 +38,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        rid: [win-x64, linux-x64, osx-x64, osx-arm64]
+        rid: [win-x64, linux-x64, linux-musl-x64, osx-x64, osx-arm64]
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -87,7 +87,7 @@ jobs:
           pattern: nupkg-runtime-*
           merge-multiple: true
 
-      # The main package depends on the four runtime packages packed above (see
+      # The main package depends on the five runtime packages packed above (see
       # PackRuntimeDependencies in PdfiumWrapper.csproj); restore them from ./artifacts.
       - name: Restore main package
         run: |
@@ -122,7 +122,7 @@ jobs:
         run: |
           VERSION=${{ needs.guard.outputs.version }}
           NUSPEC=$(unzip -p "artifacts/PdfiumWrapper.$VERSION.nupkg" PdfiumWrapper.nuspec)
-          for RID in win-x64 linux-x64 osx-x64 osx-arm64; do
+          for RID in win-x64 linux-x64 linux-musl-x64 osx-x64 osx-arm64; do
             echo "$NUSPEC" | grep -qF "id=\"PdfiumWrapper.runtime.$RID\" version=\"[$VERSION]\"" \
               || { echo "PdfiumWrapper.$VERSION.nupkg lacks a dependency on PdfiumWrapper.runtime.$RID [$VERSION]"; exit 1; }
           done

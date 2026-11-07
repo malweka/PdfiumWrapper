@@ -24,11 +24,12 @@ bash src/native/build-natives.sh --target host --clean
 bash src/native/build-natives.sh --target osx-arm64 --clean
 bash src/native/build-natives.sh --target osx-x64 --clean
 bash src/native/build-natives.sh --target linux-x64 --clean
+bash src/native/build-natives.sh --target linux-musl-x64 --clean
 ```
 
-The Unix script supports `osx-arm64`, `osx-x64` and `linux-x64`. Linux builds always run in Docker with `--platform linux/amd64`, so Docker must be available, even on a Linux host. Use `--only pdfium,libtiff,tiff_shim,libjpeg_turbo,pdfium_png` to rebuild selected components, or `--no-pdfium` to skip the PDFium download.
+The Unix script supports `osx-arm64`, `osx-x64`, `linux-x64` and `linux-musl-x64` (Alpine). Linux builds always run in Docker with `--platform linux/amd64`, so Docker must be available, even on a Linux host. The Linux targets also build from Git Bash on Windows: the script runs `docker` with `MSYS_NO_PATHCONV=1`, so MSYS does not rewrite the container paths. Use `--only pdfium,libtiff,tiff_shim,libjpeg_turbo,pdfium_png` to rebuild selected components, or `--no-pdfium` to skip the PDFium download.
 
-The Unix script needs these commands on the host: `curl`, `unzip` and `tar` (downloads); `cmake`, `cc` and `clang` (macOS builds); `install_name_tool` and `codesign` (macOS); `xattr` (macOS, optional); and `docker` (linux-x64).
+The Unix script needs these commands on the host: `curl`, `unzip` and `tar` (downloads); `cmake`, `cc` and `clang` (macOS builds); `install_name_tool` and `codesign` (macOS); `xattr` (macOS, optional); and `docker` (Linux targets).
 
 For Windows x64, use the Windows build script:
 
@@ -40,13 +41,13 @@ Both scripts create `_native_build/` for downloaded sources and intermediates, t
 
 ## Source Versions
 
-Both scripts pin these versions. Override one through its environment variable (`PDFIUM_VERSION`, `LIBTIFF_VERSION`, `LIBJPEG_TURBO_VERSION`, `ZLIB_NG_VERSION`, `LIBPNG_VERSION`) or, in the Unix script, its `--*-version` flag. `PDFIUM_VERSION` takes a build number (`8076`) or `latest`, which downloads again on every run. The Unix script also accepts the release tag form (`chromium/8076`); the Windows script takes only the bare number.
+Both scripts pin these versions. Override one through its environment variable (`PDFIUM_VERSION`, `LIBTIFF_VERSION`, `LIBJPEG_TURBO_VERSION`, `ZLIB_NG_VERSION`, `LIBPNG_VERSION`) or, in the Unix script, its `--*-version` flag. `PDFIUM_VERSION` takes a build number (`8138`) or `latest`, which downloads again on every run. The Unix script also accepts the release tag form (`chromium/8138`); the Windows script takes only the bare number.
 
 | Library | Version | Source |
 |---|---|---|
-| PDFium (prebuilt) | chromium/8076 | https://github.com/bblanchon/pdfium-binaries/releases/tag/chromium/8076 |
+| PDFium (prebuilt) | chromium/8138 | https://github.com/bblanchon/pdfium-binaries/releases/tag/chromium/8138 |
 | libtiff | 4.7.2 | https://download.osgeo.org/libtiff/tiff-4.7.2.zip |
-| libjpeg-turbo | 3.2.0 | https://github.com/libjpeg-turbo/libjpeg-turbo/archive/refs/tags/3.2.0.zip |
+| libjpeg-turbo | 3.2.1 | https://github.com/libjpeg-turbo/libjpeg-turbo/archive/refs/tags/3.2.1.zip |
 | zlib-ng | 2.3.3 | https://github.com/zlib-ng/zlib-ng/archive/refs/tags/2.3.3.zip |
 | libpng | 1.6.59 | https://github.com/pnggroup/libpng/archive/refs/tags/v1.6.59.zip |
 
@@ -88,6 +89,31 @@ dnf install gcc gcc-c++ cmake zlib-devel nasm patchelf curl unzip
 
 > **Note**: `nasm` (or `yasm`) is required for libjpeg-turbo's SIMD optimizations. Without it, the library still builds but without SIMD acceleration.
 
+### Linux musl (x64, Alpine)
+
+The glibc binaries do not load on a musl libc, so `linux-musl-x64` has its own build. `build-natives.sh --target linux-musl-x64` runs every step of the Linux sections below with these differences:
+
+| | linux-x64 | linux-musl-x64 |
+|---|---|---|
+| Image | `ubuntu:22.04` | `alpine:3.20` (pinned: musl has no symbol versioning, so a build on an older Alpine loads on newer ones) |
+| Packages | `apt-get install -y build-essential cmake nasm patchelf ...` | `apk add --no-cache build-base cmake nasm patchelf` (and `bash`, which Alpine lacks, to run the step) |
+| PDFium archive | `pdfium-linux-x64.tgz` | `pdfium-linux-musl-x64.tgz`, then `strip --strip-debug` in the build image: the musl archive keeps PDFium's debug info (17.8 MB against 10.1 MB stripped); the symbol table stays, as in the glibc build |
+| zlib in libtiff | the system `libz.so.1` | zlib-ng 2.3.3 linked statically (the same static build as pdfium_png), with `-Wl,--exclude-libs,ALL` so its symbols are not exported |
+| Build directories | `build-linux-x64` | `build-linux-musl-x64` |
+| Output | `src/libs/linux-x64/` | `src/libs/linux-musl-x64/` |
+
+Check the result from inside Alpine. No library may need `libc.so.6` or `libz.so.1`, or carry a `GLIBC_` symbol version:
+
+```bash
+docker run --rm -v "$PWD:/src" alpine:3.20 sh -c '
+    apk add --no-cache binutils >/dev/null
+    for f in /src/src/libs/linux-musl-x64/*.so; do
+        echo "== $f"; readelf -d "$f" | grep NEEDED; readelf -V "$f" | grep -c GLIBC_
+    done'
+```
+
+`libpdfium.so` needs `libc.so`, which the musl loader resolves to itself; the others need `libc.musl-x86_64.so.1`, and `libtiff_shim.so` needs `libtiff.so` through `$ORIGIN`.
+
 ### Windows (x64)
 
 - Visual Studio 2022 or 2026 (or the matching Build Tools) with the C++ workload
@@ -103,7 +129,7 @@ dnf install gcc gcc-c++ cmake zlib-devel nasm patchelf curl unzip
 PDFium is not compiled. Both scripts download the prebuilt archive for the pinned build from bblanchon/pdfium-binaries:
 
 ```text
-https://github.com/bblanchon/pdfium-binaries/releases/download/chromium/8076/pdfium-<archive>.tgz
+https://github.com/bblanchon/pdfium-binaries/releases/download/chromium/8138/pdfium-<archive>.tgz
 ```
 
 | RID | `<archive>` | Library in the archive | Copied to |
@@ -112,6 +138,7 @@ https://github.com/bblanchon/pdfium-binaries/releases/download/chromium/8076/pdf
 | osx-arm64 | `mac-arm64` | `lib/libpdfium.dylib` | `src/libs/osx-arm64/libpdfium.dylib` |
 | osx-x64 | `mac-x64` | `lib/libpdfium.dylib` | `src/libs/osx-x64/libpdfium.dylib` |
 | linux-x64 | `linux-x64` | `lib/libpdfium.so` | `src/libs/linux-x64/libpdfium.so` |
+| linux-musl-x64 | `linux-musl-x64` | `lib/libpdfium.so` | `src/libs/linux-musl-x64/libpdfium.so` |
 
 With `PDFIUM_VERSION=latest` the URL is `https://github.com/bblanchon/pdfium-binaries/releases/latest/download/pdfium-<archive>.tgz`.
 
@@ -119,7 +146,7 @@ To get it by hand:
 
 ```bash
 curl -fL -o pdfium-mac-arm64.tgz \
-    https://github.com/bblanchon/pdfium-binaries/releases/download/chromium/8076/pdfium-mac-arm64.tgz
+    https://github.com/bblanchon/pdfium-binaries/releases/download/chromium/8138/pdfium-mac-arm64.tgz
 mkdir pdfium-mac-arm64 && tar -xzf pdfium-mac-arm64.tgz -C pdfium-mac-arm64
 cp pdfium-mac-arm64/lib/libpdfium.dylib src/libs/osx-arm64/
 
@@ -307,9 +334,9 @@ copy tiff_shim.dll \path\to\PdfiumWrapper\src\libs\win-x64\
 Download the source distribution:
 
 ```bash
-curl -LO https://github.com/libjpeg-turbo/libjpeg-turbo/archive/refs/tags/3.2.0.zip
-unzip 3.2.0.zip
-cd libjpeg-turbo-3.2.0
+curl -LO https://github.com/libjpeg-turbo/libjpeg-turbo/archive/refs/tags/3.2.1.zip
+unzip 3.2.1.zip
+cd libjpeg-turbo-3.2.1
 ```
 
 `-DREQUIRE_SIMD=OFF` lets the build succeed without NASM (without x86 SIMD).
@@ -346,16 +373,16 @@ codesign --force --sign - /path/to/PdfiumWrapper/src/libs/osx-x64/libturbojpeg.d
 
 ### Linux x64 (via Docker)
 
-From the repository root, with the source extracted at `_native_build/libjpeg-turbo-3.2.0`:
+From the repository root, with the source extracted at `_native_build/libjpeg-turbo-3.2.1`:
 
 ```bash
 docker run --rm --platform linux/amd64 -v "$(pwd):/src" -w /src ubuntu:22.04 bash -c "
     apt-get update && apt-get install -y build-essential cmake nasm patchelf &&
-    cmake -S _native_build/libjpeg-turbo-3.2.0 -B _native_build/libjpeg-turbo-3.2.0/build-linux-x64 \
+    cmake -S _native_build/libjpeg-turbo-3.2.1 -B _native_build/libjpeg-turbo-3.2.1/build-linux-x64 \
         -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON -DENABLE_STATIC=OFF \
         -DWITH_TURBOJPEG=ON -DREQUIRE_SIMD=OFF &&
-    cmake --build _native_build/libjpeg-turbo-3.2.0/build-linux-x64 --config Release &&
-    cp -f _native_build/libjpeg-turbo-3.2.0/build-linux-x64/libturbojpeg.so src/libs/linux-x64/libturbojpeg.so &&
+    cmake --build _native_build/libjpeg-turbo-3.2.1/build-linux-x64 --config Release &&
+    cp -f _native_build/libjpeg-turbo-3.2.1/build-linux-x64/libturbojpeg.so src/libs/linux-x64/libturbojpeg.so &&
     patchelf --set-soname libturbojpeg.so src/libs/linux-x64/libturbojpeg.so
 "
 ```
@@ -639,7 +666,7 @@ The script will:
    - **PDFium** → `pdfium.dll` (downloaded prebuilt, not compiled)
    - **libtiff 4.7.2** → `tiff.dll`
    - **tiff_shim** → `tiff_shim.dll` (compiled against the libtiff built just before it)
-   - **libjpeg-turbo 3.2.0** → `turbojpeg.dll`
+   - **libjpeg-turbo 3.2.1** → `turbojpeg.dll`
    - **zlib-ng 2.3.3** → `zlibstatic.lib` (static, SIMD-accelerated)
    - **libpng 1.6.59** → `libpng16_static.lib` (static, linked against zlib-ng)
    - **pdfium_png shim** → `pdfium_png.dll` (statically embeds libpng + zlib-ng)

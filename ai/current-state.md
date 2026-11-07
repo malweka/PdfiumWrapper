@@ -2,6 +2,13 @@
 
 ## Current focus
 
+**linux-musl-x64 (Alpine) support and native upgrade, 2.1.0 (2026-11-06, branch `feature/linux-musl-x64`, pushed; plan `ai/plans/plan-linux-musl-x64.md`).** Phases 1-4 are committed: musl natives in `src/libs/linux-musl-x64/` built by `build-natives.sh --target linux-musl-x64` (alpine:3.20), the resolver picks `linux-musl-{arch}` on musl, a fifth runtime package, PR CI runs the suite on Alpine, docs and CHANGELOG, `Version` 2.1.0. PDFium upgraded 8076 -> 8138 and libjpeg-turbo 3.2.0 -> 3.2.1 (owner's decision); win-x64, linux-x64 and linux-musl-x64 are rebuilt. Results: 404/404 on win-x64, linux-x64 (sdk:10.0) and Alpine 3.24 (sdk:10.0-alpine); pool burst on Alpine 10,500 jobs PASS (idle workers 60-69 MB, 8.7 min against 6.9-7.0 on glibc); a fresh app on locally packed 2.1.0 packages runs on bare Alpine images, portable and self-contained.
+
+- **macOS natives rebuilt (2026-11-06, commit `0431c6b`):** `build-natives.sh --target osx-arm64 --clean`, then `--target osx-x64`, on Apple Silicon. Only `libpdfium.dylib` (8138) and `libturbojpeg.dylib` (3.2.1) changed in each RID; libtiff, tiff_shim and pdfium_png came out byte-identical. All ten are single-arch and ad-hoc signed, and link only system libraries. Min macOS is 11.0 (arm64) and 10.15 (x64); upstream PDFium is 13.0, the same as 8076. Suite 404/404 on osx-arm64. osx-x64 has no suite run (no x64 .NET SDK); an x86_64 C smoke test under Rosetta loaded all five dylibs, called `FPDF_InitLibrary`/`FPDF_CreateNewDocument`, `TIFFGetVersion` (4.7.2) and `tjInitCompress`.
+- **Next step:** the PR from `feature/linux-musl-x64` to `main` is open; CI runs the new Alpine job for the first time. Once it is green and the owner agrees: merge, create `release/2.1.0` from `main`, run `release.yml` with `publish_processing` ticked, and date the CHANGELOG entry.
+- **Decided 2026-11-06:** the Alpine job is a required check on `main` (ruleset `main-protection`), so PR #33 (the plan alone) cannot merge and is superseded by this branch; the musl `libpdfium.so` is stripped of its debug info by the build script (17.8 -> 10.1 MB).
+- **Changed files:** `.gitattributes` (new, `*.sh eol=lf`), `src/native/build-natives.sh`, `src/native/build-natives.cmd`, `src/libs/{win-x64,linux-x64,linux-musl-x64}/`, `THIRD-PARTY-NOTICES.txt`, `src/PdfiumWrapper/NativeLibraryResolver.cs`, `src/PdfiumWrapper/PdfiumWrapper.csproj`, `src/PdfiumWrapper.runtime/` (csproj, README), `src/PdfiumWrapper.Processing/PdfiumWrapper.Processing.csproj` (version), `src/PdfiumWrapper.Tests/NativeBoundaryTests.cs`, `.github/workflows/pr-build.yml`, `.github/workflows/release.yml`, `README.md`, `AGENTS.md`, `CHANGELOG.md`, `docs/BUILDING-NATIVE-LIBS.md`, `docs/TROUBLESHOOTING.md`, `docs/HIGH-THROUGHPUT-PROCESSING.md`.
+
 **Harness growth rule fixed (2026-10-08, branch `fix/harness-growth-rule`).** Growth is the end of the run (median of the last three idle readings) against the first half's high, judged with at least six idle readings after warm-up; memory is private bytes on Windows and working set elsewhere. Idle readings every 1,000 jobs (burst) and every 2-minute load period (soak). The cleanup check now matches workers by PID and start time (a 60-minute Windows soak counted a search indexer that reused a worker's PID). Checked locally: win-x64 60-min soak (36,836 jobs; worker held at 41-45 MB private for the last 15,000 jobs), linux-x64 30-min soaks with and without `MALLOC_ARENA_MAX=2` on the container; all pass. The Linux coordinator rises 126 -> 152 MB without the variable and stays at 123-127 MB with it (glibc retention). Results in `ai/plans/plan-pool-qualification.md`.
 
 **Processing qualified (2026-10-08).** PR #29 (harness growth baseline) and PR #30 (Linux worker memory: `LinuxAllocator` sets `MALLOC_ARENA_MAX=2` for Linux workers unless inherited, plus `malloc_trim(0)` after 1 s idle; `MALLOC_MMAP_THRESHOLD_` is a documented opt-in because it cost 9% throughput). Load tests run locally only, Windows natively and Linux in Docker; `qualification.yml` was removed. Final runs: win-x64 burst 10,500 and 30-min soak 36,365 jobs; linux-x64 bursts 10,500 and 30-min soak 38,063 jobs; all correct and clean. Linux idle worker 316-427 MB -> 94-117 MB at the same throughput. Results and commands: `ai/plans/plan-pool-qualification.md`. Research report `ai/tmp/reports/Linux pool worker memory footprint.md` (gitignored, notes in `ai/tmp/research_notes/`). Next: harness growth rule (VmRSS on Linux, trend over the last readings), then release 2.0.1 of everything (core, runtimes, Processing) from `release/2.0.1`, since Processing changed after 2.0.0.
@@ -286,7 +293,7 @@ Key measurements (one machine: i7-13700F, 24 logical processors, win-x64):
 
 ## In progress
 
-- Nothing active.
+- Nothing active. Planned, not started: linux-musl-x64 (Alpine) support, `ai/plans/plan-linux-musl-x64.md` (2026-10-16). Today every Linux native is a glibc build and the resolver maps Alpine to `linux-x64`, so the library cannot run on Alpine images.
 
 Historical:
 
@@ -299,6 +306,8 @@ Historical:
 - Nothing active. Verification is complete; the stride overflow edge case awaits correction. The four original review reproductions are resolved.
 
 ## Next recommended step
+
+- If Alpine support is wanted: start `plan-linux-musl-x64.md` Phase 1 (build the musl natives in an `alpine:3.20` container, commit `src/libs/linux-musl-x64/`), then the resolver and packaging changes. Ships as 2.1.0 (fifth runtime package).
 
 - Pool qualification run, then cut `release/2.0.0`. Optional: run the suite on osx-x64 (x64 .NET SDK under Rosetta, or a macOS Intel CI runner).
 
@@ -355,6 +364,7 @@ Earlier notes:
 
 ## Recently changed files
 
+- musl plan (2026-10-16): new `ai/plans/plan-linux-musl-x64.md`, `ai/current-state.md`.
 - RemoveObject leak fix (2026-10-03, PR #22): `src/PdfiumWrapper/PdfPage.cs`, `src/PdfiumWrapper.Tests/PdfPageEditingTests.cs`, `docs/API-REFERENCE.md`, `ai/current-state.md`.
 
 - Audit low fixes (2026-10-03): `icon.png`, `logos/PdfiumWrapperLogo.svg`, `src/PdfiumWrapper.runtime/PdfiumWrapper.runtime.csproj`; `src/PdfiumWrapper/`: new `NativeText.cs`, `PdfiumException.cs`; `PDFium*.cs`, `LibTiff.cs`, `LibTurboJpeg.cs`, `JpegDecoder.cs`, `PdfDocument.cs`, `PdfPage.cs`, `PdfPageObject.cs`, `PdfFormObject.cs`, `PdfTextObject.cs`, `PdfImageObject.cs`, `PdfPathObject.cs`, `PdfMetadata.cs`, `PdfBookmarks.cs`, `PdfAttachments.cs`, `PdfForm.cs`, `PdfMerger.cs`, `PdfHelpers.cs`, `PixelConverter.cs`, `PooledFileWriter.cs`; `src/PdfiumWrapper.Processing/` (AUD-024: `PdfProcessingPool*.cs`, `PdfWorkerHost.cs`, `Worker.cs`, new `WorkerJobObject.cs`, `PdfJobResult.cs`, csproj); `src/PdfiumWrapper.Tests.Host/WorkerFaults.cs`; `src/PdfiumWrapper.Tests/`: new `NativeBoundaryTests.cs`, `Processing/PoolHygieneTests.cs`, `Docs/encrypted.pdf`; updated load-failure assertions in five test files; `README.md`, `AGENTS.md`, `docs/API-REFERENCE.md`, `docs/BEST-PRACTICES.md`, `docs/EXAMPLES.md`, `docs/HIGH-THROUGHPUT-PROCESSING.md`, `ai/current-state.md`.

@@ -90,7 +90,7 @@ Before ending a session, always update `/ai/current-state.md` with:
 
 PdfiumWrapper is a .NET 10 library wrapping Google's PDFium for PDF manipulation and native libtiff for TIFF export. It targets high-throughput document processing services handling thousands of files.
 
-**Version:** 2.0.1 (the raw `PDFium.*` imports are `internal`; all native work goes through `PdfiumRuntime`)
+**Version:** 2.1.0 (the raw `PDFium.*` imports are `internal`; all native work goes through `PdfiumRuntime`)
 **Target framework:** `net10.0` with `AllowUnsafeBlocks=true`
 **Dependencies:** Native PDFium, libtiff + tiff_shim (TIFF), libjpeg-turbo (JPEG), pdfium_png (PNG; statically links libpng + zlib-ng)
 
@@ -117,7 +117,7 @@ Native binaries (src/libs/{rid}/ — pdfium, libtiff, tiff_shim, libturbojpeg, p
 - `turbojpeg` — libjpeg-turbo for JPEG encoding/decoding
 - `pdfium_png` — C shim wrapping libpng + zlib-ng for PNG encoding/decoding
 
-Resolution order: `libs/{rid}/{file}` -> `runtimes/{rid}/native/{file}` -> system fallback.
+Resolution order: `libs/{rid}/{file}` -> `runtimes/{rid}/native/{file}` -> system fallback. The RID is computed once (`GetRuntimeIdentifier`, internal): on Linux it is `linux-musl-{arch}` when the runtime's RID contains `musl` or `/lib/ld-musl-*.so.1` exists, else `linux-{arch}`; `NativeBoundaryTests.Resolver_ChoosesTheRidWhoseNativesTheBuildCopied` checks that the build copied that RID's natives.
 
 `PdfiumRuntime` owns native initialization: the first gate entry calls `FPDF_InitLibrary` and installs libtiff's error handlers. Any wrapper type can be the first one used in a process. `FPDF_DestroyLibrary` is reachable only through `PdfiumRuntime.Shutdown()`.
 
@@ -309,6 +309,7 @@ bash src/native/build-natives.sh --target host --clean
 bash src/native/build-natives.sh --target osx-arm64 --clean
 bash src/native/build-natives.sh --target osx-x64 --clean
 bash src/native/build-natives.sh --target linux-x64 --clean
+bash src/native/build-natives.sh --target linux-musl-x64 --clean   # Alpine; also runs from Git Bash on Windows
 
 # Native libs must exist in src/libs/{rid}/ — see docs/BUILDING-NATIVE-LIBS.md
 ```
@@ -319,9 +320,9 @@ The `.csproj` auto-detects the platform RID and copies `src/libs/{rid}/` to the 
 
 ### Packaging
 
-- Natives ship in four `PdfiumWrapper.runtime.<rid>` packages (`src/PdfiumWrapper.runtime`, packed once per RID from the committed `src/libs/<rid>/`). The main package depends on all four at exactly its own version: a portable consumer build gets every platform under `runtimes/<rid>/native`, a RID-specific build or publish copies only its own. There is no `runtime.json`.
-- Those references apply only with `PackRuntimeDependencies=true`, which the release workflow (`.github/workflows/release.yml`) sets after packing the runtime packages, and it checks the packed nuspec lists all four. Packing the main project any other way warns that the package has no natives; such a package is for inspection only.
-- `PdfiumWrapper.Processing` depends on exactly the core version it was built with (`[2.0.1]`, `PinCoreDependencyVersion` target), because it uses core internals. Its package readme is `src/PdfiumWrapper.Processing/README.md`; the core package uses the root `README.md`.
+- Natives ship in five `PdfiumWrapper.runtime.<rid>` packages (`win-x64`, `linux-x64`, `linux-musl-x64`, `osx-x64`, `osx-arm64`) (`src/PdfiumWrapper.runtime`, packed once per RID from the committed `src/libs/<rid>/`). The main package depends on all five at exactly its own version: a portable consumer build gets every platform under `runtimes/<rid>/native`, a RID-specific build or publish copies only its own. There is no `runtime.json`.
+- Those references apply only with `PackRuntimeDependencies=true`, which the release workflow (`.github/workflows/release.yml`) sets after packing the runtime packages, and it checks the packed nuspec lists all five. Packing the main project any other way warns that the package has no natives; such a package is for inspection only.
+- `PdfiumWrapper.Processing` depends on exactly the core version it was built with (`[2.1.0]`, `PinCoreDependencyVersion` target), because it uses core internals. Its package readme is `src/PdfiumWrapper.Processing/README.md`; the core package uses the root `README.md`.
 - `icon.png` (256x256, transparent) is rendered from `logos/PdfiumWrapperLogo.svg` with Edge headless (Inkscape drops `feDropShadow`) and packed into the core, Processing and runtime packages. Release notes live in `CHANGELOG.md`.
 
 ## When Making Changes
@@ -333,6 +334,6 @@ The `.csproj` auto-detects the platform RID and copies `src/libs/{rid}/` to the 
 - Update relevant documentation when adding or changing public API
 - Follow existing patterns for disposal, error handling, and P/Invoke signatures
 - Follow the gate rules under "Thread Safety and the Native Gate" for every member that touches PDFium
-- Run the test suite after changes: all tests must pass (358 at present, on win-x64 and linux-x64)
+- Run the test suite after changes: all tests must pass (404 at present, on win-x64, linux-x64 and Alpine linux-musl-x64; PR CI runs the last two)
 - Coordinate system: PDF uses bottom-left origin (see `docs/PDF-EDITING.md`)
 - Standard page sizes in points: US Letter = 612x792, A4 = 595x842

@@ -33,7 +33,8 @@ The native libraries ship in four runtime packages (`PdfiumWrapper.runtime.win-x
    Check that the output contains `runtimes/<rid>/native/` with `pdfium.dll` / `libpdfium.so` / `libpdfium.dylib` for your platform.
    - If they are missing, check that the `PdfiumWrapper.runtime.*` packages were restored (`dotnet list package --include-transitive`).
    - If you copy files into a container or deployment by hand, include the `runtimes` folder.
-   - Publishing for a platform other than the four supported RIDs (for example `linux-arm64` or `linux-musl-x64`) gets no natives.
+   - Publishing for a platform other than the five supported RIDs (for example `linux-arm64`) gets no natives.
+   - On Alpine (musl) with a version before 2.1.0, the only Linux natives are glibc builds. They are in the output but cannot load, so the first native call fails with `DllNotFoundException: Unable to load shared library 'pdfium' or one of its dependencies` even though `runtimes/linux-x64/native/libpdfium.so` exists. Among the attempts the message lists is `Error loading shared library ld-linux-x86-64.so.2: No such file or directory (needed by .../runtimes/linux-x64/native/libpdfium.so)`: the glibc loader, which musl does not have. Upgrade to 2.1.0 or later, which ships `linux-musl-x64` and picks it on musl.
 
 2. **Windows: Visual C++ runtime missing**
 
@@ -41,13 +42,15 @@ The native libraries ship in four runtime packages (`PdfiumWrapper.runtime.win-x
 
 3. **Linux missing dependencies**
 
-   PDFium may require additional libraries:
+   The natives need nothing beyond the C library: PDFium links FreeType in, and on musl libtiff links its own zlib. The .NET images (`runtime`, `runtime-deps`, Debian or Alpine) are enough. On Debian and Ubuntu, libtiff uses the system `libz.so.1`, which every distribution image has.
+
+   PDFium looks for system fonts only to draw text whose font is not embedded in the PDF. A bare container has none, so such text falls back to PDFium's built-in fonts. Install a font package if those PDFs must render with real fonts:
    ```bash
    # Ubuntu/Debian
-   sudo apt-get install libfontconfig1 libfreetype6
-   
+   sudo apt-get install fonts-dejavu-core
+
    # Alpine
-   apk add fontconfig freetype
+   apk add font-dejavu
    ```
 
 ---

@@ -5,7 +5,7 @@
     Pack with: dotnet pack -p:NativeRid=win-x64 (etc.)
     Contains ONLY this platform's native binaries under runtimes/<rid>/native/.
     No managed assembly is produced or packed (IncludeBuildOutput=false).
-    The main PdfiumWrapper package depends on all four at its exact version, so a portable
+    The main PdfiumWrapper package depends on all five at its exact version, so a portable
     build gets every platform under runtimes/<rid>/native and a RID-specific publish only its own.
   -->
   <PropertyGroup>
@@ -19,7 +19,7 @@
 
     <NativeRid Condition="'$(NativeRid)' == ''">win-x64</NativeRid>
     <PackageId>PdfiumWrapper.runtime.$(NativeRid)</PackageId>
-    <Version>2.0.1</Version>
+    <Version>2.1.0</Version>
     <Authors>Emmanuel Hameyie</Authors>
     <Copyright>Copyright © 2025 Emmanuel Hameyie</Copyright>
     <Title>PdfiumWrapper native binaries ($(NativeRid))</Title>
