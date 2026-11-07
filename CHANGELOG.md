@@ -2,7 +2,7 @@
 
 All notable changes to PdfiumWrapper are listed here. Versions follow [Semantic Versioning](https://semver.org/).
 
-## 2.1.0 (unreleased)
+## 2.1.0 (2026-11-06)
 
 - **Alpine and other musl Linux distributions are supported.** A fifth runtime package, `PdfiumWrapper.runtime.linux-musl-x64`, carries musl builds of every native library, and `PdfiumWrapper` depends on it like the other four. On Linux the library now loads `linux-musl-x64` when the process runs on musl and `linux-x64` otherwise, so a portable build works on both, and `dotnet publish -r linux-musl-x64` copies only the musl natives. The natives need no package beyond the .NET Alpine images: libtiff links its own zlib there. Before 2.1.0, an app on Alpine found the glibc natives, which cannot load on musl, and failed at its first native call.
 - **Upgraded native libraries:** PDFium chromium/8138 (from 8076) and libjpeg-turbo 3.2.1 (from 3.2.0), on every platform. libtiff 4.7.2, libpng 1.6.59 and zlib-ng 2.3.3 are unchanged. `THIRD-PARTY-NOTICES.txt` adds the components PDFium 8138 bundles (dragonbox, HarfBuzz, Highway) and musl libc's licence for the musl build.
